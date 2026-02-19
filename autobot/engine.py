@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from .adapters.base import AdapterConfirmationError
+from .adapters.manager import AdapterManager
+from .browser_agent import BrowserController
+
+try:
+    import pyautogui
+except ImportError:  # pragma: no cover - optional dependency
+    pyautogui = None
+
+
+LogFn = Callable[[str], None]
+
+
+@dataclass
+class TaskStep:
+    action: str
+    args: dict[str, Any] = field(default_factory=dict)
+    save_as: str | None = None
+    description: str = ""
+    condition: str | None = None
+    retries: int = 0
+    retry_delay_seconds: float = 1.0
+    continue_on_error: bool = False
+
+
+@dataclass
+class WorkflowPlan:
+    name: str
+    description: str
+    steps: list[TaskStep]
+
+
+@dataclass
+class ExecutionResult:
+    success: bool
+    completed_steps: int
+    total_steps: int
+    state: dict[str, Any]
+
+
+class AutomationEngine:
+    def __init__(self, logger: LogFn | None = None) -> None:
+        self.logger = logger or (lambda _msg: None)
+        self.browser = BrowserController()
+        self.adapters = AdapterManager(browser=self.browser, logger=self.logger)
+        self.state: dict[str, Any] = {}
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        self.logger("Cancellation requested. Stopping at next safe checkpoint.")
+
+    def close(self) -> None:
+        self.browser.close()
+
+    def get_adapter_library(self) -> dict[str, dict[str, dict[str, Any]]]:
+        return self.adapters.list_adapters()
+
+    def run_plan(self, plan: WorkflowPlan) -> ExecutionResult:
+        return self.run_steps(
+            steps=plan.steps,
+            plan_name=plan.name,
+            plan_description=plan.description,
+            close_on_finish=True,
+        )
+
+    def run_steps(
+        self,
+        steps: list[TaskStep],
+        plan_name: str = "dynamic_plan",
+        plan_description: str = "",
+        close_on_finish: bool = False,
+    ) -> ExecutionResult:
+        self._cancel_requested = False
+        self.logger(f"Running workflow: {plan_name}")
+        if plan_description:
+            self.logger(plan_description)
+        total = len(steps)
+        completed = 0
+
+        try:
+            for idx, step in enumerate(steps, start=1):
+                if self._cancel_requested:
+                    self.logger("Execution cancelled by user.")
+                    return ExecutionResult(
+                        success=False,
+                        completed_steps=completed,
+                        total_steps=total,
+                        state=dict(self.state),
+                    )
+
+                if not self._condition_allows(step):
+                    self.logger(f"[{idx}/{total}] Skipped: {step.description or step.action} (condition=false)")
+                    completed += 1
+                    continue
+
+                self.logger(f"[{idx}/{total}] {step.description or step.action}")
+                attempts = max(1, step.retries + 1)
+                value: Any = None
+                last_error: Exception | None = None
+                for attempt in range(1, attempts + 1):
+                    try:
+                        rendered_args = _render_vars(step.args, self.state)
+                        value = self._execute_action(step.action, rendered_args)
+                        if step.save_as:
+                            self.state[step.save_as] = value
+                            self.logger(f"Saved output as '{step.save_as}'.")
+                        last_error = None
+                        break
+                    except Exception as error:  # noqa: BLE001
+                        last_error = error
+                        if attempt < attempts:
+                            self.logger(
+                                f"Step failed (attempt {attempt}/{attempts}) -> retry in {step.retry_delay_seconds}s: {error}"
+                            )
+                            time.sleep(step.retry_delay_seconds)
+                        elif step.continue_on_error:
+                            self.logger(f"Step failed and marked continue_on_error: {error}")
+                            self.state["last_error"] = str(error)
+                            break
+                        else:
+                            raise
+
+                if last_error and not step.continue_on_error:
+                    raise last_error
+
+                completed += 1
+
+            self.logger("Workflow completed successfully.")
+            return ExecutionResult(
+                success=True,
+                completed_steps=completed,
+                total_steps=total,
+                state=dict(self.state),
+            )
+        finally:
+            if close_on_finish:
+                self.close()
+
+    def _execute_action(self, action: str, args: dict[str, Any]) -> Any:
+        if action == "open_url":
+            message = self.browser.goto(str(args["url"]))
+            self.logger(message)
+            return message
+
+        if action == "adapter_list_actions":
+            data = self.adapters.list_adapters()
+            self.logger("Loaded adapter action libraries.")
+            return data
+
+        if action == "adapter_call":
+            adapter_name = str(args.get("adapter", "")).strip()
+            adapter_action = str(args.get("adapter_action", "")).strip()
+            params = args.get("params", {})
+            if not isinstance(params, dict):
+                raise ValueError("adapter_call expects args.params as an object.")
+            confirmed = bool(args.get("confirmed", False))
+            try:
+                result = self.adapters.call(
+                    adapter_name=adapter_name,
+                    action=adapter_action,
+                    params=params,
+                    confirmed=confirmed,
+                )
+            except AdapterConfirmationError as error:
+                self.state["last_error"] = str(error)
+                raise
+            self.logger(f"Adapter call completed: {adapter_name}.{adapter_action}")
+            return result
+
+        if action == "search_google":
+            message = self.browser.search(str(args["query"]))
+            self.logger(message)
+            return message
+
+        if action == "browser_fill":
+            message = self.browser.fill(
+                selector=str(args["selector"]),
+                text=str(args["text"]),
+                timeout_ms=int(args.get("timeout_ms", 10000)),
+            )
+            self.logger(message)
+            return message
+
+        if action == "browser_click":
+            message = self.browser.click(
+                selector=str(args["selector"]),
+                timeout_ms=int(args.get("timeout_ms", 10000)),
+            )
+            self.logger(message)
+            return message
+
+        if action == "browser_press":
+            message = self.browser.press(str(args["key"]))
+            self.logger(message)
+            return message
+
+        if action == "browser_read_text":
+            text = self.browser.read_text(
+                selector=str(args["selector"]),
+                timeout_ms=int(args.get("timeout_ms", 10000)),
+            )
+            self.logger(f"Captured text from {args['selector']}.")
+            return text
+
+        if action == "browser_read_console_errors":
+            errors = self.browser.read_console_errors()
+            self.logger(f"Captured {len(errors)} console-like error entries.")
+            return "\n".join(errors)
+
+        if action == "open_vscode":
+            subprocess.Popen(["code"])
+            self.logger("Opened VS Code.")
+            return "Opened VS Code."
+
+        if action == "open_app":
+            command = str(args["command"])
+            subprocess.Popen(command, shell=True)
+            self.logger(f"Started app command: {command}")
+            return command
+
+        if action == "open_path":
+            target_path = str(args["path"])
+            path_obj = Path(target_path)
+            if not path_obj.exists():
+                raise FileNotFoundError(f"Path does not exist: {target_path}")
+            if hasattr(os, "startfile"):
+                os.startfile(path_obj)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(["xdg-open", target_path])
+            self.logger(f"Opened path: {target_path}")
+            return target_path
+
+        if action == "run_command":
+            command = str(args["command"])
+            timeout = int(args.get("timeout_seconds", 120))
+            result = subprocess.run(command, capture_output=True, text=True, shell=True, timeout=timeout, check=False)
+            output = (result.stdout or result.stderr or "").strip()
+            self.state["last_command_exit_code"] = result.returncode
+            self.state["last_command_output"] = output
+            self.logger(f"Command exit code: {result.returncode}")
+            if output:
+                self.logger(output[:5000])
+            return output
+
+        if action == "wait":
+            seconds = float(args.get("seconds", 1))
+            time.sleep(seconds)
+            self.logger(f"Waited {seconds:.1f}s.")
+            return seconds
+
+        if action == "clipboard_set":
+            text = str(args.get("text", ""))
+            _set_clipboard(text)
+            self.logger("Clipboard updated.")
+            return text
+
+        if action == "clipboard_get":
+            text = _get_clipboard()
+            self.logger("Clipboard captured.")
+            return text
+
+        if action == "desktop_type":
+            _require_pyautogui()
+            text = str(args.get("text", ""))
+            interval = float(args.get("interval", 0.02))
+            pyautogui.write(text, interval=interval)
+            self.logger("Typed text through desktop keyboard automation.")
+            return text
+
+        if action == "desktop_hotkey":
+            _require_pyautogui()
+            keys = args.get("keys", [])
+            if not isinstance(keys, list) or not keys:
+                raise ValueError("desktop_hotkey requires 'keys' list.")
+            pyautogui.hotkey(*[str(key) for key in keys])
+            self.logger(f"Sent hotkey: {' + '.join([str(key) for key in keys])}")
+            return keys
+
+        if action == "desktop_click":
+            _require_pyautogui()
+            x = int(args["x"])
+            y = int(args["y"])
+            button = str(args.get("button", "left"))
+            pyautogui.click(x=x, y=y, button=button)
+            self.logger(f"Clicked desktop at ({x}, {y}) using {button} button.")
+            return {"x": x, "y": y, "button": button}
+
+        if action == "desktop_move":
+            _require_pyautogui()
+            x = int(args["x"])
+            y = int(args["y"])
+            duration = float(args.get("duration", 0.2))
+            pyautogui.moveTo(x, y, duration=duration)
+            self.logger(f"Moved cursor to ({x}, {y}).")
+            return {"x": x, "y": y}
+
+        if action == "desktop_switch_window":
+            _require_pyautogui()
+            pyautogui.hotkey("alt", "tab")
+            self.logger("Switched to next window (Alt+Tab).")
+            return "alt+tab"
+
+        if action == "desktop_press":
+            _require_pyautogui()
+            key = str(args.get("key", "enter"))
+            pyautogui.press(key)
+            self.logger(f"Pressed desktop key: {key}")
+            return key
+
+        if action == "log":
+            message = str(args.get("message", ""))
+            self.logger(message)
+            return message
+
+        raise ValueError(f"Unknown action '{action}'")
+
+    def _condition_allows(self, step: TaskStep) -> bool:
+        if not step.condition:
+            return True
+        expression = _render_vars(step.condition, self.state)
+        return _evaluate_condition(str(expression), self.state)
+
+
+def _render_vars(value: Any, state: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        rendered = value
+        for key, state_value in state.items():
+            rendered = rendered.replace("{" + key + "}", str(state_value))
+        return rendered
+    if isinstance(value, list):
+        return [_render_vars(item, state) for item in value]
+    if isinstance(value, dict):
+        return {k: _render_vars(v, state) for k, v in value.items()}
+    return value
+
+
+def _evaluate_condition(expression: str, state: dict[str, Any]) -> bool:
+    text = expression.strip()
+    if not text:
+        return True
+    if text.lower() in {"true", "1", "yes"}:
+        return True
+    if text.lower() in {"false", "0", "no"}:
+        return False
+
+    safe_globals: dict[str, Any] = {"__builtins__": {}}
+    safe_locals = {"state": state}
+    try:
+        result = eval(text, safe_globals, safe_locals)  # noqa: S307
+    except Exception:
+        return False
+    return bool(result)
+
+
+def _set_clipboard(text: str) -> None:
+    command = "$v = @'\n" + text + "\n'@; Set-Clipboard -Value $v"
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _get_clipboard() -> str:
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return (result.stdout or "").strip()
+
+
+def _require_pyautogui() -> None:
+    if pyautogui is None:
+        raise RuntimeError("Desktop actions require pyautogui. Install it with: pip install pyautogui")
