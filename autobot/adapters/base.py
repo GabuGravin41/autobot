@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..browser_agent import BrowserController
+from ..focus_manager import FocusManager
+try:
+    import pyautogui
+except ImportError:  # pragma: no cover - optional dependency
+    pyautogui = None
 
 
 @dataclass(frozen=True)
@@ -27,8 +32,10 @@ class BaseAdapter:
     def __init__(self, browser: BrowserController, logger: Callable[[str], None] | None = None) -> None:
         self.browser = browser
         self.logger = logger or (lambda _msg: None)
+        self.focus = FocusManager(logger=self.logger)
         self.state: dict[str, Any] = {}
         self._selectors = self._load_selectors()
+        self._human_nav_maps = self._load_human_nav_maps()
         self._action_metrics: dict[str, dict[str, Any]] = {}
         self._selector_metrics: dict[str, dict[str, int]] = {}
 
@@ -70,6 +77,9 @@ class BaseAdapter:
             return {"status": "not_web_adapter"}
 
         self.browser.start()
+        if self.browser.mode == "human_profile":
+            self.state["session_health"] = "human_mode"
+            return {"status": "human_mode", "url": ""}
         page = self.browser.page
         current_url = page.url
         looks_like_login = any(fragment in current_url.lower() for fragment in self.login_url_fragments)
@@ -88,12 +98,17 @@ class BaseAdapter:
 
     def _ensure_url(self, url: str) -> None:
         self.browser.start()
+        if self.browser.mode == "human_profile":
+            self.browser.goto(url)
+            return
         current = self.browser.page.url
         if not current.startswith(url):
             self.browser.goto(url)
 
     def _click_if_present(self, selectors: list[str], timeout_ms: int = 1500) -> bool:
         self.browser.start()
+        if self.browser.mode == "human_profile":
+            return False
         for selector in selectors:
             try:
                 locator = self.browser.page.locator(selector).first
@@ -143,6 +158,8 @@ class BaseAdapter:
         if not selectors:
             return False
         self.browser.start()
+        if self.browser.mode == "human_profile":
+            return False
         for selector in selectors:
             try:
                 if self.browser.page.locator(selector).first.is_visible(timeout=timeout_ms):
@@ -205,3 +222,95 @@ class BaseAdapter:
             snapshot["url"] = ""
             snapshot["html_snippet"] = ""
         self.state["last_failure_snapshot"] = snapshot
+
+    def _human_mode(self) -> bool:
+        self.browser.start()
+        return self.browser.mode == "human_profile"
+
+    def _human_type(self, text: str, interval: float = 0.01) -> None:
+        if pyautogui is None:
+            raise RuntimeError("pyautogui is required for human profile mode keyboard automation.")
+        self._ensure_human_target_focus()
+        pyautogui.write(text, interval=interval)
+
+    def _human_press(self, key: str) -> None:
+        if pyautogui is None:
+            raise RuntimeError("pyautogui is required for human profile mode keyboard automation.")
+        self._ensure_human_target_focus()
+        pyautogui.press(key)
+
+    def _human_hotkey(self, *keys: str) -> None:
+        if pyautogui is None:
+            raise RuntimeError("pyautogui is required for human profile mode keyboard automation.")
+        self._ensure_human_target_focus()
+        pyautogui.hotkey(*keys)
+
+    def _ensure_human_target_focus(self, expected_keywords: tuple[str, ...] = ("chrome", "whatsapp", "instagram", "overleaf")) -> None:
+        if pyautogui is None:
+            return
+        result = self.focus.ensure_keywords_focused(expected_keywords)
+        title = result.title
+        if not result.ok:
+            raise RuntimeError(result.reason or "Unable to focus target window.")
+        lowered = title.lower()
+        if "autobot" in lowered or "cursor" in lowered or "command wizard" in lowered:
+            raise RuntimeError(
+                "Human-mode typing blocked because automation UI/editor appears focused. "
+                "Click the target Chrome window first, then retry."
+            )
+        if expected_keywords and title:
+            if not any(keyword in lowered for keyword in expected_keywords):
+                raise RuntimeError(
+                    f"Human-mode typing blocked; active window is '{title}'. Focus target Chrome tab and retry."
+                )
+
+    def human_nav_steps(self, key: str) -> list[dict[str, Any]]:
+        value = self._human_nav_maps.get(key, [])
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def run_human_nav(self, key: str, variables: dict[str, str] | None = None) -> None:
+        variables = variables or {}
+        steps = self.human_nav_steps(key)
+        if not steps:
+            raise RuntimeError(f"No human navigation map found for '{self.name}:{key}'.")
+        for step in steps:
+            action = str(step.get("action", "")).strip()
+            value = str(step.get("value", ""))
+            for var_key, var_value in variables.items():
+                value = value.replace("{" + var_key + "}", var_value)
+            delay = float(step.get("delay_s", 0.05))
+            if action == "hotkey":
+                keys = [item.strip() for item in value.split("+") if item.strip()]
+                self._human_hotkey(*keys)
+            elif action == "press":
+                self._human_press(value)
+            elif action == "type":
+                self._human_type(value)
+            elif action == "sleep":
+                time.sleep(float(value or "0.2"))
+            else:
+                raise RuntimeError(f"Unsupported human nav action: {action}")
+            if delay > 0:
+                time.sleep(delay)
+
+    def _load_human_nav_maps(self) -> dict[str, list[dict[str, Any]]]:
+        nav_file = Path(__file__).resolve().parent / "human_nav" / f"{self.name}.json"
+        if not nav_file.exists():
+            return {}
+        try:
+            payload = json.loads(nav_file.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        result: dict[str, list[dict[str, Any]]] = {}
+        for key, value in payload.items():
+            if isinstance(value, list):
+                items = []
+                for item in value:
+                    if isinstance(item, dict):
+                        items.append(item)
+                result[str(key)] = items
+        return result

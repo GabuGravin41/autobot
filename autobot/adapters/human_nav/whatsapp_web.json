@@ -1,0 +1,13 @@
+{
+  "open_chat_by_name": [
+    { "action": "hotkey", "value": "ctrl+alt+/" },
+    { "action": "type", "value": "{chat}" },
+    { "action": "press", "value": "enter" }
+  ],
+  "type_message": [
+    { "action": "type", "value": "{text}" }
+  ],
+  "send_message": [
+    { "action": "press", "value": "enter" }
+  ]
+}

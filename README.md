@@ -4,7 +4,7 @@ Autobot is a local desktop automation controller designed to execute your repeti
 
 ## Current capabilities
 
-- Uses your real Chrome profile (cookies/session) via persistent Playwright context.
+- Uses a persistent Chrome automation profile directory (bootstrapped from your Chrome profile on first run when possible).
 - Includes autonomous multi-loop mode:
   - diagnose -> plan -> execute -> retest
   - loop limits, per-loop step caps, and cancellation
@@ -14,6 +14,8 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - `search <query>`
   - `open <url|target>`
   - `run <os command>`
+  - `browser mode`
+  - `run benchmarks`
   - `open path <local path>`
   - `switch window`
   - `type <text>`
@@ -36,6 +38,7 @@ Autobot is a local desktop automation controller designed to execute your repeti
 - Adapter actions are explicit and per-site, with confirmation gates for sensitive operations such as message send and PDF download.
 - UI includes an adapter panel with action docs and a required checkbox for sensitive actions.
 - Adapter reliability layer includes session health checks, selector fallback configs, and action/selector telemetry.
+- Human-mode adapter navigation maps are stored in `autobot/adapters/human_nav/*.json`.
 - Sensitive control now supports two-step flow in strict mode:
   - prepare action -> receive token -> confirm token to execute
 - Supports browser actions in engine:
@@ -64,6 +67,10 @@ python -m autobot.main
 - `AUTOBOT_CHROME_USER_DATA_DIR` (optional)
 - `AUTOBOT_CHROME_PROFILE_DIR` (optional, default: `Default`)
 - `AUTOBOT_CHROME_EXECUTABLE` (optional)
+- `AUTOBOT_CHROME_SOURCE_USER_DATA_DIR` (optional, default: local Chrome user-data root for bootstrap)
+- `AUTOBOT_CHROME_SOURCE_PROFILE_DIR` (optional, default: same as `AUTOBOT_CHROME_PROFILE_DIR`)
+- `AUTOBOT_CHROME_LAUNCH_TIMEOUT_MS` (optional, default: `15000`)
+- `AUTOBOT_BROWSER_MODE` (optional: `auto`, `human_profile`, `devtools`; default: `auto`)
 - `GOOGLE_API_KEY` or `GEMINI_API_KEY` (optional, enables LLM planner in autonomous mode)
 - `AUTOBOT_LLM_PROVIDER` (optional: `gemini` or `openai_compat`)
 - `OPENAI_API_KEY` or `XAI_API_KEY` (for `openai_compat`, including Grok-compatible endpoints)
@@ -72,7 +79,11 @@ python -m autobot.main
 
 ## Notes
 
-- Close existing Chrome windows before starting Autobot if you hit profile-lock errors.
+- If launch fails on default Chrome profile restrictions, let Autobot use a dedicated automation profile directory.
+- First launch may require one-time sign-in in the automation profile if cookies cannot be copied.
+- In `human_profile` mode, URL/search and keyboard flows use your real Chrome session; some DOM-selector actions are limited.
+- Human-mode safety guard blocks typing if Autobot/Cursor window appears focused, to prevent runaway self-trigger loops.
+- AI Planner Chat panel allows prompt -> plan preview -> execute workflow (uses configured provider or safe fallback).
 - Desktop actions are intentionally explicit and coordinate-based to keep behavior predictable.
 - This is a foundation for larger autonomous loops; extend workflows in `autobot/workflows.py`.
 - Autonomous mode blocks obvious bulk-messaging intents by default. Use consent-based, explicit tasks only.

@@ -1,0 +1,14 @@
+{
+  "open_chat_by_username": [
+    { "action": "type", "value": "{username}" },
+    { "action": "press", "value": "enter" },
+    { "action": "press", "value": "tab" },
+    { "action": "press", "value": "enter" }
+  ],
+  "type_message": [
+    { "action": "type", "value": "{text}" }
+  ],
+  "send_message": [
+    { "action": "press", "value": "enter" }
+  ]
+}

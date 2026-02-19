@@ -19,17 +19,26 @@ class InstagramWebAdapter(BaseAdapter):
 
     def do_open_home(self, _params: dict[str, Any]) -> str:
         self._ensure_url("https://www.instagram.com")
+        if self._human_mode():
+            return "Opened Instagram in human profile mode."
         return "Opened Instagram."
 
     def do_open_inbox(self, _params: dict[str, Any]) -> str:
         self.do_open_home({})
         self.browser.goto("https://www.instagram.com/direct/inbox/")
+        if self._human_mode():
+            return "Opened Instagram inbox in human profile mode."
         return "Opened Instagram inbox."
 
     def do_open_chat(self, params: dict[str, Any]) -> str:
         username = str(params.get("username", "")).strip()
         if not username:
             raise ValueError("Missing required param: username")
+        if self._human_mode():
+            self.browser.goto("https://www.instagram.com/direct/new/")
+            self.run_human_nav("open_chat_by_username", {"username": username})
+            self.state["active_user"] = username
+            return f"Attempted Instagram chat open in human mode: {username}"
         self.do_open_inbox({})
         self.browser.goto(f"https://www.instagram.com/{username}/")
         try:
@@ -46,10 +55,16 @@ class InstagramWebAdapter(BaseAdapter):
         text = str(params.get("text", "")).strip()
         if not text:
             raise ValueError("Missing required param: text")
+        if self._human_mode():
+            self.run_human_nav("type_message", {"text": text})
+            return "Instagram message typed in human profile mode."
         self.fill_any("message_input", text, timeout_ms=10000)
         return "Instagram message typed."
 
     def do_send_typed_message(self, _params: dict[str, Any]) -> str:
+        if self._human_mode():
+            self.run_human_nav("send_message")
+            return "Instagram message sent in human profile mode."
         clicked = self._click_if_present(self.selector_candidates("send_button"), 4000)
         if not clicked:
             self.browser.press("Enter")

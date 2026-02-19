@@ -21,6 +21,13 @@ class BrainDecision:
     steps: list[TaskStep]
 
 
+@dataclass
+class PlanDraft:
+    title: str
+    summary: str
+    steps: list[TaskStep]
+
+
 class LLMBrain:
     def __init__(self, logger=None) -> None:
         self.logger = logger or (lambda _msg: None)
@@ -47,6 +54,39 @@ class LLMBrain:
     ) -> BrainDecision:
         if not self.enabled:
             return self._fallback_decision(goal, state)
+
+    def generate_plan_draft(self, user_prompt: str, allowed_actions: list[str], max_steps: int = 10) -> PlanDraft:
+        if not self.enabled:
+            return PlanDraft(
+                title="Fallback plan",
+                summary="LLM not configured; using simple manual fallback.",
+                steps=[
+                    TaskStep(action="log", args={"message": f"Task received: {user_prompt}"}, description="Log user prompt"),
+                    TaskStep(
+                        action="log",
+                        args={"message": "Configure GROK/Gemini API key to generate autonomous tool plans."},
+                        description="Prompt for LLM setup",
+                    ),
+                ],
+            )
+
+        prompt = self._build_draft_prompt(user_prompt=user_prompt, allowed_actions=allowed_actions, max_steps=max_steps)
+        try:
+            if self.provider == "gemini":
+                if self._model is None:
+                    raise RuntimeError("Gemini model not initialized.")
+                response = self._model.generate_content(prompt)
+                text = (response.text or "").strip()
+            else:
+                text = self._call_openai_compatible(prompt)
+            return _parse_plan_draft(text=text, allowed_actions=set(allowed_actions), max_steps=max_steps)
+        except Exception as error:  # noqa: BLE001
+            self.logger(f"Plan draft generation failed: {error}")
+            return PlanDraft(
+                title="Fallback plan",
+                summary=f"Plan generation failed: {error}",
+                steps=[TaskStep(action="log", args={"message": f"Plan generation failed: {error}"}, description="Log planner error")],
+            )
 
         prompt = self._build_prompt(goal=goal, state=state, allowed_actions=allowed_actions, max_steps=max_steps)
         try:
@@ -124,6 +164,35 @@ class LLMBrain:
             "- Never use destructive commands.\n"
         )
 
+    def _build_draft_prompt(self, user_prompt: str, allowed_actions: list[str], max_steps: int) -> str:
+        schema = {
+            "title": "short plan title",
+            "summary": "one paragraph summary",
+            "steps": [
+                {
+                    "action": "one of allowed actions",
+                    "args": "object with action arguments",
+                    "description": "step description",
+                    "save_as": "optional",
+                    "retries": "optional int",
+                    "continue_on_error": "optional bool",
+                }
+            ],
+        }
+        return (
+            "You are an automation planner for a local autonomous computer controller.\n"
+            "Return ONLY strict JSON.\n"
+            f"User prompt: {user_prompt}\n"
+            f"Allowed actions: {allowed_actions}\n"
+            f"Max steps: {max_steps}\n"
+            f"Output schema: {json.dumps(schema)}\n"
+            "Rules:\n"
+            "- Produce safe, high-level action steps.\n"
+            "- Use explicit action arguments.\n"
+            "- Keep steps deterministic and practical.\n"
+            "- Avoid destructive actions.\n"
+        )
+
     def _call_openai_compatible(self, prompt: str) -> str:
         if not self.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY/XAI_API_KEY is missing.")
@@ -188,6 +257,36 @@ def _parse_decision(text: str, allowed_actions: set[str], max_steps: int) -> Bra
             )
 
     return BrainDecision(done=done, reason=reason, steps=steps)
+
+
+def _parse_plan_draft(text: str, allowed_actions: set[str], max_steps: int) -> PlanDraft:
+    payload = _extract_json(text)
+    data = json.loads(payload)
+    title = str(data.get("title", "AI Plan")).strip() or "AI Plan"
+    summary = str(data.get("summary", "")).strip() or "No summary provided."
+    raw_steps = data.get("steps", [])
+    steps: list[TaskStep] = []
+    if isinstance(raw_steps, list):
+        for item in raw_steps[:max_steps]:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("action", "")).strip()
+            if not action or action not in allowed_actions:
+                continue
+            args = item.get("args", {})
+            if not isinstance(args, dict):
+                args = {}
+            steps.append(
+                TaskStep(
+                    action=action,
+                    args=args,
+                    description=str(item.get("description", "")).strip(),
+                    save_as=_none_if_empty(item.get("save_as")),
+                    retries=int(item.get("retries", 0)),
+                    continue_on_error=bool(item.get("continue_on_error", False)),
+                )
+            )
+    return PlanDraft(title=title, summary=summary, steps=steps)
 
 
 def _extract_json(text: str) -> str:

@@ -22,11 +22,25 @@ def build_plan_from_text(task: str) -> WorkflowPlan:
     if lower.startswith("open "):
         return open_target_workflow(text[5:].strip())
 
+    if lower == "run benchmarks":
+        return WorkflowPlan(
+            name="benchmark_run",
+            description="Run internal benchmark suite.",
+            steps=[TaskStep(action="benchmark_run", save_as="benchmark_results", description="Execute benchmark suite")],
+        )
+
     if lower.startswith("run "):
         return WorkflowPlan(
             name="run_command",
             description="Run an OS command.",
             steps=[TaskStep(action="run_command", args={"command": text[4:]}, description=f"Run command: {text[4:]}")],
+        )
+
+    if lower == "browser mode":
+        return WorkflowPlan(
+            name="browser_mode_status",
+            description="Show active browser mode status.",
+            steps=[TaskStep(action="browser_mode_status", save_as="browser_mode_status", description="Load browser mode status")],
         )
 
     if lower == "list adapters":

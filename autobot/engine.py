@@ -49,6 +49,37 @@ class ExecutionResult:
     state: dict[str, Any]
 
 
+class ActionLimiter:
+    def __init__(self, logger: LogFn, max_per_minute: int = 45, min_interval_s: float = 0.08) -> None:
+        self.logger = logger
+        self.max_per_minute = max_per_minute
+        self.min_interval_s = min_interval_s
+        self._recent: list[float] = []
+        self._last_action_ts = 0.0
+
+    def before_action(self, action_name: str) -> None:
+        now = time.time()
+        if self._last_action_ts > 0:
+            since_last = now - self._last_action_ts
+            if since_last < self.min_interval_s:
+                delay = self.min_interval_s - since_last
+                time.sleep(delay)
+                now = time.time()
+
+        one_minute_ago = now - 60.0
+        self._recent = [item for item in self._recent if item >= one_minute_ago]
+        if len(self._recent) >= self.max_per_minute:
+            delay = max(0.2, self._recent[0] + 60.0 - now)
+            self.logger(f"Rate limiter active before '{action_name}', sleeping {delay:.2f}s.")
+            time.sleep(delay)
+            now = time.time()
+            one_minute_ago = now - 60.0
+            self._recent = [item for item in self._recent if item >= one_minute_ago]
+
+        self._recent.append(now)
+        self._last_action_ts = now
+
+
 class AutomationEngine:
     def __init__(self, logger: LogFn | None = None) -> None:
         self.logger = logger or (lambda _msg: None)
@@ -56,6 +87,7 @@ class AutomationEngine:
         self.adapters = AdapterManager(browser=self.browser, logger=self.logger)
         self.state: dict[str, Any] = {}
         self._cancel_requested = False
+        self._limiter = ActionLimiter(logger=self.logger)
 
     def cancel(self) -> None:
         self._cancel_requested = True
@@ -149,6 +181,7 @@ class AutomationEngine:
                 for attempt in range(1, attempts + 1):
                     try:
                         rendered_args = _render_vars(step.args, self.state)
+                        self._limiter.before_action(step.action)
                         value = self._execute_action(step.action, rendered_args)
                         step_log["attempts_used"] = attempt
                         if step.save_as:
@@ -231,6 +264,18 @@ class AutomationEngine:
             message = self.browser.goto(str(args["url"]))
             self.logger(message)
             return message
+
+        if action == "browser_mode_status":
+            data = self.browser.mode_status()
+            self.logger(f"Browser mode status: active={data.get('active_mode')} configured={data.get('configured_mode')}")
+            return data
+
+        if action == "benchmark_run":
+            from .benchmark import run_benchmarks
+
+            data = run_benchmarks(logger=self.logger)
+            self.logger(f"Benchmark suite completed: {len(data)} cases.")
+            return data
 
         if action == "adapter_list_actions":
             data = self.adapters.list_adapters()

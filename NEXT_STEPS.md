@@ -33,16 +33,16 @@ This is the prioritized build queue to continue polishing Autobot while you are 
 ## Phase 3 - Deep App Capabilities
 
 1. WhatsApp Web:
-   - contact search quality improvements
+   - contact search quality improvements [partial: human-nav map + phone-route open]
    - media/file send workflow
    - unread message digest extraction
 2. Instagram:
-   - robust DM thread open
+   - robust DM thread open [partial: human-nav map]
    - read recent thread context
    - post/comment navigation primitives
 3. Overleaf:
    - project create
-   - section-level replace in editor
+   - section-level replace in editor [partial: human-nav map]
    - compile status parsing and error extraction
 4. VS Code desktop routines:
    - deterministic file edits from adapter actions
@@ -72,7 +72,7 @@ This is the prioritized build queue to continue polishing Autobot while you are 
 
 ## Testing Strategy
 
-1. Add smoke tests for planner and adapter registry.
+1. Add smoke tests for planner and adapter registry. [implemented]
 2. Add adapter integration tests with mocked browser pages.
 3. Add dry-run mode for all adapter actions.
 4. Add end-to-end script for:

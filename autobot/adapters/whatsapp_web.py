@@ -20,10 +20,24 @@ class WhatsAppWebAdapter(BaseAdapter):
 
     def do_open_home(self, _params: dict[str, Any]) -> str:
         self._ensure_url("https://web.whatsapp.com")
+        if self._human_mode():
+            return "Opened WhatsApp Web in human profile mode."
         return "Opened WhatsApp Web."
 
     def do_open_chat(self, params: dict[str, Any]) -> str:
         chat = str(params.get("chat", "")).strip()
+        phone = str(params.get("phone", "")).strip()
+        if not chat and not phone:
+            raise ValueError("Missing required param: chat or phone")
+        if self._human_mode():
+            if phone:
+                self.browser.goto(f"https://web.whatsapp.com/send?phone={phone}")
+                self.state["active_chat"] = phone
+                return f"Opened WhatsApp chat by phone in human mode: {phone}"
+            self.do_open_home({})
+            self.run_human_nav("open_chat_by_name", {"chat": chat})
+            self.state["active_chat"] = chat
+            return f"Attempted chat open in human mode: {chat}"
         if not chat:
             raise ValueError("Missing required param: chat")
         self.do_open_home({})
@@ -36,10 +50,16 @@ class WhatsAppWebAdapter(BaseAdapter):
         text = str(params.get("text", "")).strip()
         if not text:
             raise ValueError("Missing required param: text")
+        if self._human_mode():
+            self.run_human_nav("type_message", {"text": text})
+            return "Message typed in human profile mode."
         self.fill_any("message_input", text, timeout_ms=15000)
         return "Message typed."
 
     def do_send_typed_message(self, _params: dict[str, Any]) -> str:
+        if self._human_mode():
+            self.run_human_nav("send_message")
+            return "Typed message sent in human profile mode."
         self.browser.press("Enter")
         return "Typed message sent."
 
@@ -54,12 +74,16 @@ class WhatsAppWebAdapter(BaseAdapter):
         return f"Message sent to chat: {chat}"
 
     def do_read_recent_messages(self, params: dict[str, Any]) -> list[str]:
+        if self._human_mode():
+            raise RuntimeError("Reading DOM messages is unavailable in human profile mode.")
         limit = int(params.get("limit", 5))
         self.browser.start()
         nodes = self.browser.page.locator(self.selector("visible_message_text")).all_inner_texts()
         return [item.strip() for item in nodes if item.strip()][-limit:]
 
     def do_list_visible_chats(self, params: dict[str, Any]) -> list[str]:
+        if self._human_mode():
+            raise RuntimeError("Listing visible chats is unavailable in human profile mode.")
         limit = int(params.get("limit", 20))
         self.browser.start()
         names = self.browser.page.locator(self.selector("visible_chat_name")).all_inner_texts()
