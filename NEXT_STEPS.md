@@ -4,25 +4,25 @@ This is the prioritized build queue to continue polishing Autobot while you are 
 
 ## Phase 1 - Reliability Hardening (today)
 
-1. Add adapter telemetry:
+1. Add adapter telemetry: [implemented]
    - action duration
    - selector success/failure rates
    - failure snapshots (URL + HTML snippet + optional screenshot path)
-2. Add resilient selector strategy:
+2. Add resilient selector strategy: [implemented]
    - primary selectors + fallback selectors
    - per-site selector config files
-3. Add session health checks:
+3. Add session health checks: [implemented]
    - detect login-expired pages
    - auto-trigger `attempt_google_continue_login`
-4. Add structured run history:
+4. Add structured run history: [implemented]
    - write JSON logs to `runs/<timestamp>.json`
    - include step inputs, outputs, and errors
 
 ## Phase 2 - Safe Action Control
 
-1. Add two-step confirmation for risky actions:
+1. Add two-step confirmation for risky actions: [implemented]
    - `prepare_send` -> preview -> `confirm_send`
-2. Add policy profiles:
+2. Add policy profiles: [implemented]
    - `strict`, `balanced`, `trusted`
 3. Add denylist rules:
    - block bulk messaging patterns

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -86,11 +88,27 @@ class AutomationEngine:
             self.logger(plan_description)
         total = len(steps)
         completed = 0
+        run_started_at = datetime.now(timezone.utc)
+        step_logs: list[dict[str, Any]] = []
+        run_success = False
+        history_written = False
 
         try:
             for idx, step in enumerate(steps, start=1):
                 if self._cancel_requested:
                     self.logger("Execution cancelled by user.")
+                    run_path = self._write_run_history(
+                        plan_name=plan_name,
+                        plan_description=plan_description,
+                        started_at=run_started_at,
+                        finished_at=datetime.now(timezone.utc),
+                        success=False,
+                        completed_steps=completed,
+                        total_steps=total,
+                        step_logs=step_logs,
+                    )
+                    self.state["last_run_history_path"] = run_path
+                    history_written = True
                     return ExecutionResult(
                         success=False,
                         completed_steps=completed,
@@ -100,6 +118,15 @@ class AutomationEngine:
 
                 if not self._condition_allows(step):
                     self.logger(f"[{idx}/{total}] Skipped: {step.description or step.action} (condition=false)")
+                    step_logs.append(
+                        {
+                            "index": idx,
+                            "action": step.action,
+                            "description": step.description,
+                            "status": "skipped",
+                            "condition": step.condition,
+                        }
+                    )
                     completed += 1
                     continue
 
@@ -107,16 +134,30 @@ class AutomationEngine:
                 attempts = max(1, step.retries + 1)
                 value: Any = None
                 last_error: Exception | None = None
+                step_started_at = datetime.now(timezone.utc)
+                step_log: dict[str, Any] = {
+                    "index": idx,
+                    "action": step.action,
+                    "description": step.description,
+                    "condition": step.condition,
+                    "attempts_allowed": attempts,
+                    "attempts_used": 0,
+                    "status": "running",
+                    "args": _json_safe(_render_vars(step.args, self.state)),
+                    "started_at": step_started_at.isoformat(),
+                }
                 for attempt in range(1, attempts + 1):
                     try:
                         rendered_args = _render_vars(step.args, self.state)
                         value = self._execute_action(step.action, rendered_args)
+                        step_log["attempts_used"] = attempt
                         if step.save_as:
                             self.state[step.save_as] = value
                             self.logger(f"Saved output as '{step.save_as}'.")
                         last_error = None
                         break
                     except Exception as error:  # noqa: BLE001
+                        step_log["attempts_used"] = attempt
                         last_error = error
                         if attempt < attempts:
                             self.logger(
@@ -126,23 +167,62 @@ class AutomationEngine:
                         elif step.continue_on_error:
                             self.logger(f"Step failed and marked continue_on_error: {error}")
                             self.state["last_error"] = str(error)
+                            step_log["status"] = "failed_continue"
+                            step_log["error"] = str(error)
                             break
                         else:
                             raise
 
                 if last_error and not step.continue_on_error:
+                    step_log["status"] = "failed"
+                    step_log["error"] = str(last_error)
+                    step_log["finished_at"] = datetime.now(timezone.utc).isoformat()
+                    step_logs.append(step_log)
                     raise last_error
 
+                if "status" not in step_log or step_log["status"] == "running":
+                    step_log["status"] = "ok"
+                step_log["result"] = _json_safe(value)
+                step_log["finished_at"] = datetime.now(timezone.utc).isoformat()
+                step_logs.append(step_log)
                 completed += 1
 
             self.logger("Workflow completed successfully.")
+            run_success = True
+            run_path = self._write_run_history(
+                plan_name=plan_name,
+                plan_description=plan_description,
+                started_at=run_started_at,
+                finished_at=datetime.now(timezone.utc),
+                success=True,
+                completed_steps=completed,
+                total_steps=total,
+                step_logs=step_logs,
+            )
+            self.state["last_run_history_path"] = run_path
+            history_written = True
             return ExecutionResult(
                 success=True,
                 completed_steps=completed,
                 total_steps=total,
                 state=dict(self.state),
             )
+        except Exception as error:
+            self.state["last_error"] = str(error)
+            raise
         finally:
+            if not history_written:
+                run_path = self._write_run_history(
+                    plan_name=plan_name,
+                    plan_description=plan_description,
+                    started_at=run_started_at,
+                    finished_at=datetime.now(timezone.utc),
+                    success=run_success,
+                    completed_steps=completed,
+                    total_steps=total,
+                    step_logs=step_logs,
+                )
+                self.state["last_run_history_path"] = run_path
             if close_on_finish:
                 self.close()
 
@@ -155,6 +235,37 @@ class AutomationEngine:
         if action == "adapter_list_actions":
             data = self.adapters.list_adapters()
             self.logger("Loaded adapter action libraries.")
+            return data
+
+        if action == "adapter_set_policy":
+            profile = str(args.get("profile", "balanced")).strip()
+            value = self.adapters.set_policy(profile)
+            self.state["adapter_policy_profile"] = value
+            self.logger(f"Adapter policy set to: {value}")
+            return value
+
+        if action == "adapter_prepare_sensitive":
+            adapter_name = str(args.get("adapter", "")).strip()
+            adapter_action = str(args.get("adapter_action", "")).strip()
+            params = args.get("params", {})
+            if not isinstance(params, dict):
+                raise ValueError("adapter_prepare_sensitive expects args.params as an object.")
+            data = self.adapters.prepare_sensitive_action(adapter_name=adapter_name, action=adapter_action, params=params)
+            self.state["last_sensitive_prepare"] = data
+            self.logger(f"Prepared sensitive action token for: {adapter_name}.{adapter_action}")
+            return data
+
+        if action == "adapter_confirm_sensitive":
+            token = str(args.get("token", "")).strip()
+            if not token:
+                raise ValueError("adapter_confirm_sensitive requires token.")
+            result = self.adapters.confirm_sensitive_action(token)
+            self.logger("Confirmed and executed sensitive adapter action.")
+            return result
+
+        if action == "adapter_get_telemetry":
+            data = self.adapters.telemetry()
+            self.logger("Loaded adapter telemetry.")
             return data
 
         if action == "adapter_call":
@@ -330,6 +441,37 @@ class AutomationEngine:
         expression = _render_vars(step.condition, self.state)
         return _evaluate_condition(str(expression), self.state)
 
+    def _write_run_history(
+        self,
+        plan_name: str,
+        plan_description: str,
+        started_at: datetime,
+        finished_at: datetime,
+        success: bool,
+        completed_steps: int,
+        total_steps: int,
+        step_logs: list[dict[str, Any]],
+    ) -> str:
+        runs_dir = Path.cwd() / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = started_at.strftime("%Y%m%d_%H%M%S_%f")
+        path = runs_dir / f"{stamp}_{plan_name}.json"
+        payload = {
+            "plan_name": plan_name,
+            "plan_description": plan_description,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "success": success,
+            "completed_steps": completed_steps,
+            "total_steps": total_steps,
+            "state_snapshot": _json_safe(dict(self.state)),
+            "adapter_telemetry": _json_safe(self.adapters.telemetry()),
+            "steps": step_logs,
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.logger(f"Run history written: {path}")
+        return str(path)
+
 
 def _render_vars(value: Any, state: dict[str, Any]) -> Any:
     if isinstance(value, str):
@@ -342,6 +484,18 @@ def _render_vars(value: Any, state: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         return {k: _render_vars(v, state) for k, v in value.items()}
     return value
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    return str(value)
 
 
 def _evaluate_condition(expression: str, state: dict[str, Any]) -> bool:

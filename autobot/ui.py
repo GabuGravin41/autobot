@@ -22,6 +22,8 @@ class AutobotUI:
         self.adapter_action_var = tk.StringVar()
         self.adapter_params_var = tk.StringVar(value="{}")
         self.adapter_confirm_var = tk.BooleanVar(value=False)
+        self.adapter_policy_var = tk.StringVar(value="balanced")
+        self.adapter_prepare_token_var = tk.StringVar()
         self.goal_var = tk.StringVar()
         self.autonomous_url_var = tk.StringVar(value="http://localhost:3000")
         self.autonomous_diag_cmd_var = tk.StringVar(value="pytest -q")
@@ -103,6 +105,16 @@ class AutobotUI:
             text="I confirm sensitive action",
             variable=self.adapter_confirm_var,
         ).grid(row=0, column=4, sticky="w")
+        ttk.Label(adapter_frame, text="Policy").grid(row=0, column=5, sticky="w", padx=(8, 0))
+        self.adapter_policy_picker = ttk.Combobox(
+            adapter_frame,
+            values=["strict", "balanced", "trusted"],
+            state="readonly",
+            textvariable=self.adapter_policy_var,
+            width=10,
+        )
+        self.adapter_policy_picker.grid(row=0, column=6, sticky="w")
+        ttk.Button(adapter_frame, text="Set Policy", command=self._set_adapter_policy).grid(row=0, column=7, sticky="w", padx=(8, 0))
 
         ttk.Label(adapter_frame, text="Params (JSON)").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(adapter_frame, textvariable=self.adapter_params_var).grid(
@@ -113,6 +125,16 @@ class AutobotUI:
         )
         self.adapter_docs = ttk.Label(adapter_frame, text="", foreground="#666666")
         self.adapter_docs.grid(row=2, column=2, columnspan=3, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(adapter_frame, text="Prepared token").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(adapter_frame, textvariable=self.adapter_prepare_token_var).grid(
+            row=3, column=1, columnspan=4, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Button(adapter_frame, text="Prepare Sensitive", command=self._prepare_sensitive_action).grid(
+            row=3, column=5, sticky="w", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Button(adapter_frame, text="Confirm Token", command=self._confirm_sensitive_action).grid(
+            row=3, column=6, sticky="w", padx=(8, 0), pady=(8, 0)
+        )
         adapter_frame.columnconfigure(1, weight=1)
         adapter_frame.columnconfigure(3, weight=1)
 
@@ -220,6 +242,14 @@ class AutobotUI:
                 self._log(
                     f"Result: success={result.success}, completed_steps={result.completed_steps}/{result.total_steps}"
                 )
+                run_path = str(result.state.get("last_run_history_path", "")).strip()
+                if run_path:
+                    self._log(f"Run history: {run_path}")
+                token_payload = result.state.get("sensitive_token_payload")
+                if isinstance(token_payload, dict):
+                    token = str(token_payload.get("token", "")).strip()
+                    if token:
+                        self.adapter_prepare_token_var.set(token)
             except Exception as error:  # noqa: BLE001
                 self._log(f"Error: {error}")
             finally:
@@ -273,6 +303,9 @@ class AutobotUI:
                     "Autonomous mode finished: "
                     f"success={result.success}, loops={result.completed_steps}/{result.total_steps}"
                 )
+                run_path = str(result.state.get("last_run_history_path", "")).strip()
+                if run_path:
+                    self._log(f"Run history: {run_path}")
             except Exception as error:  # noqa: BLE001
                 self._log(f"Autonomous mode error: {error}")
             finally:
@@ -329,6 +362,58 @@ class AutobotUI:
         )
         self._run_plan(plan)
 
+    def _set_adapter_policy(self) -> None:
+        profile = self.adapter_policy_var.get().strip()
+        plan = WorkflowPlan(
+            name="adapter_set_policy_ui",
+            description=f"Set adapter policy via UI: {profile}",
+            steps=[
+                TaskStep(
+                    action="adapter_set_policy",
+                    args={"profile": profile},
+                    description=f"Set adapter policy to {profile}",
+                )
+            ],
+        )
+        self._run_plan(plan)
+
+    def _prepare_sensitive_action(self) -> None:
+        adapter_name = self.adapter_var.get().strip()
+        adapter_action = self.adapter_action_var.get().strip()
+        try:
+            params = json.loads(self.adapter_params_var.get().strip() or "{}")
+        except json.JSONDecodeError as error:
+            messagebox.showerror("Autobot", f"Invalid JSON params: {error}")
+            return
+        if not isinstance(params, dict):
+            messagebox.showerror("Autobot", "Params JSON must be an object.")
+            return
+        plan = WorkflowPlan(
+            name="adapter_prepare_sensitive_ui",
+            description=f"Prepare sensitive action: {adapter_name}.{adapter_action}",
+            steps=[
+                TaskStep(
+                    action="adapter_prepare_sensitive",
+                    args={"adapter": adapter_name, "adapter_action": adapter_action, "params": params},
+                    save_as="sensitive_token_payload",
+                    description=f"Prepare token for {adapter_name}.{adapter_action}",
+                )
+            ],
+        )
+        self._run_plan(plan)
+
+    def _confirm_sensitive_action(self) -> None:
+        token = self.adapter_prepare_token_var.get().strip()
+        if not token:
+            messagebox.showerror("Autobot", "Enter a prepared token first.")
+            return
+        plan = WorkflowPlan(
+            name="adapter_confirm_sensitive_ui",
+            description="Confirm prepared sensitive action token.",
+            steps=[TaskStep(action="adapter_confirm_sensitive", args={"token": token}, description="Confirm token")],
+        )
+        self._run_plan(plan)
+
     def _stop_task(self) -> None:
         if self.autonomous_runner:
             self.autonomous_runner.cancel()
@@ -343,6 +428,7 @@ class AutobotUI:
             self.log_box.configure(state="disabled")
 
         self.root.after(0, writer)
+        self._capture_token_from_message(message)
 
     def _load_adapter_library(self) -> dict[str, dict]:
         engine = AutomationEngine(logger=self._log)
@@ -380,6 +466,17 @@ class AutobotUI:
     def _requires_confirmation(self, adapter_name: str, action_name: str) -> bool:
         spec = ((self._adapter_library.get(adapter_name) or {}).get(action_name) or {})
         return bool(spec.get("requires_confirmation", False))
+
+    def _capture_token_from_message(self, message: str) -> None:
+        marker = "Prepared sensitive action token for:"
+        if marker not in message:
+            return
+        payload = {}
+        if self.engine:
+            payload = self.engine.state.get("last_sensitive_prepare", {}) or {}
+        token = str(payload.get("token", "")).strip()
+        if token:
+            self.adapter_prepare_token_var.set(token)
 
 
 def launch_ui() -> None:

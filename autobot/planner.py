@@ -36,6 +36,79 @@ def build_plan_from_text(task: str) -> WorkflowPlan:
             steps=[TaskStep(action="adapter_list_actions", save_as="adapter_library", description="Load adapter library")],
         )
 
+    if lower == "adapter telemetry":
+        return WorkflowPlan(
+            name="adapter_telemetry",
+            description="Show adapter telemetry and selector metrics.",
+            steps=[
+                TaskStep(
+                    action="adapter_get_telemetry",
+                    save_as="adapter_telemetry",
+                    description="Load adapter telemetry",
+                )
+            ],
+        )
+
+    if lower.startswith("adapter policy "):
+        profile = text[15:].strip().lower()
+        return WorkflowPlan(
+            name="adapter_policy",
+            description=f"Set adapter policy profile to {profile}",
+            steps=[
+                TaskStep(
+                    action="adapter_set_policy",
+                    args={"profile": profile},
+                    description=f"Set adapter policy to {profile}",
+                )
+            ],
+        )
+
+    if lower.startswith("adapter prepare "):
+        payload = text[16:].strip()
+        # Format: adapter prepare <adapter_name> <action_name> {"json":"params"}
+        parts = payload.split(" ", 2)
+        if len(parts) < 2:
+            raise ValueError("Adapter prepare format: adapter prepare <name> <action> [json_params]")
+        adapter_name = parts[0].strip()
+        adapter_action = parts[1].strip()
+        params = {}
+        if len(parts) == 3 and parts[2].strip():
+            try:
+                params = json.loads(parts[2].strip())
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Invalid adapter params JSON: {error}") from error
+        return WorkflowPlan(
+            name="adapter_prepare_sensitive",
+            description=f"Prepare sensitive adapter action {adapter_name}.{adapter_action}",
+            steps=[
+                TaskStep(
+                    action="adapter_prepare_sensitive",
+                    args={"adapter": adapter_name, "adapter_action": adapter_action, "params": params},
+                    save_as="sensitive_token_payload",
+                    description=f"Prepare token for {adapter_name}.{adapter_action}",
+                ),
+                TaskStep(
+                    action="log",
+                    args={"message": "Sensitive action prepared. Use adapter confirm <token> to execute."},
+                    description="Show confirm instructions",
+                ),
+            ],
+        )
+
+    if lower.startswith("adapter confirm "):
+        token = text[16:].strip()
+        return WorkflowPlan(
+            name="adapter_confirm_sensitive",
+            description="Confirm and execute prepared sensitive adapter action.",
+            steps=[
+                TaskStep(
+                    action="adapter_confirm_sensitive",
+                    args={"token": token},
+                    description="Confirm sensitive action token",
+                )
+            ],
+        )
+
     if lower.startswith("adapter "):
         payload = text[8:].strip()
         # Format: adapter <adapter_name> <action_name> {"json":"params"}

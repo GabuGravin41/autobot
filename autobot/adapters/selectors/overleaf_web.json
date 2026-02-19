@@ -1,0 +1,24 @@
+{
+  "project_link": [
+    "a.project-list-item"
+  ],
+  "editor_surface": [
+    "div.cm-content",
+    "div.monaco-editor"
+  ],
+  "compile_button": [
+    "button:has-text('Recompile')",
+    "button:has-text('Compile')",
+    "button[aria-label*='Recompile']"
+  ],
+  "download_pdf_button": [
+    "button:has-text('Download PDF')",
+    "button[aria-label*='Download PDF']",
+    "a:has-text('PDF')"
+  ],
+  "login_google_button": [
+    "button:has-text('Continue with Google')",
+    "a:has-text('Continue with Google')",
+    "[aria-label*='Google']"
+  ]
+}

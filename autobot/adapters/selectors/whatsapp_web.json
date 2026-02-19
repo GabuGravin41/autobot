@@ -1,0 +1,21 @@
+{
+  "chat_search_input": [
+    "div[contenteditable='true'][data-tab='3']",
+    "div[contenteditable='true'][aria-label='Search input textbox']"
+  ],
+  "message_input": [
+    "footer div[contenteditable='true']",
+    "div[contenteditable='true'][data-tab='10']"
+  ],
+  "visible_message_text": [
+    "div.copyable-text span.selectable-text"
+  ],
+  "visible_chat_name": [
+    "span[dir='auto'][title]"
+  ],
+  "login_google_button": [
+    "button:has-text('Continue with Google')",
+    "a:has-text('Continue with Google')",
+    "[aria-label*='Google']"
+  ]
+}

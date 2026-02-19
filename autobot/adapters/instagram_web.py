@@ -33,12 +33,12 @@ class InstagramWebAdapter(BaseAdapter):
         self.do_open_inbox({})
         self.browser.goto(f"https://www.instagram.com/{username}/")
         try:
-            self.browser.click("div[role='button']:has-text('Message')", timeout_ms=8000)
+            self.click_any("message_button", timeout_ms=8000)
         except Exception:  # noqa: BLE001
             self.browser.goto("https://www.instagram.com/direct/new/")
-            self.browser.fill("input[name='queryBox']", username, timeout_ms=10000)
+            self.fill_any("new_chat_search_input", username, timeout_ms=10000)
             self.browser.press("Enter")
-            self.browser.click("div[role='button']:has-text('Chat')", timeout_ms=10000)
+            self.click_any("chat_confirm_button", timeout_ms=10000)
         self.state["active_user"] = username
         return f"Opened Instagram chat with {username}."
 
@@ -46,11 +46,11 @@ class InstagramWebAdapter(BaseAdapter):
         text = str(params.get("text", "")).strip()
         if not text:
             raise ValueError("Missing required param: text")
-        self.browser.fill("textarea[placeholder='Message...'], div[contenteditable='true'][role='textbox']", text)
+        self.fill_any("message_input", text, timeout_ms=10000)
         return "Instagram message typed."
 
     def do_send_typed_message(self, _params: dict[str, Any]) -> str:
-        clicked = self._click_if_present(["div[role='button']:has-text('Send')", "button:has-text('Send')"], 4000)
+        clicked = self._click_if_present(self.selector_candidates("send_button"), 4000)
         if not clicked:
             self.browser.press("Enter")
         return "Instagram message sent."
@@ -66,13 +66,7 @@ class InstagramWebAdapter(BaseAdapter):
         return f"Message sent to Instagram user: {username}"
 
     def do_attempt_google_continue_login(self, _params: dict[str, Any]) -> str:
-        clicked = self._click_if_present(
-            [
-                "button:has-text('Continue with Google')",
-                "a:has-text('Continue with Google')",
-                "[aria-label*='Google']",
-            ]
-        )
+        clicked = self._click_if_present(self.selector_candidates("login_google_button"))
         if clicked:
             return "Clicked Continue with Google."
         return "Continue with Google button not found. Wait for saved password autofill or sign in manually."

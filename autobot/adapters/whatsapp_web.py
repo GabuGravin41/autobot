@@ -27,7 +27,7 @@ class WhatsAppWebAdapter(BaseAdapter):
         if not chat:
             raise ValueError("Missing required param: chat")
         self.do_open_home({})
-        self.browser.fill("div[contenteditable='true'][data-tab='3']", chat, timeout_ms=15000)
+        self.fill_any("chat_search_input", chat, timeout_ms=15000)
         self.browser.press("Enter")
         self.state["active_chat"] = chat
         return f"Opened chat: {chat}"
@@ -36,7 +36,7 @@ class WhatsAppWebAdapter(BaseAdapter):
         text = str(params.get("text", "")).strip()
         if not text:
             raise ValueError("Missing required param: text")
-        self.browser.fill("footer div[contenteditable='true']", text, timeout_ms=15000)
+        self.fill_any("message_input", text, timeout_ms=15000)
         return "Message typed."
 
     def do_send_typed_message(self, _params: dict[str, Any]) -> str:
@@ -56,26 +56,20 @@ class WhatsAppWebAdapter(BaseAdapter):
     def do_read_recent_messages(self, params: dict[str, Any]) -> list[str]:
         limit = int(params.get("limit", 5))
         self.browser.start()
-        nodes = self.browser.page.locator("div.copyable-text span.selectable-text").all_inner_texts()
+        nodes = self.browser.page.locator(self.selector("visible_message_text")).all_inner_texts()
         return [item.strip() for item in nodes if item.strip()][-limit:]
 
     def do_list_visible_chats(self, params: dict[str, Any]) -> list[str]:
         limit = int(params.get("limit", 20))
         self.browser.start()
-        names = self.browser.page.locator("span[dir='auto'][title]").all_inner_texts()
+        names = self.browser.page.locator(self.selector("visible_chat_name")).all_inner_texts()
         cleaned = [name.strip() for name in names if name.strip()]
         deduped = list(dict.fromkeys(cleaned))
         return deduped[:limit]
 
     def do_attempt_google_continue_login(self, _params: dict[str, Any]) -> str:
         self.browser.start()
-        clicked = self._click_if_present(
-            [
-                "button:has-text('Continue with Google')",
-                "a:has-text('Continue with Google')",
-                "[aria-label*='Google']",
-            ]
-        )
+        clicked = self._click_if_present(self.selector_candidates("login_google_button"))
         if clicked:
             return "Clicked Continue with Google."
         return "Continue with Google button not found. Wait for saved password autofill or sign in manually."

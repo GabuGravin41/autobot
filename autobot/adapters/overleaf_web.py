@@ -26,13 +26,13 @@ class OverleafWebAdapter(BaseAdapter):
         if not title:
             raise ValueError("Missing required param: title")
         self.do_open_dashboard({})
-        self.browser.click(f"a.project-list-item:has-text('{title}')", timeout_ms=12000)
+        self.browser.click(f"{self.selector('project_link')}:has-text('{title}')", timeout_ms=12000)
         self.state["active_project"] = title
         return f"Opened Overleaf project: {title}"
 
     def do_replace_editor_text(self, params: dict[str, Any]) -> str:
         text = str(params.get("text", ""))
-        self.browser.click("div.cm-content", timeout_ms=15000)
+        self.click_any("editor_surface", timeout_ms=15000)
         self.browser.press("Control+A")
         self.browser.press("Backspace")
         self.browser.page.keyboard.type(text, delay=1)
@@ -40,37 +40,25 @@ class OverleafWebAdapter(BaseAdapter):
 
     def do_append_editor_text(self, params: dict[str, Any]) -> str:
         text = str(params.get("text", ""))
-        self.browser.click("div.cm-content", timeout_ms=15000)
+        self.click_any("editor_surface", timeout_ms=15000)
         self.browser.press("End")
         self.browser.page.keyboard.type(text, delay=1)
         return "Appended text in Overleaf editor."
 
     def do_compile_project(self, _params: dict[str, Any]) -> str:
-        clicked = self._click_if_present(
-            ["button:has-text('Recompile')", "button:has-text('Compile')", "button[aria-label*='Recompile']"],
-            6000,
-        )
+        clicked = self._click_if_present(self.selector_candidates("compile_button"), 6000)
         if not clicked:
             raise RuntimeError("Compile button not found.")
         return "Triggered Overleaf compile."
 
     def do_download_pdf(self, _params: dict[str, Any]) -> str:
-        clicked = self._click_if_present(
-            ["button:has-text('Download PDF')", "button[aria-label*='Download PDF']", "a:has-text('PDF')"],
-            6000,
-        )
+        clicked = self._click_if_present(self.selector_candidates("download_pdf_button"), 6000)
         if not clicked:
             raise RuntimeError("Download PDF action not found.")
         return "Triggered PDF download."
 
     def do_attempt_google_continue_login(self, _params: dict[str, Any]) -> str:
-        clicked = self._click_if_present(
-            [
-                "button:has-text('Continue with Google')",
-                "a:has-text('Continue with Google')",
-                "[aria-label*='Google']",
-            ]
-        )
+        clicked = self._click_if_present(self.selector_candidates("login_google_button"))
         if clicked:
             return "Clicked Continue with Google."
         return "Continue with Google button not found. Wait for saved password autofill or sign in manually."

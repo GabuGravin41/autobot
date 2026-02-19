@@ -9,6 +9,7 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - diagnose -> plan -> execute -> retest
   - loop limits, per-loop step caps, and cancellation
   - conditional step execution, retries, continue-on-error semantics
+  - structured run logs at `runs/<timestamp>_<plan>.json`
 - Runs one-shot commands:
   - `search <query>`
   - `open <url|target>`
@@ -19,6 +20,10 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - `wait <seconds>`
   - `list adapters`
   - `adapter <name> <action> <json_params>`
+  - `adapter telemetry`
+  - `adapter policy <strict|balanced|trusted>`
+  - `adapter prepare <name> <action> <json_params>`
+  - `adapter confirm <token>`
 - Runs preset workflows:
   - `website_builder`
   - `research_paper`
@@ -30,6 +35,9 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - `vscode_desktop`
 - Adapter actions are explicit and per-site, with confirmation gates for sensitive operations such as message send and PDF download.
 - UI includes an adapter panel with action docs and a required checkbox for sensitive actions.
+- Adapter reliability layer includes session health checks, selector fallback configs, and action/selector telemetry.
+- Sensitive control now supports two-step flow in strict mode:
+  - prepare action -> receive token -> confirm token to execute
 - Supports browser actions in engine:
   - open/search/click/fill/press/read text/read console errors
 - Supports system actions in engine:

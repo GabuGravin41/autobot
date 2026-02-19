@@ -1,0 +1,27 @@
+{
+  "message_button": [
+    "div[role='button']:has-text('Message')",
+    "button:has-text('Message')"
+  ],
+  "new_chat_search_input": [
+    "input[name='queryBox']",
+    "input[placeholder*='Search']"
+  ],
+  "chat_confirm_button": [
+    "div[role='button']:has-text('Chat')",
+    "button:has-text('Chat')"
+  ],
+  "message_input": [
+    "textarea[placeholder='Message...']",
+    "div[contenteditable='true'][role='textbox']"
+  ],
+  "send_button": [
+    "div[role='button']:has-text('Send')",
+    "button:has-text('Send')"
+  ],
+  "login_google_button": [
+    "button:has-text('Continue with Google')",
+    "a:has-text('Continue with Google')",
+    "[aria-label*='Google']"
+  ]
+}
