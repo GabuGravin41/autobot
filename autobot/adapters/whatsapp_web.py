@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .base import ActionSpec, BaseAdapter
+
+
+def _normalize_phone(phone: str) -> str:
+    """Digits only, for WhatsApp URL and search. Removes +, spaces, dashes, parens."""
+    return "".join(c for c in str(phone).strip() if c.isdigit())
 
 
 class WhatsAppWebAdapter(BaseAdapter):
@@ -27,14 +33,34 @@ class WhatsAppWebAdapter(BaseAdapter):
     def do_open_chat(self, params: dict[str, Any]) -> str:
         chat = str(params.get("chat", "")).strip()
         phone = str(params.get("phone", "")).strip()
+        use_search = bool(params.get("use_search", False))  # True = search by number instead of send URL
         if not chat and not phone:
             raise ValueError("Missing required param: chat or phone")
         if self._human_mode():
             if phone:
-                self.browser.goto(f"https://web.whatsapp.com/send?phone={phone}")
+                digits = _normalize_phone(phone)
+                if not digits:
+                    raise ValueError("Phone number has no digits.")
+                # Ensure Chrome is focused so the new tab is visible and active
+                focus_result = self.focus.ensure_keywords_focused(("chrome", "whatsapp"))
+                if not focus_result.ok:
+                    self.logger(f"Focus: {focus_result.reason}. Click the Chrome window before continuing.")
+                # Open home first so WhatsApp Web is loaded, then go to chat
+                self.browser.goto("https://web.whatsapp.com")
+                time.sleep(2.5)
+                if use_search:
+                    self.run_human_nav("open_chat_by_phone", {"phone": digits})
+                    time.sleep(1.0)
+                else:
+                    self.browser.goto(f"https://web.whatsapp.com/send?phone={digits}")
+                    time.sleep(2.0)
                 self.state["active_chat"] = phone
                 return f"Opened WhatsApp chat by phone in human mode: {phone}"
+            focus_result = self.focus.ensure_keywords_focused(("chrome", "whatsapp"))
+            if not focus_result.ok:
+                self.logger(f"Focus: {focus_result.reason}. Click the Chrome window before continuing.")
             self.do_open_home({})
+            time.sleep(2.0)
             self.run_human_nav("open_chat_by_name", {"chat": chat})
             self.state["active_chat"] = chat
             return f"Attempted chat open in human mode: {chat}"
@@ -51,6 +77,8 @@ class WhatsAppWebAdapter(BaseAdapter):
         if not text:
             raise ValueError("Missing required param: text")
         if self._human_mode():
+            # Short wait so chat input is ready and focused
+            time.sleep(0.8)
             self.run_human_nav("type_message", {"text": text})
             return "Message typed in human profile mode."
         self.fill_any("message_input", text, timeout_ms=15000)
@@ -58,6 +86,7 @@ class WhatsAppWebAdapter(BaseAdapter):
 
     def do_send_typed_message(self, _params: dict[str, Any]) -> str:
         if self._human_mode():
+            time.sleep(0.3)
             self.run_human_nav("send_message")
             return "Typed message sent in human profile mode."
         self.browser.press("Enter")

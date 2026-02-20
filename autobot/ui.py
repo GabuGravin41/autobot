@@ -346,6 +346,9 @@ class AutobotUI:
                     f"Result: success={result.success}, completed_steps={result.completed_steps}/{result.total_steps}"
                 )
                 run_path = str(result.state.get("last_run_history_path", "")).strip()
+                run_dir = str(result.state.get("run_dir", "")).strip()
+                if run_dir:
+                    self._log(f"Run folder: {run_dir}")
                 if run_path:
                     self._log(f"Run history: {run_path}")
                 token_payload = result.state.get("sensitive_token_payload")
@@ -410,6 +413,9 @@ class AutobotUI:
                     f"success={result.success}, loops={result.completed_steps}/{result.total_steps}"
                 )
                 run_path = str(result.state.get("last_run_history_path", "")).strip()
+                run_dir = str(result.state.get("run_dir", "")).strip()
+                if run_dir:
+                    self._log(f"Run folder: {run_dir}")
                 if run_path:
                     self._log(f"Run history: {run_path}")
             except Exception as error:  # noqa: BLE001

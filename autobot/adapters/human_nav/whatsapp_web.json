@@ -1,13 +1,21 @@
 {
   "open_chat_by_name": [
-    { "action": "hotkey", "value": "ctrl+alt+/" },
-    { "action": "type", "value": "{chat}" },
-    { "action": "press", "value": "enter" }
+    {"action": "hotkey", "value": "ctrl+alt+/"},
+    {"action": "sleep", "value": "0.3"},
+    {"action": "type", "value": "{chat}"},
+    {"action": "press", "value": "enter"}
+  ],
+  "open_chat_by_phone": [
+    {"action": "hotkey", "value": "ctrl+alt+/"},
+    {"action": "sleep", "value": "0.3"},
+    {"action": "type", "value": "{phone}"},
+    {"action": "press", "value": "enter"}
   ],
   "type_message": [
-    { "action": "type", "value": "{text}" }
+    {"action": "sleep", "value": "0.2"},
+    {"action": "type", "value": "{text}"}
   ],
   "send_message": [
-    { "action": "press", "value": "enter" }
+    {"action": "press", "value": "enter"}
   ]
 }

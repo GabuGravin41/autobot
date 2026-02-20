@@ -125,6 +125,14 @@ class AutomationEngine:
         run_success = False
         history_written = False
 
+        # Per-run directory: human-readable name (plan_date_time) for easy browsing
+        runs_dir = Path.cwd() / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = _make_run_dir(runs_dir, plan_name, run_started_at)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "screenshots").mkdir(exist_ok=True)
+        self.state["run_dir"] = str(run_dir)
+
         try:
             for idx, step in enumerate(steps, start=1):
                 if self._cancel_requested:
@@ -510,6 +518,30 @@ class AutomationEngine:
             self.logger(message)
             return message
 
+        if action == "state_set":
+            key = str(args.get("key", "")).strip()
+            value = args.get("value")
+            if not key:
+                raise ValueError("state_set requires key.")
+            self.state[key] = value
+            self.logger(f"State set: {key}")
+            return value
+
+        if action == "screenshot":
+            filename = str(args.get("filename", "")).strip()
+            if not filename:
+                raise ValueError("screenshot requires filename (e.g. 01_whatsapp_sent.png).")
+            run_dir = self.state.get("run_dir")
+            if not run_dir:
+                raise ValueError("screenshot requires run_dir (run directory not set).")
+            screenshots_dir = Path(run_dir) / "screenshots"
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+            filepath = str(screenshots_dir / filename)
+            self.browser.start()
+            path = self.browser.screenshot(filepath)
+            self.logger(f"Screenshot saved: {path}")
+            return path
+
         raise ValueError(f"Unknown action '{action}'")
 
     def _condition_allows(self, step: TaskStep) -> bool:
@@ -529,10 +561,20 @@ class AutomationEngine:
         total_steps: int,
         step_logs: list[dict[str, Any]],
     ) -> str:
-        runs_dir = Path.cwd() / "runs"
-        runs_dir.mkdir(parents=True, exist_ok=True)
-        stamp = started_at.strftime("%Y%m%d_%H%M%S_%f")
-        path = runs_dir / f"{stamp}_{plan_name}.json"
+        run_dir_str = self.state.get("run_dir")
+        if run_dir_str:
+            run_dir = Path(run_dir_str)
+            path = run_dir / "history.json"
+        else:
+            runs_dir = Path.cwd() / "runs"
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            safe_plan = "".join(c if c.isalnum() or c in "._-" else "_" for c in plan_name).strip("._") or "run"
+            path = runs_dir / f"{safe_plan}_{started_at.strftime('%Y-%m-%d_%H-%M-%S')}.json"
+            if path.exists():
+                for suffix in range(2, 100):
+                    path = runs_dir / f"{safe_plan}_{started_at.strftime('%Y-%m-%d_%H-%M-%S')}_{suffix}.json"
+                    if not path.exists():
+                        break
         payload = {
             "plan_name": plan_name,
             "plan_description": plan_description,
@@ -547,7 +589,49 @@ class AutomationEngine:
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self.logger(f"Run history written: {path}")
+
+        # Write artifacts and about.txt for human review
+        if run_dir_str:
+            artifacts = {
+                "whatsapp_message_sent": self.state.get("whatsapp_message_sent"),
+                "pdf_downloaded": self.state.get("pdf_downloaded"),
+                "doc_text_preview": (self.state.get("doc_text") or "")[:500],
+                "latex_text_preview": (self.state.get("latex_text") or "")[:500],
+                "run_dir": run_dir_str,
+                "history_path": str(path),
+            }
+            artifacts_path = Path(run_dir_str) / "artifacts.json"
+            artifacts_path.write_text(json.dumps(artifacts, indent=2), encoding="utf-8")
+            self.logger(f"Artifacts written: {artifacts_path}")
+
+            # Short summary so you can see what this run is without opening JSON
+            about_lines = [
+                f"Plan: {plan_name}",
+                f"Started: {started_at.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                f"Finished: {finished_at.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                f"Success: {success}",
+                f"Steps: {completed_steps}/{total_steps}",
+                "",
+                "Contents: history.json (full log), artifacts.json, screenshots/, console.log",
+            ]
+            about_path = Path(run_dir_str) / "about.txt"
+            about_path.write_text("\n".join(about_lines), encoding="utf-8")
+
         return str(path)
+
+
+def _make_run_dir(runs_dir: Path, plan_name: str, started_at: datetime) -> Path:
+    """Build a human-readable run folder name: plan_YYYY-MM-DD_HH-MM-SS (unique if needed)."""
+    safe_plan = "".join(c if c.isalnum() or c in "._-" else "_" for c in plan_name).strip("._") or "run"
+    date_part = started_at.strftime("%Y-%m-%d")
+    time_part = started_at.strftime("%H-%M-%S")
+    base_name = f"{safe_plan}_{date_part}_{time_part}"
+    run_dir = runs_dir / base_name
+    suffix = 1
+    while run_dir.exists():
+        suffix += 1
+        run_dir = runs_dir / f"{base_name}_{suffix}"
+    return run_dir
 
 
 def _render_vars(value: Any, state: dict[str, Any]) -> Any:

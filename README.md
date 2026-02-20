@@ -80,6 +80,47 @@ python -m autobot.main
 - `AUTOBOT_OPENAI_BASE_URL` (optional, default: `https://api.x.ai/v1`)
 - `AUTOBOT_LLM_MODEL` (optional, default: `gemini-1.5-flash`)
 
+## Run folder layout
+
+Every run is stored as a **folder** with a human-readable name so you can see what it is at a glance:
+
+- **Folder name:** `plan_YYYY-MM-DD_HH-MM-SS` (e.g. `tool_call_stress_2026-02-20_10-56-21`). No cryptic timestamps or long numbers.
+- **Inside the folder:**
+  - **`about.txt`** – Short summary: plan name, started/finished time, success, steps. Read this first.
+  - **`history.json`** – Full step log, state, adapter telemetry.
+  - **`artifacts.json`** – Message sent, PDF path, doc/LaTeX previews (when applicable).
+  - **`screenshots/`** – Screenshots from key steps.
+  - **`console.log`** – Console output (when run from CLI).
+
+To **organize old runs** (single JSON files from before this layout), run once:
+
+```bash
+python -m autobot.organize_runs       # dry run: shows what would be done
+python -m autobot.organize_runs --do # move each runs/*.json into a named folder + about.txt
+```
+
+After that, every run is a folder with at least `history.json` and `about.txt`; newer runs also have artifacts, screenshots, and console log.
+
+## Running the tool-call stress test
+
+Each run creates a **run folder** (see "Run folder layout" above), e.g. `runs/tool_call_stress_2026-02-20_10-56-21/`.
+
+**From the UI:** Set browser mode to **human_profile**, choose preset **tool_call_stress**, and in Topic use:  
+`<phone>|<docs_url>|<download_path>|<message>`  
+Example: `+27930793632858|https://docs.google.com/document/d/ID/edit|C:/Users/.../Downloads/out.pdf|Test message`  
+Then run. When finished, the log shows **Run folder:** with the path to open.
+
+**From the CLI (e.g. when you’re away):**
+
+```bash
+python -m autobot.run_stress "+1234|https://docs.../edit|C:/path/to/download.pdf|Your message"
+# or with env:
+set AUTOBOT_STRESS_TOPIC=+1234|https://...|C:/path/to/pdf|Message
+python -m autobot.run_stress
+```
+
+With empty topic or `|||message`, WhatsApp and file-download steps are skipped; the rest of the chain still runs and screenshots are captured so you can confirm behavior when you return.
+
 ## Notes
 
 - If launch fails on default Chrome profile restrictions, let Autobot use a dedicated automation profile directory.
@@ -94,3 +135,4 @@ python -m autobot.main
 - Login behavior:
   - Adapters include a `attempt_google_continue_login` action to click "Continue with Google" when present.
   - If not present, rely on profile-saved password autofill or ask user to intervene.
+- WhatsApp Web (human mode): The adapter opens WhatsApp home first, waits for load, then opens the chat by phone. Phone numbers are normalized to digits only. If opening by direct link is unreliable, use search instead by passing `use_search: true` in the adapter params for `open_chat` (e.g. in a workflow or UI adapter call). Keep the Chrome window focused (or click it) before running so the new tab is visible.

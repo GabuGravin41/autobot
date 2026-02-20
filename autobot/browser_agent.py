@@ -209,6 +209,29 @@ class BrowserController:
             "last_launch_error": self._last_launch_error,
         }
 
+    def screenshot(self, filepath: str) -> str:
+        """Capture screenshot: in human_profile or when page closed uses pyautogui; else page.screenshot."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if self.mode == "human_profile":
+            _require_pyautogui()
+            pyautogui.screenshot(imageFilename=filepath)
+            return filepath
+        self.start()
+        if self._page is not None:
+            try:
+                self._page.screenshot(path=filepath)
+                return filepath
+            except Exception:
+                if pyautogui is not None:
+                    pyautogui.screenshot(imageFilename=filepath)
+                    return filepath
+                raise
+        if pyautogui is not None:
+            pyautogui.screenshot(imageFilename=filepath)
+            return filepath
+        raise RuntimeError("Cannot take screenshot: no browser page and pyautogui not available.")
+
 
 def _default_user_data_dir() -> str:
     local_app_data = os.getenv("LOCALAPPDATA", "")

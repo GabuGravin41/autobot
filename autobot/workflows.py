@@ -148,19 +148,34 @@ def tool_call_stress_workflow(
             TaskStep(action="browser_set_mode", args={"mode": "human_profile"}, description="Force human profile mode"),
             TaskStep(action="adapter_set_policy", args={"profile": "trusted"}, description="Set trusted policy for test"),
             TaskStep(
+                action="state_set",
+                args={"key": "whatsapp_message_sent", "value": outgoing_message},
+                description="Record message for artifacts",
+            ),
+            TaskStep(
                 action="adapter_call",
                 args={"adapter": "whatsapp_web", "adapter_action": "open_chat", "params": {"phone": whatsapp_phone}},
+                condition="true" if whatsapp_phone else "false",
                 description="Open WhatsApp chat by phone",
             ),
             TaskStep(
                 action="adapter_call",
                 args={"adapter": "whatsapp_web", "adapter_action": "type_message", "params": {"text": outgoing_message}},
+                condition="true" if whatsapp_phone else "false",
                 description="Type WhatsApp test message",
             ),
             TaskStep(
                 action="adapter_call",
                 args={"adapter": "whatsapp_web", "adapter_action": "send_typed_message", "params": {}, "confirmed": True},
+                condition="true" if whatsapp_phone else "false",
                 description="Send WhatsApp test message",
+            ),
+            TaskStep(
+                action="screenshot",
+                args={"filename": "01_whatsapp_sent.png"},
+                condition="true" if whatsapp_phone else "false",
+                continue_on_error=True,
+                description="Screenshot after WhatsApp send",
             ),
             TaskStep(action="clipboard_set", args={"text": outgoing_message}, description="Store sent message in clipboard"),
             TaskStep(
@@ -173,6 +188,12 @@ def tool_call_stress_workflow(
                 args={"adapter": "google_docs_web", "adapter_action": "type_text", "params": {"text": outgoing_message}},
                 continue_on_error=True,
                 description="Type copied WhatsApp text in Google Doc",
+            ),
+            TaskStep(
+                action="screenshot",
+                args={"filename": "02_google_doc_typed.png"},
+                continue_on_error=True,
+                description="Screenshot after Google Doc typed",
             ),
             TaskStep(
                 action="adapter_call",
@@ -217,6 +238,12 @@ def tool_call_stress_workflow(
             ),
             TaskStep(action="clipboard_get", save_as="latex_text", continue_on_error=True, description="Capture latex text"),
             TaskStep(
+                action="screenshot",
+                args={"filename": "03_grok_response.png"},
+                continue_on_error=True,
+                description="Screenshot after Grok response",
+            ),
+            TaskStep(
                 action="adapter_call",
                 args={"adapter": "overleaf_web", "adapter_action": "open_dashboard", "params": {}},
                 description="Open Overleaf",
@@ -243,15 +270,15 @@ def tool_call_stress_workflow(
                 action="wait_for_file",
                 args={"path": download_check_path, "timeout_seconds": 45, "poll_interval_seconds": 2},
                 save_as="pdf_downloaded",
+                condition="true" if download_check_path else "false",
                 continue_on_error=True,
                 description="Verify download file appears",
             ),
             TaskStep(
-                action="desktop_hotkey",
-                args={"keys": ["ctrl", "w"]},
-                retries=2,
+                action="screenshot",
+                args={"filename": "04_overleaf_download.png"},
                 continue_on_error=True,
-                description="Close active tab (cleanup)",
+                description="Screenshot after Overleaf download",
             ),
             TaskStep(
                 action="desktop_hotkey",
@@ -266,12 +293,25 @@ def tool_call_stress_workflow(
                 retries=2,
                 continue_on_error=True,
                 description="Close active tab (cleanup)",
+            ),
+            TaskStep(
+                action="desktop_hotkey",
+                args={"keys": ["ctrl", "w"]},
+                retries=2,
+                continue_on_error=True,
+                description="Close active tab (cleanup)",
+            ),
+            TaskStep(
+                action="screenshot",
+                args={"filename": "05_final.png"},
+                continue_on_error=True,
+                description="Final screenshot",
             ),
             TaskStep(
                 action="log",
                 args={
                     "message": (
-                        "Tool-call stress test complete. Check run history for each step status and 'pdf_downloaded' state."
+                        "Tool-call stress test complete. Check run folder for history.json, screenshots/, and artifacts.json."
                     )
                 },
                 description="Summarize stress test completion",
