@@ -74,11 +74,15 @@ python -m autobot.main
 - `AUTOBOT_CHROME_SOURCE_PROFILE_DIR` (optional, default: same as `AUTOBOT_CHROME_PROFILE_DIR`)
 - `AUTOBOT_CHROME_LAUNCH_TIMEOUT_MS` (optional, default: `15000`)
 - `AUTOBOT_BROWSER_MODE` (optional: `auto`, `human_profile`, `devtools`; default: `auto`)
+- `AUTOBOT_OPEN_NEW_TAB` (optional: `1` or `0`; default: `1`) — In human_profile, when opening a URL, open it in a **new tab** (leave current tab open) instead of reusing the same tab. When navigating to the **same site** again in a chain (e.g. WhatsApp home then open chat), the same tab is reused; when switching to a different site, a new tab is opened. Set to `0` to always reuse the current tab.
+- **Load waits (human_profile, seconds):** Optional patience after opening slow sites. Set to `0` to skip. Defaults: `AUTOBOT_WHATSAPP_LOAD_WAIT` = 8, `AUTOBOT_WHATSAPP_CHAT_LOAD_WAIT` = 5, `AUTOBOT_OVERLEAF_LOAD_WAIT` = 5, `AUTOBOT_GROK_LOAD_WAIT` = 4, `AUTOBOT_GOOGLE_DOCS_LOAD_WAIT` = 4.
 - `GOOGLE_API_KEY` or `GEMINI_API_KEY` (optional, enables LLM planner in autonomous mode)
 - `AUTOBOT_LLM_PROVIDER` (optional: `gemini` or `openai_compat`)
 - `OPENAI_API_KEY` or `XAI_API_KEY` (for `openai_compat`, including Grok-compatible endpoints)
 - `AUTOBOT_OPENAI_BASE_URL` (optional, default: `https://api.x.ai/v1`)
-- `AUTOBOT_LLM_MODEL` (optional, default: `gemini-1.5-flash`)
+- `AUTOBOT_LLM_MODEL` (optional; default: `gemini-1.5-flash` for Gemini; for Grok use e.g. `grok-2` or the model name from your X.AI account)
+
+**Using Grok as the LLM (AI Planner):** Set `AUTOBOT_LLM_PROVIDER=openai_compat`, `XAI_API_KEY=<your key>`, and `AUTOBOT_LLM_MODEL=grok-2` or `grok-4-1-fast-reasoning` (see [x.ai docs](https://docs.x.ai/docs/guides/chat-completions)). If you get HTTP 403, the model name may be invalid—try `grok-2`. Get your API key from [x.ai Console](https://console.x.ai/team/default/api-keys).
 
 ## Run folder layout
 
@@ -127,6 +131,7 @@ With empty topic or `|||message`, WhatsApp and file-download steps are skipped; 
 - First launch may require one-time sign-in in the automation profile if cookies cannot be copied.
 - In `human_profile` mode, URL/search and keyboard flows use your real Chrome session; some DOM-selector actions are limited.
 - Human-mode safety guard blocks typing if Autobot/Cursor window appears focused, to prevent runaway self-trigger loops.
+- **Load waits (patience):** After adapter actions that open slow-loading pages (e.g. WhatsApp, Overleaf), the engine waits a few seconds before the next step. Defaults are in code (e.g. 8s after WhatsApp open_home, 6s after open_chat). Override by placing a `load_waits.json` next to `engine.py` (same format: `{"adapter": {"action": seconds}}`).
 - AI Planner Chat panel allows prompt -> plan preview -> execute workflow (uses configured provider or safe fallback).
 - End-to-end tool-calling stress workflow is available as preset `tool_call_stress`.
 - Desktop actions are intentionally explicit and coordinate-based to keep behavior predictable.

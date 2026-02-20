@@ -1,12 +1,14 @@
 import os
 import shutil
 import subprocess
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from typing import Literal
 
+from .focus_manager import FocusManager
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import ConsoleMessage
 from playwright.sync_api import Error as PlaywrightError
@@ -56,6 +58,21 @@ class BrowserSessionConfig:
         )
 
 
+def _same_origin(url1: str, url2: str) -> bool:
+    """True if both URLs share scheme, host, and port (same origin)."""
+    try:
+        p1 = urlparse(url1)
+        p2 = urlparse(url2)
+        return (
+            (p1.scheme or "https") == (p2.scheme or "https")
+            and (p1.hostname or "").lower() == (p2.hostname or "").lower()
+            and (p1.port or (443 if (p1.scheme or "").lower() == "https" else 80))
+            == (p2.port or (443 if (p2.scheme or "").lower() == "https" else 80))
+        )
+    except Exception:
+        return False
+
+
 class BrowserController:
     def __init__(self, config: BrowserSessionConfig | None = None) -> None:
         self.config = config or BrowserSessionConfig.from_env()
@@ -65,6 +82,7 @@ class BrowserController:
         self._console_errors: list[str] = []
         self.mode: BrowserMode = "devtools"
         self._last_launch_error: str = ""
+        self._last_opened_url: str | None = None
 
     def start(self) -> None:
         if self.config.browser_mode == "human_profile":
@@ -196,11 +214,39 @@ class BrowserController:
         if msg.type == "error":
             self._console_errors.append(msg.text)
 
+    def reset_last_opened_url(self) -> None:
+        """Reset last-opened URL so the next goto can open a new tab. Call at plan start if desired."""
+        self._last_opened_url = None
+
     def _open_in_human_profile(self, url: str) -> None:
+        # When open_new_tab is true: same origin -> reuse current tab; different/first -> new tab.
+        normalized = _normalize_url(url)
+        open_new_tab = os.getenv("AUTOBOT_OPEN_NEW_TAB", "1").strip().lower() in ("1", "true", "yes")
+        reuse_tab = (
+            open_new_tab
+            and self._last_opened_url is not None
+            and _same_origin(self._last_opened_url, normalized)
+            and pyautogui is not None
+        )
+        self._last_opened_url = normalized
+
+        if pyautogui is not None:
+            focus = FocusManager(logger=lambda _: None)
+            result = focus.ensure_keywords_focused(("chrome", "whatsapp", "overleaf", "grok"))
+            if result.ok:
+                if not reuse_tab and open_new_tab:
+                    pyautogui.hotkey("ctrl", "t")
+                    time.sleep(0.6)
+                pyautogui.hotkey("ctrl", "l")
+                time.sleep(0.2)
+                pyautogui.write(normalized, interval=0.02)
+                time.sleep(0.1)
+                pyautogui.press("enter")
+                return
         if self.config.executable_path and self.config.executable_path.exists():
-            subprocess.Popen([str(self.config.executable_path), url], shell=False)
+            subprocess.Popen([str(self.config.executable_path), normalized], shell=False)
             return
-        webbrowser.open(url, new=0, autoraise=True)
+        webbrowser.open(normalized, new=0, autoraise=True)
 
     def mode_status(self) -> dict[str, str]:
         return {

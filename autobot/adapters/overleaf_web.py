@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .base import ActionSpec, BaseAdapter
@@ -20,6 +21,10 @@ class OverleafWebAdapter(BaseAdapter):
     def do_open_dashboard(self, _params: dict[str, Any]) -> str:
         self._ensure_url("https://www.overleaf.com/project")
         if self._human_mode():
+            wait_s = self._load_wait_seconds("AUTOBOT_OVERLEAF_LOAD_WAIT", 5.0)
+            if wait_s > 0:
+                self.logger(f"Waiting {wait_s:.0f}s for Overleaf to load.")
+                time.sleep(wait_s)
             return "Opened Overleaf dashboard in human profile mode."
         return "Opened Overleaf dashboard."
 
@@ -69,7 +74,8 @@ class OverleafWebAdapter(BaseAdapter):
 
     def do_download_pdf(self, _params: dict[str, Any]) -> str:
         if self._human_mode():
-            raise RuntimeError("Download PDF is not yet automated in human profile mode.")
+            self.run_human_nav("download_pdf")
+            return "Triggered PDF download in human profile mode (Tab to button + Enter)."
         clicked = self._click_if_present(self.selector_candidates("download_pdf_button"), 6000)
         if not clicked:
             raise RuntimeError("Download PDF action not found.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .base import ActionSpec, BaseAdapter
@@ -16,6 +17,11 @@ class GrokWebAdapter(BaseAdapter):
 
     def do_open_home(self, _params: dict[str, Any]) -> str:
         self._ensure_url("https://grok.com")
+        if self._human_mode():
+            wait_s = self._load_wait_seconds("AUTOBOT_GROK_LOAD_WAIT", 4.0)
+            if wait_s > 0:
+                self.logger(f"Waiting {wait_s:.0f}s for Grok to load.")
+                time.sleep(wait_s)
         return "Opened Grok."
 
     def do_ask_latex_from_clipboard(self, params: dict[str, Any]) -> str:

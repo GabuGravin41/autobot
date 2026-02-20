@@ -17,5 +17,10 @@
   ],
   "send_message": [
     {"action": "press", "value": "enter"}
+  ],
+  "attach_file": [
+    {"action": "sleep", "value": "2"},
+    {"action": "type", "value": "{path}"},
+    {"action": "press", "value": "enter"}
   ]
 }

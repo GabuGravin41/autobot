@@ -21,6 +21,32 @@ except ImportError:  # pragma: no cover - optional dependency
 
 LogFn = Callable[[str], None]
 
+# Default wait (seconds) after adapter actions that open or load slow pages. Human-paced.
+DEFAULT_LOAD_WAITS: dict[str, dict[str, float]] = {
+    "whatsapp_web": {"open_home": 8.0, "open_chat": 6.0},
+    "overleaf_web": {"open_dashboard": 5.0, "open_project": 4.0},
+    "google_docs_web": {"open_new_document": 5.0, "open_document_url": 4.0},
+    "grok_web": {"open_home": 4.0},
+    "instagram_web": {"open_home": 5.0},
+}
+
+
+def _get_load_waits() -> dict[str, dict[str, float]]:
+    """Load wait config: adapter -> action -> seconds. File overrides defaults."""
+    path = Path(__file__).resolve().parent / "load_waits.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                out: dict[str, dict[str, float]] = {}
+                for k, v in data.items():
+                    if isinstance(v, dict):
+                        out[str(k)] = {str(a): float(w) for a, w in v.items()}
+                return out
+        except Exception:  # noqa: S110
+            pass
+    return dict(DEFAULT_LOAD_WAITS)
+
 
 @dataclass
 class TaskStep:
@@ -115,6 +141,8 @@ class AutomationEngine:
         close_on_finish: bool = False,
     ) -> ExecutionResult:
         self._cancel_requested = False
+        if hasattr(self.browser, "reset_last_opened_url"):
+            self.browser.reset_last_opened_url()
         self.logger(f"Running workflow: {plan_name}")
         if plan_description:
             self.logger(plan_description)
@@ -348,6 +376,10 @@ class AutomationEngine:
                 self.state["last_error"] = str(error)
                 raise
             self.logger(f"Adapter call completed: {adapter_name}.{adapter_action}")
+            wait_seconds = _get_load_waits().get(adapter_name, {}).get(adapter_action)
+            if wait_seconds is not None and wait_seconds > 0:
+                self.logger(f"Waiting {wait_seconds:.0f}s for page load (human-paced).")
+                time.sleep(wait_seconds)
             return result
 
         if action == "search_google":

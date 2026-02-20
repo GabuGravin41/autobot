@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,6 +96,16 @@ class BaseAdapter:
 
         self.state["session_health"] = "ready"
         return {"status": "ready", "url": current_url}
+
+    def _load_wait_seconds(self, env_key: str, default: float) -> float:
+        """Return configured wait in seconds for slow site loads (e.g. AUTOBOT_WHATSAPP_LOAD_WAIT=8)."""
+        try:
+            val = os.getenv(env_key, "").strip()
+            if val:
+                return max(0.0, float(val))
+        except (ValueError, TypeError):
+            pass
+        return default
 
     def _ensure_url(self, url: str) -> None:
         self.browser.start()

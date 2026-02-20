@@ -121,8 +121,39 @@ def console_fix_assist_workflow(local_url: str = "http://localhost:3000") -> Wor
     )
 
 
+def open_whatsapp_stay_workflow(phone: str = "") -> WorkflowPlan:
+    """Open WhatsApp Web and leave it open (no close steps). Topic = optional phone number."""
+    phone = (phone or "").strip()
+    if phone:
+        steps = [
+            TaskStep(action="browser_set_mode", args={"mode": "human_profile"}, description="Use human profile mode"),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "whatsapp_web", "adapter_action": "open_chat", "params": {"phone": phone}},
+                description=f"Open WhatsApp chat: {phone}",
+            ),
+            TaskStep(action="wait", args={"seconds": 2}, description="Let page load and stay open"),
+        ]
+    else:
+        steps = [
+            TaskStep(action="browser_set_mode", args={"mode": "human_profile"}, description="Use human profile mode"),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "whatsapp_web", "adapter_action": "open_home", "params": {}},
+                description="Open WhatsApp Web home",
+            ),
+            TaskStep(action="wait", args={"seconds": 2}, description="Let page load and stay open"),
+        ]
+    return WorkflowPlan(
+        name="open_whatsapp_stay",
+        description="Open WhatsApp Web and leave it open (no tab close).",
+        steps=steps,
+    )
+
+
 def builtin_workflows() -> dict[str, WorkflowPlan]:
     return {
+        "open_whatsapp_stay": open_whatsapp_stay_workflow(""),
         "website_builder": website_builder_workflow("new product"),
         "research_paper": research_paper_workflow("AI systems"),
         "console_fix_assist": console_fix_assist_workflow(),
@@ -140,11 +171,9 @@ def tool_call_stress_workflow(
     docs_existing_url: str,
     download_check_path: str,
     outgoing_message: str,
+    close_tabs_at_end: bool = False,
 ) -> WorkflowPlan:
-    return WorkflowPlan(
-        name="tool_call_stress",
-        description="Stress-test chained tool calling from WhatsApp -> Docs -> Grok -> Overleaf -> download -> cleanup.",
-        steps=[
+    steps: list[TaskStep] = [
             TaskStep(action="browser_set_mode", args={"mode": "human_profile"}, description="Force human profile mode"),
             TaskStep(action="adapter_set_policy", args={"profile": "trusted"}, description="Set trusted policy for test"),
             TaskStep(
@@ -280,6 +309,9 @@ def tool_call_stress_workflow(
                 continue_on_error=True,
                 description="Screenshot after Overleaf download",
             ),
+        ]
+    if close_tabs_at_end:
+        steps.extend([
             TaskStep(
                 action="desktop_hotkey",
                 args={"keys": ["ctrl", "w"]},
@@ -307,14 +339,21 @@ def tool_call_stress_workflow(
                 continue_on_error=True,
                 description="Final screenshot",
             ),
-            TaskStep(
-                action="log",
-                args={
-                    "message": (
-                        "Tool-call stress test complete. Check run folder for history.json, screenshots/, and artifacts.json."
-                    )
-                },
-                description="Summarize stress test completion",
-            ),
-        ],
+        ])
+    steps.append(
+        TaskStep(
+            action="log",
+            args={
+                "message": (
+                    "Tool-call stress test complete. Check run folder for history.json, screenshots/, and artifacts.json."
+                )
+            },
+            description="Summarize stress test completion",
+        ),
+    )
+    return WorkflowPlan(
+        name="tool_call_stress",
+        description="Stress-test chained tool calling from WhatsApp -> Docs -> Grok -> Overleaf -> download."
+        + (" Cleanup: close tabs at end." if close_tabs_at_end else " Tabs left open."),
+        steps=steps,
     )

@@ -117,6 +117,8 @@ UI / CLI / Autonomous loop
 | Variable | Purpose |
 |----------|---------|
 | `AUTOBOT_BROWSER_MODE` | `auto` \| `human_profile` \| `devtools`. Default: `auto`. |
+| `AUTOBOT_OPEN_NEW_TAB` | `1` or `0`. Default: `1`. In human_profile, open each URL in a new tab (leave current tab open). |
+| **Load waits** | In human_profile, seconds to wait after opening slow sites. Set to `0` to skip. `AUTOBOT_WHATSAPP_LOAD_WAIT` (default 8), `AUTOBOT_WHATSAPP_CHAT_LOAD_WAIT` (5), `AUTOBOT_OVERLEAF_LOAD_WAIT` (5), `AUTOBOT_GROK_LOAD_WAIT` (4), `AUTOBOT_GOOGLE_DOCS_LOAD_WAIT` (4). |
 | `AUTOBOT_CHROME_USER_DATA_DIR` | Directory for Playwright Chrome profile (devtools). |
 | `AUTOBOT_CHROME_PROFILE_DIR` | Profile name (default `Default`). |
 | `AUTOBOT_CHROME_EXECUTABLE` | Path to Chrome binary (human_profile / fallback). |

@@ -12,6 +12,7 @@ from .planner import build_plan_from_text
 from .workflows import (
     builtin_workflows,
     console_fix_assist_workflow,
+    open_whatsapp_stay_workflow,
     research_paper_workflow,
     tool_call_stress_workflow,
     website_builder_workflow,
@@ -23,7 +24,7 @@ class AutobotUI:
         self.root = root
         self.root.title("Autobot Autonomous Controller")
         self.root.geometry("1240x760")
-        self.root.minsize(1080, 680)
+        self.root.minsize(960, 620)
 
         self.task_var = tk.StringVar()
         self.topic_var = tk.StringVar()
@@ -49,11 +50,35 @@ class AutobotUI:
         self._last_adapter_run_time = 0.0
         self._ai_plan_steps: list[TaskStep] = []
         self._ai_brain = LLMBrain(logger=self._log)
+        self._chain_steps: list[dict] = []  # {"type": str, ...params}
         self._build_layout()
 
     def _build_layout(self) -> None:
-        main = ttk.Frame(self.root, padding=12)
-        main.pack(fill="both", expand=True)
+        # Scrollable container so when window is small, user can scroll to see bottom (Run chain, Activity, etc.)
+        outer = ttk.Frame(self.root, padding=0)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.configure(command=canvas.yview)
+        main = ttk.Frame(canvas, padding=12)
+        canvas_window = canvas.create_window((0, 0), window=main, anchor="nw")
+
+        def _on_frame_configure(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        main.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event: tk.Event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         title = ttk.Label(main, text="Autobot Desktop Automation", font=("Segoe UI", 13, "bold"))
         title.pack(anchor="w", pady=(0, 8))
@@ -102,10 +127,30 @@ class AutobotUI:
         self.workflow_picker.pack(side="left")
         ttk.Label(workflow_frame, text="Topic / Context").pack(side="left", padx=(12, 6))
         ttk.Entry(workflow_frame, textvariable=self.topic_var).pack(side="left", fill="x", expand=True)
+        self.workflow_close_tabs_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            workflow_frame,
+            text="Close tabs when done",
+            variable=self.workflow_close_tabs_var,
+        ).pack(side="left", padx=(8, 0))
         self.run_workflow_button = ttk.Button(workflow_frame, text="Run Workflow", command=self._run_selected_workflow)
         self.run_workflow_button.pack(side="left", padx=8)
         self.run_benchmarks_button = ttk.Button(workflow_frame, text="Run Benchmarks", command=self._run_benchmarks)
         self.run_benchmarks_button.pack(side="left", padx=8)
+
+        chain_frame = ttk.LabelFrame(main, text="Custom chain (run in order; tabs stay open)", padding=8)
+        chain_frame.pack(fill="x", pady=(0, 8))
+        chain_inner = ttk.Frame(chain_frame)
+        chain_inner.pack(fill="x")
+        self.chain_listbox = tk.Listbox(chain_inner, height=4, selectmode=tk.SINGLE)
+        self.chain_listbox.pack(side="left", fill="both", expand=True)
+        chain_btns = ttk.Frame(chain_inner)
+        chain_btns.pack(side="right", padx=(8, 0))
+        ttk.Button(chain_btns, text="Add step", command=self._chain_add_step).pack(fill="x", pady=(0, 4))
+        ttk.Button(chain_btns, text="Remove", command=self._chain_remove_step).pack(fill="x", pady=(0, 4))
+        ttk.Button(chain_btns, text="Move up", command=self._chain_move_up).pack(fill="x", pady=(0, 4))
+        ttk.Button(chain_btns, text="Move down", command=self._chain_move_down).pack(fill="x", pady=(0, 4))
+        ttk.Button(chain_frame, text="Run chain", command=self._run_chain).pack(anchor="w", pady=(8, 0))
 
         ai_frame = ttk.LabelFrame(main, text="AI Planner Chat", padding=8)
         ai_frame.pack(fill="x", pady=(0, 8))
@@ -228,8 +273,13 @@ class AutobotUI:
         autonomous.columnconfigure(4, weight=1)
 
         ttk.Label(main, text="Activity").pack(anchor="w")
-        self.log_box = tk.Text(main, height=14, wrap="word")
-        self.log_box.pack(fill="both", expand=True)
+        log_frame = ttk.Frame(main)
+        log_frame.pack(fill="both", expand=True)
+        log_scroll = ttk.Scrollbar(log_frame)
+        log_scroll.pack(side="right", fill="y")
+        self.log_box = tk.Text(log_frame, height=10, wrap="word", yscrollcommand=log_scroll.set)
+        self.log_box.pack(side="left", fill="both", expand=True)
+        log_scroll.configure(command=self.log_box.yview)
         self.log_box.insert(
             "end",
             (
@@ -246,7 +296,7 @@ class AutobotUI:
                 "- wait <seconds>\n\n"
                 "Autonomous mode:\n"
                 "- Repeats diagnose -> plan -> execute -> retest loops.\n"
-                "- Uses LLM if GOOGLE_API_KEY is set, otherwise manual handoff fallback.\n\n"
+                "- Uses LLM if GOOGLE_API_KEY (Gemini) or XAI_API_KEY (Grok) is set; set AUTOBOT_LLM_PROVIDER=openai_compat for Grok.\n\n"
             ),
         )
         self.log_box.configure(state="disabled")
@@ -269,7 +319,9 @@ class AutobotUI:
         key = self.workflow_var.get().strip()
         topic = self.topic_var.get().strip()
 
-        if key == "website_builder":
+        if key == "open_whatsapp_stay":
+            plan = open_whatsapp_stay_workflow(phone=topic)
+        elif key == "website_builder":
             plan = website_builder_workflow(topic)
         elif key == "research_paper":
             plan = research_paper_workflow(topic)
@@ -286,6 +338,7 @@ class AutobotUI:
                 docs_existing_url=parts[1],
                 download_check_path=parts[2],
                 outgoing_message=parts[3] or "Autobot tool-calling test message",
+                close_tabs_at_end=self.workflow_close_tabs_var.get(),
             )
         else:
             messagebox.showerror("Autobot", f"Unknown workflow '{key}'.")
@@ -314,6 +367,7 @@ class AutobotUI:
             user_prompt=prompt,
             allowed_actions=self._allowed_actions_for_ai(),
             max_steps=12,
+            tool_catalog=self._build_tool_catalog_for_ai(),
         )
         self._apply_plan_draft(draft)
 
@@ -329,7 +383,7 @@ class AutobotUI:
             )
         )
 
-    def _run_plan(self, plan: WorkflowPlan) -> None:
+    def _run_plan(self, plan: WorkflowPlan, close_on_finish: bool = True) -> None:
         if self._is_running:
             self._log("A task is already running. Wait or press Stop.")
             return
@@ -341,7 +395,15 @@ class AutobotUI:
 
         def runner() -> None:
             try:
-                result = self.engine.run_plan(plan)
+                if close_on_finish:
+                    result = self.engine.run_plan(plan)
+                else:
+                    result = self.engine.run_steps(
+                        plan.steps,
+                        plan_name=plan.name,
+                        plan_description=plan.description or "",
+                        close_on_finish=False,
+                    )
                 self._log(
                     f"Result: success={result.success}, completed_steps={result.completed_steps}/{result.total_steps}"
                 )
@@ -631,7 +693,10 @@ class AutobotUI:
         summary = draft.summary[:240] + ("..." if len(draft.summary) > 240 else "")
         self.ai_plan_label.configure(text=f"{draft.title}: {summary} | steps={len(draft.steps)}")
         self.execute_plan_button.configure(state="normal" if draft.steps and not self._is_running else "disabled")
-        self._log(f"AI plan generated: {draft.title} ({len(draft.steps)} steps)")
+        if draft.summary.startswith("Plan generation failed:"):
+            self._log(draft.summary)
+        else:
+            self._log(f"AI plan generated: {draft.title} ({len(draft.steps)} steps)")
         for idx, step in enumerate(draft.steps, start=1):
             self._log(f"  AI Step {idx}: {step.action} - {step.description}")
 
@@ -661,6 +726,240 @@ class AutobotUI:
             "desktop_press",
             "browser_mode_status",
         ]
+
+    def _build_tool_catalog_for_ai(self) -> str:
+        """Build a short catalog of tools (built-in + adapters) so the AI can call them correctly."""
+        lines = [
+            "Built-in actions:",
+            "  open_url: args.url (e.g. https://web.whatsapp.com)",
+            "  search_google: args.query",
+            "  wait: args.seconds (number)",
+            "  clipboard_set: args.text",
+            "  clipboard_get: (no args)",
+            "  run_command: args.command (shell command)",
+            "  open_path: args.path (file or folder path)",
+            "  open_vscode: args.path (optional)",
+            "  log: args.message",
+            "  adapter_call: args.adapter, args.adapter_action, args.params (object), args.confirmed (true for send/download)",
+            "",
+            "Adapters (adapter_call with adapter + adapter_action + params):",
+        ]
+        lib = getattr(self, "_adapter_library", None) or {}
+        adapter_params = {
+            "whatsapp_web": {
+                "open_home": "{}",
+                "open_chat": '{"chat": "Display Name"} or {"phone": "+1234567890"}',
+                "type_message": '{"text": "message"}',
+                "send_typed_message": "{} (confirm)",
+                "send_message_to_chat": '{"chat": "Name", "text": "message"} (confirm)',
+                "attach_file": '{"path": "C:\\\\full\\\\path\\\\to\\\\file"}',
+                "read_recent_messages": "{}",
+                "list_visible_chats": "{}",
+            },
+            "overleaf_web": {
+                "open_dashboard": "{}",
+                "open_project": '{"title": "Project name"}',
+                "replace_editor_text": '{"text": "content"}',
+                "append_editor_text": '{"text": "content"}',
+                "compile_project": "{}",
+                "download_pdf": "{} (confirm)",
+            },
+            "google_docs_web": {
+                "open_home": "{}",
+                "open_new_document": "{}",
+                "open_document_url": '{"url": "https://docs.google.com/..."}',
+                "type_text": '{"text": "content"}',
+                "copy_all_text": "{}",
+            },
+            "grok_web": {
+                "open_home": "{}",
+                "ask_latex_from_clipboard": '{"instruction": "optional"}',
+                "copy_visible_response": "{}",
+            },
+            "instagram_web": {
+                "open_home": "{}",
+                "open_dm": '{"username": "handle"}',
+                "send_dm": '{"username": "handle", "text": "message"}',
+            },
+            "vscode_desktop": {
+                "open_file": '{"path": "C:\\\\path\\\\file"}',
+                "open_folder": '{"path": "C:\\\\path\\\\folder"}',
+                "run_command": '{"command": "Command ID"}',
+            },
+        }
+        for adapter_name in sorted(lib.keys()):
+            actions = lib.get(adapter_name) or {}
+            params_hints = adapter_params.get(adapter_name) or {}
+            for action_name in sorted(actions.keys()):
+                hint = params_hints.get(action_name, "params object as needed")
+                lines.append(f"  {adapter_name}.{action_name}: params {hint}")
+        return "\n".join(lines)
+
+    def _chain_refresh_listbox(self) -> None:
+        self.chain_listbox.delete(0, tk.END)
+        for i, s in enumerate(self._chain_steps):
+            summary = self._chain_step_summary(s, i + 1)
+            self.chain_listbox.insert(tk.END, summary)
+
+    def _chain_step_summary(self, s: dict, index: int) -> str:
+        t = s.get("type", "")
+        if t == "open_url":
+            return f"{index}. Open URL: {s.get('url', '')[:50]}"
+        if t == "adapter_call":
+            return f"{index}. Adapter: {s.get('adapter', '')}.{s.get('action', '')}"
+        if t == "wait":
+            return f"{index}. Wait: {s.get('seconds', 1)}s"
+        if t == "clipboard_set":
+            return f"{index}. Clipboard set: {str(s.get('text', ''))[:40]}..."
+        if t == "clipboard_get":
+            return f"{index}. Clipboard get"
+        if t == "close_tab":
+            return f"{index}. Close tab"
+        return f"{index}. {t}"
+
+    def _chain_add_step(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("Add chain step")
+        win.transient(self.root)
+        f = ttk.Frame(win, padding=12)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Step type").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        type_var = tk.StringVar(value="open_url")
+        type_combo = ttk.Combobox(
+            f,
+            values=["open_url", "adapter_call", "wait", "clipboard_set", "clipboard_get", "close_tab"],
+            state="readonly",
+            textvariable=type_var,
+            width=16,
+        )
+        type_combo.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 4))
+        url_var = tk.StringVar(value="https://web.whatsapp.com")
+        url_entry = ttk.Entry(f, textvariable=url_var, width=40)
+        url_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(f, text="URL").grid(row=1, column=0, sticky="w", pady=2)
+        adapter_var = tk.StringVar(value="whatsapp_web")
+        action_var = tk.StringVar()
+        params_var = tk.StringVar(value="{}")
+        adapter_combo = ttk.Combobox(
+            f, values=["whatsapp_web", "instagram_web", "overleaf_web", "google_docs_web", "grok_web", "vscode_desktop"], state="readonly", textvariable=adapter_var, width=18
+        )
+        adapter_combo.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=2)
+        ttk.Label(f, text="Adapter").grid(row=2, column=0, sticky="w", pady=2)
+        action_combo = ttk.Combobox(f, values=[], state="readonly", textvariable=action_var, width=24)
+        action_combo.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=2)
+        ttk.Label(f, text="Action").grid(row=3, column=0, sticky="w", pady=2)
+        lib = self._adapter_library or {}
+        def on_adapter(_e=None):
+            actions = list((lib.get(adapter_var.get()) or {}).keys())
+            action_combo["values"] = actions
+            if actions:
+                action_var.set(actions[0])
+        adapter_combo.bind("<<ComboboxSelected>>", on_adapter)
+        on_adapter()
+        ttk.Label(f, text="Params (JSON)").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Entry(f, textvariable=params_var, width=36).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=2)
+        seconds_var = tk.StringVar(value="2")
+        ttk.Label(f, text="Seconds").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Entry(f, textvariable=seconds_var, width=8).grid(row=5, column=1, sticky="w", padx=(8, 0), pady=2)
+        text_var = tk.StringVar()
+        ttk.Label(f, text="Text").grid(row=6, column=0, sticky="w", pady=2)
+        ttk.Entry(f, textvariable=text_var, width=36).grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=2)
+        for r in range(1, 7):
+            f.grid_rowconfigure(r, minsize=0)
+        f.columnconfigure(1, weight=1)
+
+        def add() -> None:
+            t = type_var.get()
+            step: dict = {"type": t}
+            if t == "open_url":
+                step["url"] = url_var.get().strip()
+            elif t == "adapter_call":
+                step["adapter"] = adapter_var.get().strip()
+                step["action"] = action_var.get().strip()
+                try:
+                    step["params"] = json.loads(params_var.get().strip() or "{}")
+                except json.JSONDecodeError:
+                    step["params"] = {}
+            elif t == "wait":
+                try:
+                    step["seconds"] = float(seconds_var.get() or "1")
+                except ValueError:
+                    step["seconds"] = 1.0
+            elif t == "clipboard_set":
+                step["text"] = text_var.get()
+            elif t == "clipboard_get":
+                pass
+            elif t == "close_tab":
+                pass
+            self._chain_steps.append(step)
+            self._chain_refresh_listbox()
+            win.destroy()
+
+        ttk.Button(f, text="Add", command=add).grid(row=7, column=0, columnspan=2, pady=(12, 0))
+        win.grab_set()
+        win.focus_set()
+
+    def _chain_remove_step(self) -> None:
+        sel = self.chain_listbox.curselection()
+        if not sel:
+            return
+        i = int(sel[0])
+        if 0 <= i < len(self._chain_steps):
+            self._chain_steps.pop(i)
+            self._chain_refresh_listbox()
+
+    def _chain_move_up(self) -> None:
+        sel = self.chain_listbox.curselection()
+        if not sel:
+            return
+        i = int(sel[0])
+        if i > 0 and i < len(self._chain_steps):
+            self._chain_steps[i], self._chain_steps[i - 1] = self._chain_steps[i - 1], self._chain_steps[i]
+            self._chain_refresh_listbox()
+            self.chain_listbox.selection_set(i - 1)
+
+    def _chain_move_down(self) -> None:
+        sel = self.chain_listbox.curselection()
+        if not sel:
+            return
+        i = int(sel[0])
+        if i >= 0 and i < len(self._chain_steps) - 1:
+            self._chain_steps[i], self._chain_steps[i + 1] = self._chain_steps[i + 1], self._chain_steps[i]
+            self._chain_refresh_listbox()
+            self.chain_listbox.selection_set(i + 1)
+
+    def _run_chain(self) -> None:
+        if not self._chain_steps:
+            messagebox.showinfo("Autobot", "Add at least one step to the chain.")
+            return
+        steps: list[TaskStep] = []
+        for s in self._chain_steps:
+            t = s.get("type", "")
+            if t == "open_url":
+                steps.append(TaskStep(action="open_url", args={"url": s.get("url", "")}, description=f"Open {s.get('url', '')[:40]}"))
+            elif t == "adapter_call":
+                steps.append(
+                    TaskStep(
+                        action="adapter_call",
+                        args={
+                            "adapter": s.get("adapter", ""),
+                            "adapter_action": s.get("action", ""),
+                            "params": s.get("params", {}),
+                            "confirmed": False,
+                        },
+                        description=f"Adapter {s.get('adapter')}.{s.get('action')}",
+                    )
+                )
+            elif t == "wait":
+                steps.append(TaskStep(action="wait", args={"seconds": s.get("seconds", 1)}, description=f"Wait {s.get('seconds', 1)}s"))
+            elif t == "clipboard_set":
+                steps.append(TaskStep(action="clipboard_set", args={"text": s.get("text", "")}, description="Clipboard set"))
+            elif t == "clipboard_get":
+                steps.append(TaskStep(action="clipboard_get", description="Clipboard get"))
+            elif t == "close_tab":
+                steps.append(TaskStep(action="desktop_hotkey", args={"keys": ["ctrl", "w"]}, description="Close tab"))
+        plan = WorkflowPlan(name="custom_chain", description="Custom step chain.", steps=steps)
+        self._run_plan(plan, close_on_finish=False)
 
     def _build_plan_from_text_block(self, raw_text: str) -> WorkflowPlan:
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]

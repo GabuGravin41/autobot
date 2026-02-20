@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .base import ActionSpec, BaseAdapter
@@ -18,10 +19,19 @@ class GoogleDocsWebAdapter(BaseAdapter):
 
     def do_open_home(self, _params: dict[str, Any]) -> str:
         self._ensure_url("https://docs.google.com/document/")
+        if self._human_mode():
+            wait_s = self._load_wait_seconds("AUTOBOT_GOOGLE_DOCS_LOAD_WAIT", 4.0)
+            if wait_s > 0:
+                self.logger(f"Waiting {wait_s:.0f}s for Google Docs to load.")
+                time.sleep(wait_s)
         return "Opened Google Docs."
 
     def do_open_new_document(self, _params: dict[str, Any]) -> str:
         self.browser.goto("https://docs.google.com/document/create")
+        if self._human_mode():
+            wait_s = self._load_wait_seconds("AUTOBOT_GOOGLE_DOCS_LOAD_WAIT", 4.0)
+            if wait_s > 0:
+                time.sleep(wait_s)
         return "Opened new Google Doc."
 
     def do_open_document_url(self, params: dict[str, Any]) -> str:
