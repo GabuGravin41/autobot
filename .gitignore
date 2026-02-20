@@ -40,7 +40,7 @@ secrets.json
 .DS_Store
 Thumbs.db
 
-# Logs
+# Logs and run output
 *.log
 runs/
 
@@ -48,3 +48,14 @@ runs/
 playwright-report/
 test-results/
 
+# Local Chrome/automation profile (if pointed at project dir)
+chrome_profile/
+automation_data/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor backups
+*.bak
+*.swp
+*~
