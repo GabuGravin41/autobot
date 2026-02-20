@@ -1,0 +1,11 @@
+{
+  "ask_latex_from_clipboard": [
+    { "action": "type", "value": "{instruction}" },
+    { "action": "hotkey", "value": "ctrl+v" },
+    { "action": "press", "value": "enter" }
+  ],
+  "copy_visible_response": [
+    { "action": "hotkey", "value": "ctrl+a" },
+    { "action": "hotkey", "value": "ctrl+c" }
+  ]
+}

@@ -8,6 +8,7 @@ from .workflows import (
     open_target_workflow,
     research_paper_workflow,
     simple_search_workflow,
+    tool_call_stress_workflow,
     website_builder_workflow,
 )
 
@@ -27,6 +28,19 @@ def build_plan_from_text(task: str) -> WorkflowPlan:
             name="benchmark_run",
             description="Run internal benchmark suite.",
             steps=[TaskStep(action="benchmark_run", save_as="benchmark_results", description="Execute benchmark suite")],
+        )
+
+    if lower.startswith("run tool stress "):
+        payload = text[16:].strip()
+        # Format: run tool stress <phone>|<docs_existing_url>|<download_check_path>|<message>
+        parts = [item.strip() for item in payload.split("|")]
+        while len(parts) < 4:
+            parts.append("")
+        return tool_call_stress_workflow(
+            whatsapp_phone=parts[0],
+            docs_existing_url=parts[1],
+            download_check_path=parts[2],
+            outgoing_message=parts[3] or "Autobot tool-calling test message",
         )
 
     if lower.startswith("run "):

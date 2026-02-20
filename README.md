@@ -16,6 +16,7 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - `run <os command>`
   - `browser mode`
   - `run benchmarks`
+  - `run tool stress <phone>|<docs_existing_url>|<download_check_path>|<message>`
   - `open path <local path>`
   - `switch window`
   - `type <text>`
@@ -34,6 +35,8 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - `whatsapp_web`
   - `instagram_web`
   - `overleaf_web`
+  - `google_docs_web`
+  - `grok_web`
   - `vscode_desktop`
 - Adapter actions are explicit and per-site, with confirmation gates for sensitive operations such as message send and PDF download.
 - UI includes an adapter panel with action docs and a required checkbox for sensitive actions.
@@ -84,6 +87,7 @@ python -m autobot.main
 - In `human_profile` mode, URL/search and keyboard flows use your real Chrome session; some DOM-selector actions are limited.
 - Human-mode safety guard blocks typing if Autobot/Cursor window appears focused, to prevent runaway self-trigger loops.
 - AI Planner Chat panel allows prompt -> plan preview -> execute workflow (uses configured provider or safe fallback).
+- End-to-end tool-calling stress workflow is available as preset `tool_call_stress`.
 - Desktop actions are intentionally explicit and coordinate-based to keep behavior predictable.
 - This is a foundation for larger autonomous loops; extend workflows in `autobot/workflows.py`.
 - Autonomous mode blocks obvious bulk-messaging intents by default. Use consent-based, explicit tasks only.

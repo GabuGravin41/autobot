@@ -270,6 +270,15 @@ class AutomationEngine:
             self.logger(f"Browser mode status: active={data.get('active_mode')} configured={data.get('configured_mode')}")
             return data
 
+        if action == "browser_set_mode":
+            mode = str(args.get("mode", "auto")).strip().lower()
+            if mode not in {"auto", "human_profile", "devtools"}:
+                raise ValueError("browser_set_mode requires one of: auto, human_profile, devtools")
+            os.environ["AUTOBOT_BROWSER_MODE"] = mode
+            self.state["browser_mode_requested"] = mode
+            self.logger(f"Browser mode set for next session: {mode}")
+            return mode
+
         if action == "benchmark_run":
             from .benchmark import run_benchmarks
 
@@ -407,6 +416,29 @@ class AutomationEngine:
             if output:
                 self.logger(output[:5000])
             return output
+
+        if action == "file_exists":
+            path = str(args.get("path", "")).strip()
+            if not path:
+                raise ValueError("file_exists requires path.")
+            exists = Path(path).exists()
+            self.logger(f"File exists check [{path}]: {exists}")
+            return exists
+
+        if action == "wait_for_file":
+            path = str(args.get("path", "")).strip()
+            timeout_seconds = float(args.get("timeout_seconds", 60))
+            poll_interval = float(args.get("poll_interval_seconds", 1))
+            if not path:
+                raise ValueError("wait_for_file requires path.")
+            deadline = time.time() + timeout_seconds
+            while time.time() < deadline:
+                if Path(path).exists():
+                    self.logger(f"Detected file: {path}")
+                    return True
+                time.sleep(max(0.2, poll_interval))
+            self.logger(f"Timed out waiting for file: {path}")
+            return False
 
         if action == "wait":
             seconds = float(args.get("seconds", 1))

@@ -1,0 +1,9 @@
+{
+  "type_text": [
+    { "action": "type", "value": "{text}" }
+  ],
+  "copy_all_text": [
+    { "action": "hotkey", "value": "ctrl+a" },
+    { "action": "hotkey", "value": "ctrl+c" }
+  ]
+}

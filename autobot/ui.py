@@ -9,7 +9,13 @@ from .autonomy import AutonomousConfig, AutonomousRunner
 from .engine import AutomationEngine, TaskStep, WorkflowPlan
 from .llm_brain import LLMBrain, PlanDraft
 from .planner import build_plan_from_text
-from .workflows import builtin_workflows, console_fix_assist_workflow, research_paper_workflow, website_builder_workflow
+from .workflows import (
+    builtin_workflows,
+    console_fix_assist_workflow,
+    research_paper_workflow,
+    tool_call_stress_workflow,
+    website_builder_workflow,
+)
 
 
 class AutobotUI:
@@ -121,7 +127,7 @@ class AutobotUI:
         ttk.Label(adapter_frame, text="Adapter").grid(row=0, column=0, sticky="w")
         self.adapter_picker = ttk.Combobox(
             adapter_frame,
-            values=["whatsapp_web", "instagram_web", "overleaf_web", "vscode_desktop"],
+            values=["whatsapp_web", "instagram_web", "overleaf_web", "google_docs_web", "grok_web", "vscode_desktop"],
             state="readonly",
             textvariable=self.adapter_var,
             width=20,
@@ -269,6 +275,18 @@ class AutobotUI:
             plan = research_paper_workflow(topic)
         elif key == "console_fix_assist":
             plan = console_fix_assist_workflow(topic or "http://localhost:3000")
+        elif key == "tool_call_stress":
+            # Topic/context format:
+            # <phone>|<docs_existing_url>|<download_check_path>|<message>
+            parts = [item.strip() for item in topic.split("|")] if topic else []
+            while len(parts) < 4:
+                parts.append("")
+            plan = tool_call_stress_workflow(
+                whatsapp_phone=parts[0],
+                docs_existing_url=parts[1],
+                download_check_path=parts[2],
+                outgoing_message=parts[3] or "Autobot tool-calling test message",
+            )
         else:
             messagebox.showerror("Autobot", f"Unknown workflow '{key}'.")
             return

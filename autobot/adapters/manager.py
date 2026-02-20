@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 from ..browser_agent import BrowserController
 from .base import AdapterConfirmationError, BaseAdapter
+from .google_docs_web import GoogleDocsWebAdapter
+from .grok_web import GrokWebAdapter
 from .instagram_web import InstagramWebAdapter
 from .overleaf_web import OverleafWebAdapter
 from .vscode_desktop import VSCodeDesktopAdapter
@@ -22,6 +24,8 @@ class AdapterManager:
             "whatsapp_web": WhatsAppWebAdapter(browser=browser, logger=self.logger),
             "instagram_web": InstagramWebAdapter(browser=browser, logger=self.logger),
             "overleaf_web": OverleafWebAdapter(browser=browser, logger=self.logger),
+            "google_docs_web": GoogleDocsWebAdapter(browser=browser, logger=self.logger),
+            "grok_web": GrokWebAdapter(browser=browser, logger=self.logger),
             "vscode_desktop": VSCodeDesktopAdapter(browser=browser, logger=self.logger),
         }
 
