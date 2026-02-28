@@ -214,6 +214,26 @@ def build_plan_from_text(task: str) -> WorkflowPlan:
     if "fix console" in lower or "console errors" in lower:
         return console_fix_assist_workflow()
 
+    if lower.startswith("extract "):
+        prompt = text[8:].strip()
+        return WorkflowPlan(
+            name="extract_information",
+            description=f"Extract information based on prompt: {prompt}",
+            steps=[
+                TaskStep(
+                    action="extract_information",
+                    args={"prompt": prompt},
+                    save_as="extracted_info",
+                    description=f"Extract: {prompt}",
+                ),
+                TaskStep(
+                    action="log",
+                    args={"message": "Extracted info: {extracted_info}"},
+                    description="Log extraction",
+                ),
+            ],
+        )
+
     return WorkflowPlan(
         name="generic_assistant",
         description="Fallback flow for generic tasks.",
@@ -223,7 +243,7 @@ def build_plan_from_text(task: str) -> WorkflowPlan:
                 action="log",
                 args={
                     "message": (
-                        "Use explicit commands for best results: search <query>, open <target>, run <command>, wait <seconds>."
+                        "Use explicit commands for best results: search <query>, open <target>, run <command>, wait <seconds>, extract <prompt>."
                     )
                 },
                 description="Show supported command formats",

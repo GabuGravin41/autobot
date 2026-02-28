@@ -35,7 +35,8 @@ class AutobotUI:
         self.adapter_confirm_var = tk.BooleanVar(value=False)
         self.adapter_policy_var = tk.StringVar(value="balanced")
         self.adapter_prepare_token_var = tk.StringVar()
-        self.browser_mode_var = tk.StringVar(value=os.getenv("AUTOBOT_BROWSER_MODE", "auto"))
+        # Force human_profile as the default/only browser mode.
+        self.browser_mode_var = tk.StringVar(value="human_profile")
         self.goal_var = tk.StringVar()
         self.autonomous_url_var = tk.StringVar(value="http://localhost:3000")
         self.autonomous_diag_cmd_var = tk.StringVar(value="pytest -q")
@@ -105,7 +106,7 @@ class AutobotUI:
         ttk.Label(task_row, text="Browser mode").pack(side="left", padx=(12, 6))
         self.browser_mode_picker = ttk.Combobox(
             task_row,
-            values=["auto", "human_profile", "devtools"],
+            values=["human_profile"],
             state="readonly",
             textvariable=self.browser_mode_var,
             width=14,
@@ -286,7 +287,7 @@ class AutobotUI:
                 "Autobot ready.\n"
                 "- Uses your installed Chrome profile (cookies/session).\n"
                 "- If Chrome is running and profile is locked, close Chrome and retry.\n\n"
-                "- Browser mode can be set to auto/human_profile/devtools from the top row.\n\n"
+                "- Browser mode is fixed to human_profile for this build.\n\n"
                 "Supported quick commands:\n"
                 "- search <query>\n"
                 "- open <url|target>\n"
@@ -666,9 +667,10 @@ class AutobotUI:
             self.adapter_prepare_token_var.set(token)
 
     def _apply_browser_mode(self, silent: bool = False) -> None:
+        # Only human_profile is supported now; coerce anything else.
         mode = self.browser_mode_var.get().strip().lower()
-        if mode not in {"auto", "human_profile", "devtools"}:
-            mode = "auto"
+        if mode != "human_profile":
+            mode = "human_profile"
             self.browser_mode_var.set(mode)
         os.environ["AUTOBOT_BROWSER_MODE"] = mode
         if not silent:

@@ -23,10 +23,8 @@ Autobot is a **local desktop automation controller** that runs repetitive workfl
 ## 1. Overview
 
 - **Purpose:** Run multi-step workflows (open sites, type, send messages, copy/paste, compile, download) without writing one-off scripts.
-- **Browser modes:**
-  - **`human_profile`** — Uses your real Chrome (via `webbrowser` / Chrome executable). Typing and keys use `pyautogui`. Best when DevTools automation is blocked or you need real cookies/sessions.
-  - **`devtools`** — Playwright-controlled Chrome with a dedicated profile. Full DOM/selector control.
-  - **`auto`** — Tries devtools; falls back to human_profile if Chrome blocks automation (e.g. “non-default data directory”).
+- **Browser mode:**
+  - **`human_profile`** — Uses your real Chrome (via `webbrowser` / Chrome executable). Typing and keys use `pyautogui`. This build disables devtools automation and always runs in human_profile mode.
 - **Execution:** Workflows are **plans** made of **steps**. Each step is an **action** (e.g. `open_url`, `adapter_call`, `clipboard_set`, `screenshot`) with optional condition, retries, and `continue_on_error`.
 - **Runs:** Every run writes a **run folder** (human-readable name) with `history.json`, `artifacts.json`, `screenshots/`, `console.log`, and `about.txt`.
 
@@ -116,10 +114,10 @@ UI / CLI / Autonomous loop
 
 | Variable | Purpose |
 |----------|---------|
-| `AUTOBOT_BROWSER_MODE` | `auto` \| `human_profile` \| `devtools`. Default: `auto`. |
+| `AUTOBOT_BROWSER_MODE` | Only `human_profile` is supported. Default: `human_profile`. |
 | `AUTOBOT_OPEN_NEW_TAB` | `1` or `0`. Default: `1`. In human_profile, open each URL in a new tab (leave current tab open). |
 | **Load waits** | In human_profile, seconds to wait after opening slow sites. Set to `0` to skip. `AUTOBOT_WHATSAPP_LOAD_WAIT` (default 8), `AUTOBOT_WHATSAPP_CHAT_LOAD_WAIT` (5), `AUTOBOT_OVERLEAF_LOAD_WAIT` (5), `AUTOBOT_GROK_LOAD_WAIT` (4), `AUTOBOT_GOOGLE_DOCS_LOAD_WAIT` (4). |
-| `AUTOBOT_CHROME_USER_DATA_DIR` | Directory for Playwright Chrome profile (devtools). |
+| `AUTOBOT_CHROME_USER_DATA_DIR` | Directory for Playwright Chrome profile (legacy; human_profile mode does not depend on it but still uses this directory when present). |
 | `AUTOBOT_CHROME_PROFILE_DIR` | Profile name (default `Default`). |
 | `AUTOBOT_CHROME_EXECUTABLE` | Path to Chrome binary (human_profile / fallback). |
 | `AUTOBOT_CHROME_SOURCE_USER_DATA_DIR` | Source Chrome user data for bootstrap. |

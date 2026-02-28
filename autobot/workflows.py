@@ -19,25 +19,63 @@ def simple_search_workflow(query: str) -> WorkflowPlan:
 
 def open_target_workflow(target: str) -> WorkflowPlan:
     normalized = target.strip().lower()
+    
+    # Handle specific local apps first
     if normalized in {"vscode", "vs code", "code"}:
         return WorkflowPlan(
             name="open_vscode",
             description="Open Visual Studio Code.",
             steps=[TaskStep(action="open_vscode", description="Open VS Code")],
         )
-    if normalized == "overleaf":
-        target = "https://www.overleaf.com"
-    if normalized in {"casa", "casa ai"}:
-        target = "https://www.casa.ai"
-    if normalized in {"grok"}:
-        target = "https://grok.com"
-    if normalized in {"deepseek"}:
-        target = "https://chat.deepseek.com"
+    
+    # Handle known websites
+    known_sites = {
+        "overleaf": "https://www.overleaf.com",
+        "casa": "https://www.casa.ai",
+        "casa ai": "https://www.casa.ai",
+        "grok": "https://grok.com",
+        "deepseek": "https://chat.deepseek.com",
+        "chatgpt": "https://chatgpt.com",
+        "openai": "https://openai.com",
+        "google": "https://www.google.com",
+        "chrome": "https://www.google.com",
+        "browser": "https://www.google.com",
+        "whatsapp": "https://web.whatsapp.com",
+        "instagram": "https://www.instagram.com",
+    }
+    
+    if normalized in known_sites:
+        url = known_sites[normalized]
+        return WorkflowPlan(
+            name="open_target",
+            description=f"Open target: {normalized}",
+            steps=[TaskStep(action="open_url", args={"url": url}, description=f"Open {url}")],
+        )
 
+    # If it looks like a URL (contains a dot), open it directly
+    if "." in normalized and " " not in normalized:
+        return WorkflowPlan(
+            name="open_target",
+            description=f"Open URL: {target}",
+            steps=[TaskStep(action="open_url", args={"url": target}, description=f"Open {target}")],
+        )
+
+    # Fallback for unknown software/sites: Search Google for the official site
     return WorkflowPlan(
-        name="open_target",
-        description=f"Open target: {target}",
-        steps=[TaskStep(action="open_url", args={"url": target}, description=f"Open {target}")],
+        name="open_search_target",
+        description=f"Search for and open target: {target}",
+        steps=[
+            TaskStep(
+                action="search_google", 
+                args={"query": f"{target} official website"}, 
+                description=f"Search Google for '{target}'"
+            ),
+            TaskStep(
+                action="log",
+                args={"message": f"I've searched for '{target}'. You can now click the official link or ask me to perform actions on the page."},
+                description="Guide user after search"
+            )
+        ],
     )
 
 
@@ -70,26 +108,125 @@ def website_builder_workflow(topic: str) -> WorkflowPlan:
 
 def research_paper_workflow(topic: str) -> WorkflowPlan:
     topic = topic.strip() or "AI systems"
+    overleaf_project_title = "Autobot Research Paper"
     return WorkflowPlan(
         name="research_paper",
-        description="Open research tools and prep paper draft flow.",
+        description="End-to-end research flow: search, ask Grok for LaTeX, open Overleaf, and compile.",
         steps=[
-            TaskStep(action="open_url", args={"url": "https://grok.com"}, description="Open Grok"),
-            TaskStep(action="open_url", args={"url": "https://chat.deepseek.com"}, description="Open DeepSeek"),
-            TaskStep(action="open_url", args={"url": "https://www.overleaf.com"}, description="Open Overleaf"),
             TaskStep(
                 action="search_google",
                 args={"query": f"latest peer-reviewed references on {topic}"},
-                description="Collect supporting references",
+                description="Search Google for latest peer-reviewed references",
+            ),
+            TaskStep(
+                action="wait",
+                args={"seconds": 8},
+                description="Give Google time to load results like a human would",
+            ),
+            TaskStep(
+                action="clipboard_set",
+                args={
+                    "text": (
+                        "You are an expert research assistant. Using the latest peer-reviewed references on "
+                        f"{topic}, pick one reference that would support a strong paper and write a full LaTeX "
+                        "article for it. Return ONLY LaTeX source code, suitable to paste directly into Overleaf. "
+                        "Do not explain anything."
+                    )
+                },
+                description="Prepare Grok prompt for LaTeX paper based on latest references",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "grok_web", "adapter_action": "open_home", "params": {}},
+                description="Open Grok in browser",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={
+                    "adapter": "grok_web",
+                    "adapter_action": "ask_latex_from_clipboard",
+                    "params": {
+                        "instruction": (
+                            "Paste the latest peer-reviewed references from the browser context and write a LaTeX article "
+                            "for the best reference as described in the clipboard prompt."
+                        )
+                    },
+                },
+                description="Ask Grok to generate LaTeX paper from clipboard prompt",
+            ),
+            TaskStep(
+                action="wait",
+                args={"seconds": 90},
+                description="Wait for Grok to finish responding before copying (slow, human-paced)",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "grok_web", "adapter_action": "copy_visible_response", "params": {}},
+                retries=2,
+                retry_delay_seconds=8.0,
+                description="Copy Grok LaTeX response to clipboard",
+            ),
+            TaskStep(
+                action="clipboard_get",
+                save_as="latex_text",
+                description="Capture LaTeX source from clipboard",
             ),
             TaskStep(
                 action="log",
                 args={
                     "message": (
-                        "Research stack is open. Prompt an LLM for LaTeX draft and paste into Overleaf for compilation."
+                        "Captured LaTeX length: {latex_text} (first 200 chars shown below in logs if needed)."
                     )
                 },
-                description="Log paper drafting guidance",
+                description="Log that LaTeX was captured (for debugging)",
+                condition="bool(state.get('latex_text'))",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "overleaf_web", "adapter_action": "open_dashboard", "params": {}},
+                description="Open Overleaf dashboard (sign in with Google if prompted)",
+                condition="state.get('latex_text') and '\\\\begin' in state.get('latex_text','')",
+            ),
+            TaskStep(
+                action="wait",
+                args={"seconds": 10},
+                description="Give Overleaf dashboard time to load",
+                condition="state.get('latex_text') and '\\\\begin' in state.get('latex_text','')",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={
+                    "adapter": "overleaf_web",
+                    "adapter_action": "open_project",
+                    "params": {"title": overleaf_project_title},
+                },
+                description=f"Open Overleaf project: {overleaf_project_title}",
+                condition="state.get('latex_text') and '\\\\begin' in state.get('latex_text','')",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={
+                    "adapter": "overleaf_web",
+                    "adapter_action": "replace_editor_text",
+                    "params": {"text": "{latex_text}"},
+                },
+                description="Paste LaTeX into active Overleaf project",
+                condition="state.get('latex_text') and '\\\\begin' in state.get('latex_text','')",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "overleaf_web", "adapter_action": "compile_project", "params": {}},
+                description="Compile LaTeX project in Overleaf",
+                condition="state.get('latex_text') and '\\\\begin' in state.get('latex_text','')",
+            ),
+            TaskStep(
+                action="log",
+                args={
+                    "message": (
+                        "Research paper workflow finished. Grok LaTeX should be in Overleaf; review and click Recompile again if needed."
+                    )
+                },
+                description="Log completion of research paper workflow",
             ),
         ],
     )

@@ -41,8 +41,16 @@ class LLMBrain:
         raw = os.getenv("AUTOBOT_LLM_PROVIDER", "gemini").strip().lower()
         self.provider = "openai_compat" if raw == "openai_compact" else raw
         self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        self.openai_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("XAI_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("XAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
         self.openai_base_url = os.getenv("AUTOBOT_OPENAI_BASE_URL", "https://api.x.ai/v1")
+        
+        if self.provider == "openrouter":
+            self.openai_base_url = "https://openrouter.ai/api/v1"
+            # Prioritize OpenRouter specific key if available
+            self.openai_api_key = os.getenv("OPENROUTER_API_KEY") or self.openai_api_key
+            if not os.getenv("AUTOBOT_LLM_MODEL"):
+                self.model_name = "deepseek/deepseek-chat"
+
         self.enabled = False
         self._model = None
         if self.provider == "gemini" and bool(self.api_key):
@@ -51,7 +59,7 @@ class LLMBrain:
                 _genai.configure(api_key=self.api_key)
                 self._model = _genai.GenerativeModel(self.model_name)
                 self.enabled = True
-        elif self.provider == "openai_compat" and bool(self.openai_api_key):
+        elif (self.provider == "openai_compat" or self.provider == "openrouter") and bool(self.openai_api_key):
             self.enabled = True
 
     def decide_next_steps(
@@ -169,6 +177,9 @@ class LLMBrain:
             "reason": "string",
             "steps": [
                 {
+                    "id": "optional unique string identifier for this step",
+                    "depends_on": "optional list of step ids that must complete before this step",
+                    "target_node": "optional string ID (e.g. AnyDesk node alias) if this step must run remotely",
                     "action": "one of allowed actions",
                     "args": "object with action arguments; for adapter_call use adapter, adapter_action, params, confirmed",
                     "description": "short text",
@@ -179,7 +190,7 @@ class LLMBrain:
             ],
         }
         return (
-            "You are the planning brain for a local automation agent.\n"
+            "You are the planning brain for a local automation agent. Drive the system like a human would: be patient, check if pages have loaded, use search, and read the UI state before acting.\n"
             "Return ONLY strict JSON.\n"
             f"Goal: {goal}\n"
             f"Allowed actions: {allowed_actions}\n"
@@ -187,10 +198,14 @@ class LLMBrain:
             f"Current state: {json.dumps(compact_state)}\n"
             f"Output schema: {json.dumps(schema)}\n"
             "Rules:\n"
-            "- Use high-level tool calls, keep steps short.\n"
-            "- Prefer diagnostics and safe actions.\n"
-            "- If enough evidence suggests task is complete, set done=true.\n"
-            "- Never use destructive commands.\n"
+            "- MODES ARE STRATEGIC CAPABILITIES: Use 'browser_set_mode' to adapt to the site's defenses.\n"
+            "  - 'devtools': High precision. Required for CSS selectors, 'browser_click', 'browser_fill', and 'browser_get_content' (copying).\n"
+            "  - 'human_profile': High stealth. Use for sites with bot detection. Disable selector tools. Use 'desktop_type' and 'desktop_press'.\n"
+            "- DISTRIBUTED COMPUTING: Set 'target_node' to an alias or node ID if a specific sub-agent or remote machine should execute the task. Leave null for local.\n"
+            "- DATA EXTRACTION (COPYING): Use 'browser_get_content' in 'devtools' mode to capture page text. Then save it using 'state_set'.\n"
+            "- NAVIGATION: Use 'browser_click_text' for robust navigation without CSS selectors. It works in 'devtools' mode.\n"
+            "- AUTONOMY: If a site blocks you, switch mode and try an alternative tool. Do NOT ask the user for help unless you are blocked by a CAPTCHA.\n"
+            "- CAPTCHAS: Use 'request_human_help' only if you see a CAPTCHA or 'Verify you are human' screen.\n"
         )
 
     def _build_draft_prompt(
@@ -205,6 +220,8 @@ class LLMBrain:
             "summary": "one paragraph summary",
             "steps": [
                 {
+                    "id": "optional unique string identifier for this step",
+                    "depends_on": "optional list of step ids that must complete before this step",
                     "action": "one of allowed actions",
                     "args": "object with action arguments; for adapter_call use adapter, adapter_action, params (object), confirmed (bool)",
                     "description": "step description",
@@ -218,20 +235,22 @@ class LLMBrain:
         if tool_catalog:
             catalog_block = f"\nAvailable tools (use these to fulfill the user request):\n{tool_catalog}\n"
         return (
-            "You are the intelligent mind behind an autonomous computer. Your only job is to understand the user's goal, "
-            "then choose and order the right tool calls (steps). The system will execute each step; you only output the plan. "
-            "Use only the allowed actions and the tool catalog below. Be precise: correct adapter names, action names, and params.\n"
-            "Return ONLY strict JSON, no markdown.\n"
+            "You are a strict JSON-only automation planner. "
+            "Convert the user request into a sequence of atomic tool calls.\n\n"
+            "### RULES:\n"
+            "1. JSON FORMAT: Output ONLY valid, parsable JSON. No markdown backticks. No conversational filler.\n"
+            "2. ESCAPING: Be extremely careful with special characters. All quotes inside strings MUST be escaped (e.g. \\\"text\\\"). All newlines must be literal \\n.\n"
+            "3. GRANULARITY AND PARALLELISM: Break goals down. If tasks can be done in parallel, use 'id' and 'depends_on' properties to create a graph of plans (DAG)."
+            "   Example: Step 1 sets 'id':'A'. Step 2 sets 'id':'B'. Step 3 sets 'depends_on':['A', 'B'].\n"
+            "4. DISTRIBUTED EXECUTION: If processing should be given to a remote worker (AnyDesk sub-agent), set 'target_node' on the step.\n"
+            "5. DATA FLOW: Use 'browser_get_content' to capture large blocks of text. Use 'state_set' to save it. Use '{key}' in later steps to paste it.\n"
+            "6. FIDELITY: Use the exact details provided by the user in your prompts/messages.\n"
+            "7. MODES: Use 'browser_set_mode' to 'devtools' before any extraction or clicking.\n\n"
             f"User request: {user_prompt}\n"
             f"Allowed action names: {allowed_actions}\n"
             f"Max steps: {max_steps}\n"
             f"{catalog_block}"
             f"Output schema: {json.dumps(schema)}\n"
-            "Rules:\n"
-            "- Produce safe, high-level steps. Each step is one tool call.\n"
-            "- For adapter_call, set args.adapter (e.g. whatsapp_web), args.adapter_action (e.g. open_chat), args.params (object, e.g. {\"chat\": \"Name\"}), args.confirmed (true only for send/download).\n"
-            "- Use explicit action arguments. Keep steps deterministic and practical.\n"
-            "- Avoid destructive actions.\n"
         )
 
     def _call_openai_compatible(self, prompt: str, model_override: str | None = None) -> str:
@@ -245,9 +264,16 @@ class LLMBrain:
 
         try:
             from openai import OpenAI
+            extra_headers = {}
+            if self.provider == "openrouter":
+                extra_headers = {
+                    "HTTP-Referer": "https://github.com/autobot-ai",
+                    "X-Title": "Autobot Jarvis",
+                }
             client = OpenAI(
                 api_key=self.openai_api_key,
                 base_url=self.openai_base_url.rstrip("/"),
+                default_headers=extra_headers
             )
             completion = client.chat.completions.create(
                 model=model,
@@ -259,6 +285,9 @@ class LLMBrain:
             content = (completion.choices[0].message.content or "").strip()
             if not content:
                 raise RuntimeError("Empty content returned by openai_compat provider.")
+            # Strip reasoning if it exists (DeepSeek R1 <think> tags)
+            if "<think>" in content and "</think>" in content:
+                content = content.split("</think>")[-1].strip()
             return content
         except ImportError:
             pass
@@ -270,16 +299,22 @@ class LLMBrain:
             "temperature": 0.2,
         }
         data = json.dumps(body).encode("utf-8")
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.openai_api_key}",
+            "User-Agent": "Autobot/1.0",
+        }
+        if self.provider == "openrouter":
+            headers["HTTP-Referer"] = "https://github.com/autobot-ai"
+            headers["X-Title"] = "Autobot Jarvis"
+
         req = request.Request(
             endpoint,
             data=data,
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Authorization": f"Bearer {self.openai_api_key}",
-                "User-Agent": "Autobot/1.0 (OpenAI-compatible; +https://github.com)",
-            },
+            headers=headers
         )
         try:
             with request.urlopen(req, timeout=60) as response:
@@ -306,6 +341,11 @@ class LLMBrain:
         content = str(message.get("content", "")).strip()
         if not content:
             raise RuntimeError("Empty content returned by openai_compat provider.")
+            
+        # Strip reasoning tags if using DeepSeek R1
+        if "<think>" in content and "</think>" in content:
+            content = content.split("</think>")[-1].strip()
+            
         return content
 
 
@@ -335,6 +375,9 @@ def _parse_decision(text: str, allowed_actions: set[str], max_steps: int) -> Bra
                     save_as=_none_if_empty(item.get("save_as")),
                     retries=int(item.get("retries", 0)),
                     continue_on_error=bool(item.get("continue_on_error", False)),
+                    id=_none_if_empty(item.get("id")),
+                    depends_on=item.get("depends_on", []),
+                    target_node=_none_if_empty(item.get("target_node")),
                 )
             )
 
@@ -366,6 +409,9 @@ def _parse_plan_draft(text: str, allowed_actions: set[str], max_steps: int) -> P
                     save_as=_none_if_empty(item.get("save_as")),
                     retries=int(item.get("retries", 0)),
                     continue_on_error=bool(item.get("continue_on_error", False)),
+                    id=_none_if_empty(item.get("id")),
+                    depends_on=item.get("depends_on", []),
+                    target_node=_none_if_empty(item.get("target_node")),
                 )
             )
     return PlanDraft(title=title, summary=summary, steps=steps)
@@ -373,15 +419,31 @@ def _parse_plan_draft(text: str, allowed_actions: set[str], max_steps: int) -> P
 
 def _extract_json(text: str) -> str:
     cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found in LLM response.")
-    return cleaned[start : end + 1]
+    # Handle the extremely common case where LLM wraps in ```json ... ```
+    if "```" in cleaned:
+        # Split by backticks and find the segment that looks like JSON or follows the 'json' tag
+        parts = cleaned.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.lower().startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{") and part.endswith("}"):
+                return part
+            if part.startswith("{") and "}" in part:
+                # Nested case or partial capture
+                start_raw = part.find("{")
+                end_raw = part.rfind("}")
+                return part[start_raw : end_raw + 1]
+    
+    start_main = cleaned.find("{")
+    end_main = cleaned.rfind("}")
+    if start_main == -1 or end_main == -1 or end_main <= start_main:
+        # Use a simpler way to truncate for the error message
+        preview = (text + "...") if len(text) > 200 else text
+        if len(preview) > 200:
+            preview = preview[:200]
+        raise ValueError(f"No JSON object found in LLM response: {preview}")
+    return cleaned[start_main : end_main + 1]
 
 
 def _trim_text(text: str, limit: int) -> str:

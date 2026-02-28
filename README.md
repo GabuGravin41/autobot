@@ -73,7 +73,7 @@ python -m autobot.main
 - `AUTOBOT_CHROME_SOURCE_USER_DATA_DIR` (optional, default: local Chrome user-data root for bootstrap)
 - `AUTOBOT_CHROME_SOURCE_PROFILE_DIR` (optional, default: same as `AUTOBOT_CHROME_PROFILE_DIR`)
 - `AUTOBOT_CHROME_LAUNCH_TIMEOUT_MS` (optional, default: `15000`)
-- `AUTOBOT_BROWSER_MODE` (optional: `auto`, `human_profile`, `devtools`; default: `auto`)
+- `AUTOBOT_BROWSER_MODE` (optional; only `human_profile` is supported; default: `human_profile`)
 - `AUTOBOT_OPEN_NEW_TAB` (optional: `1` or `0`; default: `1`) — In human_profile, when opening a URL, open it in a **new tab** (leave current tab open) instead of reusing the same tab. When navigating to the **same site** again in a chain (e.g. WhatsApp home then open chat), the same tab is reused; when switching to a different site, a new tab is opened. Set to `0` to always reuse the current tab.
 - **Load waits (human_profile, seconds):** Optional patience after opening slow sites. Set to `0` to skip. Defaults: `AUTOBOT_WHATSAPP_LOAD_WAIT` = 8, `AUTOBOT_WHATSAPP_CHAT_LOAD_WAIT` = 5, `AUTOBOT_OVERLEAF_LOAD_WAIT` = 5, `AUTOBOT_GROK_LOAD_WAIT` = 4, `AUTOBOT_GOOGLE_DOCS_LOAD_WAIT` = 4.
 - `GOOGLE_API_KEY` or `GEMINI_API_KEY` (optional, enables LLM planner in autonomous mode)
@@ -129,7 +129,7 @@ With empty topic or `|||message`, WhatsApp and file-download steps are skipped; 
 
 - If launch fails on default Chrome profile restrictions, let Autobot use a dedicated automation profile directory.
 - First launch may require one-time sign-in in the automation profile if cookies cannot be copied.
-- In `human_profile` mode, URL/search and keyboard flows use your real Chrome session; some DOM-selector actions are limited.
+- In `human_profile` mode, URL/search and keyboard flows use your real Chrome session; DOM-selector actions and devtools automation are disabled in this build.
 - Human-mode safety guard blocks typing if Autobot/Cursor window appears focused, to prevent runaway self-trigger loops.
 - **Load waits (patience):** After adapter actions that open slow-loading pages (e.g. WhatsApp, Overleaf), the engine waits a few seconds before the next step. Defaults are in code (e.g. 8s after WhatsApp open_home, 6s after open_chat). Override by placing a `load_waits.json` next to `engine.py` (same format: `{"adapter": {"action": seconds}}`).
 - AI Planner Chat panel allows prompt -> plan preview -> execute workflow (uses configured provider or safe fallback).

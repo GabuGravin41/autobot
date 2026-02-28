@@ -11,6 +11,7 @@ class OverleafWebAdapter(BaseAdapter):
     actions = {
         "open_dashboard": ActionSpec("Open Overleaf dashboard"),
         "open_project": ActionSpec("Open project by title from dashboard"),
+        "create_file": ActionSpec("Create a new file in the Overleaf project"),
         "replace_editor_text": ActionSpec("Replace entire editor content"),
         "append_editor_text": ActionSpec("Append text to editor"),
         "compile_project": ActionSpec("Compile current Overleaf project"),
@@ -41,6 +42,25 @@ class OverleafWebAdapter(BaseAdapter):
         self.browser.click(f"{self.selector('project_link')}:has-text('{title}')", timeout_ms=12000)
         self.state["active_project"] = title
         return f"Opened Overleaf project: {title}"
+
+    def do_create_file(self, params: dict[str, Any]) -> str:
+        filename = str(params.get("filename", "main.tex")).strip()
+        if self._human_mode():
+            self.run_human_nav("create_file", {"filename": filename})
+            return f"Requested creation of file '{filename}' in human profile mode."
+        
+        # Devtools approach:
+        clicked = self._click_if_present(["button[aria-label='New File']", ".fa-file-o", ".toolbar-btn-new-file"], 6000)
+        if not clicked:
+            raise RuntimeError("Could not find the 'New File' button in the Overleaf UI.")
+        
+        # Modal opens, wait a little bit and then type
+        time.sleep(1.0)
+        self.browser.page.keyboard.type(filename, delay=1)
+        self.browser.press("Enter")
+        time.sleep(1.0) # Wait for file creation processing
+        
+        return f"Created and opened new file: {filename}"
 
     def do_replace_editor_text(self, params: dict[str, Any]) -> str:
         text = str(params.get("text", ""))

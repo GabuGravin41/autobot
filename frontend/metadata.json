@@ -1,0 +1,9 @@
+{
+  "name": "Autobot Control Center",
+  "description": "Professional desktop automation interface for autonomous workflows and AI-driven computer control.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
