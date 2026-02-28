@@ -1,0 +1,20 @@
+{
+  "whatsapp_web": {
+    "open_home": 8,
+    "open_chat": 6
+  },
+  "overleaf_web": {
+    "open_dashboard": 5,
+    "open_project": 4
+  },
+  "google_docs_web": {
+    "open_new_document": 5,
+    "open_document_url": 4
+  },
+  "grok_web": {
+    "open_home": 4
+  },
+  "instagram_web": {
+    "open_home": 5
+  }
+}

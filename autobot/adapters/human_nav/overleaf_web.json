@@ -1,18 +1,1 @@
-{
-  "focus_project_search": [
-    { "action": "hotkey", "value": "ctrl+f" },
-    { "action": "type", "value": "{title}" },
-    { "action": "press", "value": "enter" }
-  ],
-  "replace_editor_text": [
-    { "action": "hotkey", "value": "ctrl+a" },
-    { "action": "press", "value": "backspace" },
-    { "action": "type", "value": "{text}" }
-  ],
-  "append_editor_text": [
-    { "action": "type", "value": "{text}" }
-  ],
-  "compile_project": [
-    { "action": "hotkey", "value": "ctrl+enter" }
-  ]
-}
+{"focus_project_search":[{"action":"hotkey","value":"ctrl+f"},{"action":"type","value":"{title}"},{"action":"press","value":"enter"}],"replace_editor_text":[{"action":"hotkey","value":"ctrl+a"},{"action":"press","value":"backspace"},{"action":"type","value":"{text}"}],"append_editor_text":[{"action":"type","value":"{text}"}],"compile_project":[{"action":"hotkey","value":"ctrl+enter"}],"download_pdf":[{"action":"sleep","value":"1.5"},{"action":"press","value":"tab"},{"action":"press","value":"tab"},{"action":"press","value":"tab"},{"action":"press","value":"tab"},{"action":"press","value":"tab"},{"action":"press","value":"tab"},{"action":"press","value":"enter"}]}

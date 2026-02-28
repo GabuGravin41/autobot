@@ -21,6 +21,32 @@ except ImportError:  # pragma: no cover - optional dependency
 
 LogFn = Callable[[str], None]
 
+# Default wait (seconds) after adapter actions that open or load slow pages. Human-paced.
+DEFAULT_LOAD_WAITS: dict[str, dict[str, float]] = {
+    "whatsapp_web": {"open_home": 20.0, "open_chat": 6.0},
+    "overleaf_web": {"open_dashboard": 5.0, "open_project": 4.0},
+    "google_docs_web": {"open_new_document": 5.0, "open_document_url": 4.0},
+    "grok_web": {"open_home": 4.0},
+    "instagram_web": {"open_home": 5.0},
+}
+
+
+def _get_load_waits() -> dict[str, dict[str, float]]:
+    """Load wait config: adapter -> action -> seconds. File overrides defaults."""
+    path = Path(__file__).resolve().parent / "load_waits.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                out: dict[str, dict[str, float]] = {}
+                for k, v in data.items():
+                    if isinstance(v, dict):
+                        out[str(k)] = {str(a): float(w) for a, w in v.items()}
+                return out
+        except Exception:  # noqa: S110
+            pass
+    return dict(DEFAULT_LOAD_WAITS)
+
 
 @dataclass
 class TaskStep:
@@ -32,6 +58,9 @@ class TaskStep:
     retries: int = 0
     retry_delay_seconds: float = 1.0
     continue_on_error: bool = False
+    id: str | None = None
+    depends_on: list[str] = field(default_factory=list)
+    target_node: str | None = None
 
 
 @dataclass
@@ -50,7 +79,9 @@ class ExecutionResult:
 
 
 class ActionLimiter:
-    def __init__(self, logger: LogFn, max_per_minute: int = 45, min_interval_s: float = 0.08) -> None:
+    def __init__(self, logger: LogFn, max_per_minute: int = 30, min_interval_s: float = 0.3) -> None:
+        # Slow, human-like pacing by default. Many websites and flows need
+        # several seconds between actions to settle, especially when chained.
         self.logger = logger
         self.max_per_minute = max_per_minute
         self.min_interval_s = min_interval_s
@@ -115,10 +146,21 @@ class AutomationEngine:
         close_on_finish: bool = False,
     ) -> ExecutionResult:
         self._cancel_requested = False
+        if hasattr(self.browser, "reset_last_opened_url"):
+            self.browser.reset_last_opened_url()
         self.logger(f"Running workflow: {plan_name}")
         if plan_description:
             self.logger(plan_description)
-        total = len(steps)
+
+        # Topological sort of steps if they have dependencies
+        try:
+            ordered_steps = _topological_sort(steps)
+        except ValueError as e:
+            self.logger(f"Invalid execution graph: {e}")
+            self.state["last_error"] = str(e)
+            return ExecutionResult(success=False, completed_steps=0, total_steps=len(steps), state=dict(self.state))
+        
+        total = len(ordered_steps)
         completed = 0
         run_started_at = datetime.now(timezone.utc)
         step_logs: list[dict[str, Any]] = []
@@ -133,8 +175,11 @@ class AutomationEngine:
         (run_dir / "screenshots").mkdir(exist_ok=True)
         self.state["run_dir"] = str(run_dir)
 
+        # Track results for dependency checking (e.g. if a dependency failed, we might skip)
+        step_status: dict[str, str] = {}
+
         try:
-            for idx, step in enumerate(steps, start=1):
+            for idx, step in enumerate(ordered_steps, start=1):
                 if self._cancel_requested:
                     self.logger("Execution cancelled by user.")
                     run_path = self._write_run_history(
@@ -158,13 +203,39 @@ class AutomationEngine:
 
                 if not self._condition_allows(step):
                     self.logger(f"[{idx}/{total}] Skipped: {step.description or step.action} (condition=false)")
+                    if step.id:
+                        step_status[step.id] = "skipped"
                     step_logs.append(
                         {
+                            "id": step.id,
                             "index": idx,
                             "action": step.action,
                             "description": step.description,
                             "status": "skipped",
                             "condition": step.condition,
+                        }
+                    )
+                    completed += 1
+                    continue
+
+                # Check upstream failures
+                upstream_failed = False
+                if step.depends_on:
+                    for dep_id in step.depends_on:
+                        if step_status.get(dep_id) in ("failed", "skipped"):
+                            upstream_failed = True
+                            break
+                if upstream_failed:
+                    self.logger(f"[{idx}/{total}] Skipped: {step.description or step.action} (upstream dependency failed/skipped)")
+                    if step.id:
+                        step_status[step.id] = "skipped"
+                    step_logs.append(
+                        {
+                            "id": step.id,
+                            "index": idx,
+                            "action": step.action,
+                            "description": step.description,
+                            "status": "skipped_due_to_dependency",
                         }
                     )
                     completed += 1
@@ -176,6 +247,7 @@ class AutomationEngine:
                 last_error: Exception | None = None
                 step_started_at = datetime.now(timezone.utc)
                 step_log: dict[str, Any] = {
+                    "id": step.id,
                     "index": idx,
                     "action": step.action,
                     "description": step.description,
@@ -190,7 +262,30 @@ class AutomationEngine:
                     try:
                         rendered_args = _render_vars(step.args, self.state)
                         self._limiter.before_action(step.action)
-                        value = self._execute_action(step.action, rendered_args)
+                        if step.target_node and step.target_node.lower() not in ("localhost", "local"):
+                            # Distributed execution via AnyDesk Adapter
+                            self.logger(f"Delegating step '{step.action}' to remote node '{step.target_node}'")
+                            # We send it as a type_text or transfer_file for now. Expandable later.
+                            value = self._execute_action("adapter_call", {
+                                "adapter": "anydesk",
+                                "adapter_action": "connect",
+                                "params": {"node_id": step.target_node}
+                            })
+                            # Execute the remote command here (simplified for current capability)
+                            self._execute_action("adapter_call", {
+                                "adapter": "anydesk",
+                                "adapter_action": "type_text",
+                                "params": {"text": f"// autobot step: {step.action} {rendered_args}"}
+                            })
+                            self._execute_action("adapter_call", {
+                                "adapter": "anydesk",
+                                "adapter_action": "disconnect",
+                                "params": {}
+                            })
+                            value = f"Dispatched '{step.action}' to node {step.target_node}"
+                        else:
+                            value = self._execute_action(step.action, rendered_args)
+                            
                         step_log["attempts_used"] = attempt
                         if step.save_as:
                             self.state[step.save_as] = value
@@ -200,11 +295,19 @@ class AutomationEngine:
                     except Exception as error:  # noqa: BLE001
                         step_log["attempts_used"] = attempt
                         last_error = error
+                        
+                        # CAPTCHA detection
+                        if hasattr(self.browser, "detect_recaptcha") and self.browser.detect_recaptcha():
+                            self.logger("!!! BOT DETECTION / CAPTCHA DETECTED !!! Please intervention manually.")
+                            self.state["captcha_detected"] = True
+                            
                         if attempt < attempts:
+                            # Exponential backoff: base * (2 ^ (attempt-1))
+                            delay = step.retry_delay_seconds * (2 ** (attempt - 1))
                             self.logger(
-                                f"Step failed (attempt {attempt}/{attempts}) -> retry in {step.retry_delay_seconds}s: {error}"
+                                f"Step failed (attempt {attempt}/{attempts}) -> retry in {delay:.1f}s: {error}"
                             )
-                            time.sleep(step.retry_delay_seconds)
+                            time.sleep(delay)
                         elif step.continue_on_error:
                             self.logger(f"Step failed and marked continue_on_error: {error}")
                             self.state["last_error"] = str(error)
@@ -219,6 +322,8 @@ class AutomationEngine:
                     step_log["error"] = str(last_error)
                     step_log["finished_at"] = datetime.now(timezone.utc).isoformat()
                     step_logs.append(step_log)
+                    if step.id:
+                        step_status[step.id] = "failed"
                     raise last_error
 
                 if "status" not in step_log or step_log["status"] == "running":
@@ -226,6 +331,8 @@ class AutomationEngine:
                 step_log["result"] = _json_safe(value)
                 step_log["finished_at"] = datetime.now(timezone.utc).isoformat()
                 step_logs.append(step_log)
+                if step.id:
+                    step_status[step.id] = step_log["status"]
                 completed += 1
 
             self.logger("Workflow completed successfully.")
@@ -279,13 +386,14 @@ class AutomationEngine:
             return data
 
         if action == "browser_set_mode":
-            mode = str(args.get("mode", "auto")).strip().lower()
-            if mode not in {"auto", "human_profile", "devtools"}:
-                raise ValueError("browser_set_mode requires one of: auto, human_profile, devtools")
+            mode = str(args.get("mode", "human_profile")).strip().lower()
+            if mode not in ("human_profile", "devtools"):
+                mode = "human_profile"
             os.environ["AUTOBOT_BROWSER_MODE"] = mode
             self.state["browser_mode_requested"] = mode
-            self.logger(f"Browser mode set for next session: {mode}")
-            return mode
+            res = self.browser.set_mode(mode)
+            self.logger(res)
+            return res
 
         if action == "benchmark_run":
             from .benchmark import run_benchmarks
@@ -348,6 +456,10 @@ class AutomationEngine:
                 self.state["last_error"] = str(error)
                 raise
             self.logger(f"Adapter call completed: {adapter_name}.{adapter_action}")
+            wait_seconds = _get_load_waits().get(adapter_name, {}).get(adapter_action)
+            if wait_seconds is not None and wait_seconds > 0:
+                self.logger(f"Waiting {wait_seconds:.0f}s for page load (human-paced).")
+                time.sleep(wait_seconds)
             return result
 
         if action == "search_google":
@@ -372,6 +484,14 @@ class AutomationEngine:
             self.logger(message)
             return message
 
+        if action == "browser_click_text":
+            message = self.browser.click_text(
+                text=str(args["text"]),
+                timeout_ms=int(args.get("timeout_ms", 10000)),
+            )
+            self.logger(message)
+            return message
+
         if action == "browser_press":
             message = self.browser.press(str(args["key"]))
             self.logger(message)
@@ -385,10 +505,62 @@ class AutomationEngine:
             self.logger(f"Captured text from {args['selector']}.")
             return text
 
+        if action == "browser_scroll":
+            direction = str(args.get("direction", "down")).lower()
+            amount = int(args.get("amount", 500))
+            if direction not in ("up", "down"):
+                direction = "down"
+            message = self.browser.scroll(direction=direction, amount=amount)
+            self.logger(message)
+            return message
+
         if action == "browser_read_console_errors":
             errors = self.browser.read_console_errors()
             self.logger(f"Captured {len(errors)} console-like error entries.")
             return "\n".join(errors)
+
+        if action == "browser_get_content":
+            text = self.browser.get_content()
+            self.logger(f"Captured {len(text)} characters of page content.")
+            return text
+
+        if action == "extract_information":
+            # Grabbing visible text or a specific selector if provided
+            selector = str(args.get("selector", "body"))
+            timeout_ms = int(args.get("timeout_ms", 10000))
+            text = self.browser.read_text(selector=selector, timeout_ms=timeout_ms)
+            self.logger(f"Captured text for extraction from {selector}.")
+            return text
+
+        if action == "browser_snapshot":
+            snapshot = self.browser.get_ui_snapshot()
+            self.logger("Captured browser UI snapshot.")
+            return snapshot
+
+        if action == "browser_get_status":
+            status = self.browser.get_status()
+            self.logger("Fetched browser health status.")
+            return status
+
+        if action == "browser_get_url":
+            url = self.browser.get_url()
+            self.logger(f"Current URL: {url}")
+            return url
+
+        if action == "browser_set_mode":
+            mode = str(args.get("mode", "human_profile")).lower()
+            if mode not in ("human_profile", "devtools"):
+                mode = "human_profile"
+            res = self.browser.set_mode(mode)
+            self.logger(res)
+            return res
+
+        if action == "request_human_help":
+            reason = str(args.get("reason", "Unknown intervention required."))
+            self.logger(f"!!! MANUAL INTERVENTION REQUESTED: {reason} !!!")
+            # In a real UI this might trigger a notification/pause
+            time.sleep(5) 
+            return f"Human help requested for: {reason}. System is paused for review."
 
         if action == "open_vscode":
             subprocess.Popen(["code"])
@@ -695,6 +867,44 @@ def _get_clipboard() -> str:
         text=True,
     )
     return (result.stdout or "").strip()
+
+
+def _topological_sort(steps: list[TaskStep]) -> list[TaskStep]:
+    """Sorts steps so that dependencies run before the steps that depend on them."""
+    if not any(step.depends_on for step in steps):
+        return list(steps)
+
+    id_to_index = {step.id: i for i, step in enumerate(steps) if step.id}
+    in_degree = [0] * len(steps)
+    graph = {i: [] for i in range(len(steps))}
+    
+    for i, step in enumerate(steps):
+        for dep_id in step.depends_on:
+            if dep_id in id_to_index:
+                dep_i = id_to_index[dep_id]
+                graph[dep_i].append(i)
+                in_degree[i] += 1
+            else:
+                raise ValueError(f"Step '{step.description}' depends on unknown step ID '{dep_id}'")
+                
+    queue = [i for i, deg in enumerate(in_degree) if deg == 0]
+    queue.sort()
+    
+    sorted_steps = []
+    while queue:
+        curr_i = queue.pop(0)
+        sorted_steps.append(steps[curr_i])
+        
+        neighbors = sorted(graph[curr_i])
+        for n_i in neighbors:
+            in_degree[n_i] -= 1
+            if in_degree[n_i] == 0:
+                queue.append(n_i)
+                
+    if len(sorted_steps) != len(steps):
+        raise ValueError("Cycle detected in step dependencies!")
+        
+    return sorted_steps
 
 
 def _require_pyautogui() -> None:

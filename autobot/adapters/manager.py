@@ -6,12 +6,17 @@ from typing import Any, Callable
 
 from ..browser_agent import BrowserController
 from .base import AdapterConfirmationError, BaseAdapter
+from .chatgpt_web import ChatGPTWebAdapter
 from .google_docs_web import GoogleDocsWebAdapter
 from .grok_web import GrokWebAdapter
 from .instagram_web import InstagramWebAdapter
 from .overleaf_web import OverleafWebAdapter
 from .vscode_desktop import VSCodeDesktopAdapter
 from .whatsapp_web import WhatsAppWebAdapter
+from .anydesk import AnyDeskAdapter
+from .excel_desktop import ExcelDesktopAdapter
+from .word_desktop import WordDesktopAdapter
+from .notepad_desktop import NotepadDesktopAdapter
 
 
 class AdapterManager:
@@ -26,7 +31,12 @@ class AdapterManager:
             "overleaf_web": OverleafWebAdapter(browser=browser, logger=self.logger),
             "google_docs_web": GoogleDocsWebAdapter(browser=browser, logger=self.logger),
             "grok_web": GrokWebAdapter(browser=browser, logger=self.logger),
+            "chatgpt_web": ChatGPTWebAdapter(browser=browser, logger=self.logger),
             "vscode_desktop": VSCodeDesktopAdapter(browser=browser, logger=self.logger),
+            "anydesk": AnyDeskAdapter(browser=browser, logger=self.logger),
+            "excel_desktop": ExcelDesktopAdapter(browser=browser, logger=self.logger),
+            "word_desktop": WordDesktopAdapter(browser=browser, logger=self.logger),
+            "notepad_desktop": NotepadDesktopAdapter(browser=browser, logger=self.logger),
         }
 
     def list_adapters(self) -> dict[str, dict[str, dict[str, Any]]]:
@@ -67,7 +77,7 @@ class AdapterManager:
         if pending is None:
             raise ValueError("Invalid or expired confirmation token.")
         if time.time() > float(pending["expires_at"]):
-            del self._pending_sensitive_actions[token]
+            self._pending_sensitive_actions.pop(token, None)
             raise ValueError("Confirmation token expired.")
         result = self.call(
             adapter_name=str(pending["adapter"]),
@@ -75,7 +85,7 @@ class AdapterManager:
             params=dict(pending["params"]),
             confirmed=True,
         )
-        del self._pending_sensitive_actions[token]
+        self._pending_sensitive_actions.pop(token, None)
         return result
 
     def call(self, adapter_name: str, action: str, params: dict[str, Any] | None, confirmed: bool = False) -> Any:

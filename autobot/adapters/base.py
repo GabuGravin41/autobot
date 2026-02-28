@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ class AdapterConfirmationError(RuntimeError):
 
 class BaseAdapter:
     name: str = "base"
+    description: str = ""
     actions: dict[str, ActionSpec] = {}
     login_url_fragments: tuple[str, ...] = ("login", "signin", "accounts.google.com")
 
@@ -39,13 +41,16 @@ class BaseAdapter:
         self._action_metrics: dict[str, dict[str, Any]] = {}
         self._selector_metrics: dict[str, dict[str, int]] = {}
 
-    def action_library(self) -> dict[str, dict[str, Any]]:
+    def action_library(self) -> dict[str, Any]:
         return {
-            action: {
-                "description": spec.description,
-                "requires_confirmation": spec.requires_confirmation,
+            "description": self.description,
+            "actions": {
+                action: {
+                    "description": spec.description,
+                    "requires_confirmation": spec.requires_confirmation,
+                }
+                for action, spec in self.actions.items()
             }
-            for action, spec in self.actions.items()
         }
 
     def execute(self, action: str, params: dict[str, Any], confirmed: bool = False) -> Any:
@@ -96,6 +101,40 @@ class BaseAdapter:
         self.state["session_health"] = "ready"
         return {"status": "ready", "url": current_url}
 
+    def do_attempt_google_continue_login(self, _params: dict[str, Any]) -> str:
+        """Attempt to click 'Continue as X' or 'Sign in with Google' buttons automatically."""
+        self.browser.start()
+        if self.browser.mode == "human_profile":
+            return "Skipping automated login in human profile mode."
+            
+        # Common selectors for Google 'Continue' flows
+        candidates = [
+            "text='Continue as'",
+            "text='Sign in as'",
+            "button:has-text('Continue')",
+            "div[role='button']:has-text('Sign in with Google')",
+            "#idp-discovery-continue",
+        ]
+        
+        clicked = self._click_if_present(candidates, timeout_ms=2000)
+        if clicked:
+            self.logger("Auto-clicked Google 'Continue' button.")
+            # Give it a moment to redirect
+            time.sleep(2.0)
+            return "Successfully clicked Google continue/login button."
+        
+        return "No obvious Google continue buttons found."
+
+    def _load_wait_seconds(self, env_key: str, default: float) -> float:
+        """Return configured wait in seconds for slow site loads (e.g. AUTOBOT_WHATSAPP_LOAD_WAIT=8)."""
+        try:
+            val = os.getenv(env_key, "").strip()
+            if val:
+                return max(0.0, float(val))
+        except (ValueError, TypeError):
+            pass
+        return default
+
     def _ensure_url(self, url: str) -> None:
         self.browser.start()
         if self.browser.mode == "human_profile":
@@ -105,20 +144,34 @@ class BaseAdapter:
         if not current.startswith(url):
             self.browser.goto(url)
 
-    def _click_if_present(self, selectors: list[str], timeout_ms: int = 1500) -> bool:
+    def _click_if_present(self, selectors: list[str], timeout_ms: int = 2000) -> bool:
         self.browser.start()
         if self.browser.mode == "human_profile":
             return False
+            
+        for selector in selectors:
+            try:
+                # Use a slightly longer wait for the first selector to allow for page settlement
+                locator = self.browser.page.locator(selector).first
+                if locator.is_visible(timeout=timeout_ms):
+                    # Ensure it's not just visible but also enabled/stable
+                    locator.click(timeout=timeout_ms, force=False)
+                    self._record_selector_metric(selector=selector, success=True)
+                    return True
+            except Exception: # noqa: BLE001
+                continue
+        
+        # Final retry with a longer wait if none were found
+        time.sleep(1.0)
         for selector in selectors:
             try:
                 locator = self.browser.page.locator(selector).first
-                if locator.is_visible(timeout=timeout_ms):
+                if locator.is_visible(timeout=1000):
                     locator.click()
-                    self._record_selector_metric(selector=selector, success=True)
                     return True
-            except Exception:  # noqa: BLE001
-                self._record_selector_metric(selector=selector, success=False)
+            except Exception: # noqa: BLE001
                 continue
+                
         return False
 
     def selector_candidates(self, key: str) -> list[str]:
@@ -154,7 +207,7 @@ class BaseAdapter:
             raise RuntimeError(f"Could not click any selector for key '{selector_key}'.")
         return selectors[0]
 
-    def _selector_visible(self, selectors: list[str], timeout_ms: int = 800) -> bool:
+    def _selector_visible(self, selectors: list[str], timeout_ms: int = 1000) -> bool:
         if not selectors:
             return False
         self.browser.start()
