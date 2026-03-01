@@ -20,14 +20,28 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 LogFn = Callable[[str], None]
+# (prompt: str, state_key: str) -> str. Used when workflow needs password/token from user.
+HumanInputFn = Callable[[str, str], str]
 
-# Default wait (seconds) after adapter actions that open or load slow pages. Human-paced.
+# Default wait (seconds) after adapter actions. Human-paced: sites need time to load and LLMs (Grok, ChatGPT) can take 60–120s to respond.
+# Override via load_waits.json in this directory. Priority: reliability over speed.
 DEFAULT_LOAD_WAITS: dict[str, dict[str, float]] = {
     "whatsapp_web": {"open_home": 20.0, "open_chat": 6.0},
-    "overleaf_web": {"open_dashboard": 5.0, "open_project": 4.0},
-    "google_docs_web": {"open_new_document": 5.0, "open_document_url": 4.0},
-    "grok_web": {"open_home": 4.0},
-    "instagram_web": {"open_home": 5.0},
+    "overleaf_web": {"open_dashboard": 8.0, "open_project": 6.0, "replace_editor_text": 3.0, "compile_project": 15.0},
+    "google_docs_web": {"open_new_document": 6.0, "open_document_url": 5.0},
+    "grok_web": {
+        "open_home": 8.0,
+        "ask_latex_from_clipboard": 100.0,
+        "copy_visible_response": 5.0,
+    },
+    "chatgpt_web": {
+        "open_home": 10.0,
+        "send_message": 120.0,
+        "copy_response": 5.0,
+    },
+    "instagram_web": {"open_home": 6.0},
+    "leetcode_web": {"open_home": 6.0, "open_problem": 8.0, "submit": 15.0},
+    "kaggle_web": {"open_home": 6.0, "open_competition": 8.0, "run_notebook": 90.0, "submit_to_competition": 10.0},
 }
 
 
@@ -112,13 +126,18 @@ class ActionLimiter:
 
 
 class AutomationEngine:
-    def __init__(self, logger: LogFn | None = None) -> None:
+    def __init__(
+        self,
+        logger: LogFn | None = None,
+        human_input_callback: HumanInputFn | None = None,
+    ) -> None:
         self.logger = logger or (lambda _msg: None)
         self.browser = BrowserController()
         self.adapters = AdapterManager(browser=self.browser, logger=self.logger)
         self.state: dict[str, Any] = {}
         self._cancel_requested = False
         self._limiter = ActionLimiter(logger=self.logger)
+        self._human_input_callback = human_input_callback
 
     def cancel(self) -> None:
         self._cancel_requested = True
@@ -376,7 +395,12 @@ class AutomationEngine:
 
     def _execute_action(self, action: str, args: dict[str, Any]) -> Any:
         if action == "open_url":
-            message = self.browser.goto(str(args["url"]))
+            url = str(args.get("url", "")).strip()
+            if not url:
+                self.logger("open_url: no URL provided; skipping.")
+                return "No URL provided; step skipped."
+            message = self.browser.goto(url)
+            self._update_browser_state()
             self.logger(message)
             return message
 
@@ -460,49 +484,69 @@ class AutomationEngine:
             if wait_seconds is not None and wait_seconds > 0:
                 self.logger(f"Waiting {wait_seconds:.0f}s for page load (human-paced).")
                 time.sleep(wait_seconds)
+            self._update_browser_state()
             return result
 
         if action == "search_google":
-            message = self.browser.search(str(args["query"]))
+            query = str(args.get("query", "")).strip()
+            if not query:
+                self.logger("search_google: no query provided; skipping.")
+                return "No query provided; step skipped."
+            message = self.browser.search(query)
+            self._update_browser_state()
             self.logger(message)
             return message
 
         if action == "browser_fill":
+            selector = str(args.get("selector", "")).strip()
+            text = str(args.get("text", ""))
+            if not selector:
+                raise ValueError("browser_fill requires args.selector.")
             message = self.browser.fill(
-                selector=str(args["selector"]),
-                text=str(args["text"]),
+                selector=selector,
+                text=text,
                 timeout_ms=int(args.get("timeout_ms", 10000)),
             )
             self.logger(message)
             return message
 
         if action == "browser_click":
+            selector = str(args.get("selector", "")).strip()
+            if not selector:
+                raise ValueError("browser_click requires args.selector.")
             message = self.browser.click(
-                selector=str(args["selector"]),
+                selector=selector,
                 timeout_ms=int(args.get("timeout_ms", 10000)),
             )
             self.logger(message)
             return message
 
         if action == "browser_click_text":
+            text = str(args.get("text", "")).strip()
+            if not text:
+                raise ValueError("browser_click_text requires args.text.")
             message = self.browser.click_text(
-                text=str(args["text"]),
+                text=text,
                 timeout_ms=int(args.get("timeout_ms", 10000)),
             )
             self.logger(message)
             return message
 
         if action == "browser_press":
-            message = self.browser.press(str(args["key"]))
+            key = str(args.get("key", "enter")).strip() or "enter"
+            message = self.browser.press(key)
             self.logger(message)
             return message
 
         if action == "browser_read_text":
+            selector = str(args.get("selector", "")).strip()
+            if not selector:
+                raise ValueError("browser_read_text requires args.selector.")
             text = self.browser.read_text(
-                selector=str(args["selector"]),
+                selector=selector,
                 timeout_ms=int(args.get("timeout_ms", 10000)),
             )
-            self.logger(f"Captured text from {args['selector']}.")
+            self.logger(f"Captured text from {selector}.")
             return text
 
         if action == "browser_scroll":
@@ -559,8 +603,28 @@ class AutomationEngine:
             reason = str(args.get("reason", "Unknown intervention required."))
             self.logger(f"!!! MANUAL INTERVENTION REQUESTED: {reason} !!!")
             # In a real UI this might trigger a notification/pause
-            time.sleep(5) 
+            time.sleep(5)
             return f"Human help requested for: {reason}. System is paused for review."
+
+        if action == "request_human_input":
+            # Prompt user for password/token/email; store in state under key. Used for sign-in flows.
+            prompt = str(args.get("prompt", "Enter value:")).strip()
+            state_key = str(args.get("key", "human_input_value")).strip() or "human_input_value"
+            if self._human_input_callback:
+                value = self._human_input_callback(prompt, state_key)
+                self.state[state_key] = value
+                self.logger(f"Human input received and saved as state['{state_key}'] (length={len(value)}).")
+                return value
+            # Headless: use existing state if set (e.g. from env or pre-filled)
+            existing = self.state.get(state_key)
+            if existing is not None and str(existing).strip():
+                self.logger(f"Using pre-set state['{state_key}'] (no callback).")
+                return str(existing).strip()
+            self.logger("No human input callback and no pre-set value; raising.")
+            raise ValueError(
+                f"request_human_input: no callback and state['{state_key}'] not set. "
+                "Provide human_input_callback to the engine or set state before this step."
+            )
 
         if action == "open_vscode":
             subprocess.Popen(["code"])
@@ -568,13 +632,18 @@ class AutomationEngine:
             return "Opened VS Code."
 
         if action == "open_app":
-            command = str(args["command"])
+            command = str(args.get("command", "")).strip()
+            if not command:
+                self.logger("open_app: no command provided; skipping.")
+                return "No command provided; step skipped."
             subprocess.Popen(command, shell=True)
             self.logger(f"Started app command: {command}")
             return command
 
         if action == "open_path":
-            target_path = str(args["path"])
+            target_path = str(args.get("path", "")).strip()
+            if not target_path:
+                raise ValueError("open_path requires args.path.")
             path_obj = Path(target_path)
             if not path_obj.exists():
                 raise FileNotFoundError(f"Path does not exist: {target_path}")
@@ -586,7 +655,12 @@ class AutomationEngine:
             return target_path
 
         if action == "run_command":
-            command = str(args["command"])
+            command = str(args.get("command", "")).strip()
+            if not command:
+                self.logger("run_command: no command provided; skipping.")
+                self.state["last_command_exit_code"] = -1
+                self.state["last_command_output"] = "(no command provided; step skipped)"
+                return self.state["last_command_output"]
             timeout = int(args.get("timeout_seconds", 120))
             result = subprocess.run(command, capture_output=True, text=True, shell=True, timeout=timeout, check=False)
             output = (result.stdout or result.stderr or "").strip()
@@ -628,14 +702,22 @@ class AutomationEngine:
 
         if action == "clipboard_set":
             text = str(args.get("text", ""))
-            _set_clipboard(text)
-            self.logger("Clipboard updated.")
-            return text
+            try:
+                _set_clipboard(text)
+                self.logger("Clipboard updated.")
+                return text
+            except Exception as e:
+                self.logger(f"Clipboard set failed: {e}; step skipped.")
+                return ""
 
         if action == "clipboard_get":
-            text = _get_clipboard()
-            self.logger("Clipboard captured.")
-            return text
+            try:
+                text = _get_clipboard()
+                self.logger("Clipboard captured.")
+                return text
+            except Exception as e:
+                self.logger(f"Clipboard get failed: {e}; returning empty string.")
+                return ""
 
         if action == "desktop_type":
             _require_pyautogui()
@@ -656,8 +738,11 @@ class AutomationEngine:
 
         if action == "desktop_click":
             _require_pyautogui()
-            x = int(args["x"])
-            y = int(args["y"])
+            try:
+                x = int(args.get("x", 0))
+                y = int(args.get("y", 0))
+            except (TypeError, ValueError):
+                raise ValueError("desktop_click requires args.x and args.y as numbers.")
             button = str(args.get("button", "left"))
             pyautogui.click(x=x, y=y, button=button)
             self.logger(f"Clicked desktop at ({x}, {y}) using {button} button.")
@@ -665,8 +750,11 @@ class AutomationEngine:
 
         if action == "desktop_move":
             _require_pyautogui()
-            x = int(args["x"])
-            y = int(args["y"])
+            try:
+                x = int(args.get("x", 0))
+                y = int(args.get("y", 0))
+            except (TypeError, ValueError):
+                raise ValueError("desktop_move requires args.x and args.y as numbers.")
             duration = float(args.get("duration", 0.2))
             pyautogui.moveTo(x, y, duration=duration)
             self.logger(f"Moved cursor to ({x}, {y}).")
@@ -711,10 +799,42 @@ class AutomationEngine:
             filepath = str(screenshots_dir / filename)
             self.browser.start()
             path = self.browser.screenshot(filepath)
+            self.state["last_screenshot_path"] = path
             self.logger(f"Screenshot saved: {path}")
             return path
 
+        if action == "write_file":
+            path_arg = str(args.get("path", "")).strip()
+            content = args.get("text") or args.get("content") or ""
+            if isinstance(content, str):
+                content = _render_vars(content, self.state)
+            else:
+                content = str(content)
+            if not path_arg:
+                raise ValueError("write_file requires path.")
+            path_obj = Path(path_arg)
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+            path_obj.write_text(content, encoding="utf-8")
+            self.logger(f"Wrote {len(content)} chars to {path_arg}")
+            return path_arg
+
+        if action == "notify_user":
+            message = str(args.get("message", "Look at the screen."))
+            self.logger(f"!!! NOTIFY USER: {message} !!!")
+            self.state["last_notify_message"] = message
+            return message
+
         raise ValueError(f"Unknown action '{action}'")
+
+    def _update_browser_state(self) -> None:
+        """Refresh state with current URL so the AI knows where it is."""
+        try:
+            self.browser.start()
+            url = self.browser.get_url()
+            if url:
+                self.state["current_url"] = url
+        except Exception:  # noqa: S110
+            pass
 
     def _condition_allows(self, step: TaskStep) -> bool:
         if not step.condition:

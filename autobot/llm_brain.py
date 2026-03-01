@@ -37,8 +37,8 @@ class PlanDraft:
 class LLMBrain:
     def __init__(self, logger=None) -> None:
         self.logger = logger or (lambda _msg: None)
-        self.model_name = os.getenv("AUTOBOT_LLM_MODEL", "gemini-1.5-flash")
-        raw = os.getenv("AUTOBOT_LLM_PROVIDER", "gemini").strip().lower()
+        self.model_name = os.getenv("AUTOBOT_LLM_MODEL", "")
+        raw = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter").strip().lower()
         self.provider = "openai_compat" if raw == "openai_compact" else raw
         self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY") or os.getenv("XAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
@@ -48,9 +48,12 @@ class LLMBrain:
             self.openai_base_url = "https://openrouter.ai/api/v1"
             # Prioritize OpenRouter specific key if available
             self.openai_api_key = os.getenv("OPENROUTER_API_KEY") or self.openai_api_key
-            if not os.getenv("AUTOBOT_LLM_MODEL"):
-                self.model_name = "deepseek/deepseek-chat"
+            if not self.model_name:
+                # DeepSeek V3.1 free on OpenRouter (recommended default)
+                self.model_name = "deepseek/deepseek-chat-v3.1:free"
 
+        if self.provider == "gemini" and not self.model_name:
+            self.model_name = "gemini-1.5-flash"
         self.enabled = False
         self._model = None
         if self.provider == "gemini" and bool(self.api_key):
@@ -101,7 +104,7 @@ class LLMBrain:
                     TaskStep(action="log", args={"message": f"Task received: {user_prompt}"}, description="Log user prompt"),
                     TaskStep(
                         action="log",
-                        args={"message": "Configure GROK/Gemini API key to generate autonomous tool plans."},
+                        args={"message": "Set OPENROUTER_API_KEY and AUTOBOT_LLM_PROVIDER=openrouter for DeepSeek V3.1 (free), or configure Gemini/Grok."},
                         description="Prompt for LLM setup",
                     ),
                 ],
@@ -166,12 +169,31 @@ class LLMBrain:
         )
 
     def _build_prompt(self, goal: str, state: dict[str, Any], allowed_actions: list[str], max_steps: int) -> str:
+        # Rich state feedback so the AI can iterate: use run result, clipboard, errors, and what was saved.
         compact_state = {
             "last_command_exit_code": state.get("last_command_exit_code"),
+            "last_command_output": _trim_text(str(state.get("last_command_output", "")), 4000),
             "last_test_output": _trim_text(str(state.get("last_test_output", "")), 5000),
             "console_errors": _trim_text(str(state.get("console_errors", "")), 5000),
             "last_error": _trim_text(str(state.get("last_error", "")), 2000),
+            "autonomy_loops": state.get("autonomy_loops"),
+            "run_dir": state.get("run_dir"),
+            "last_run_history_path": state.get("last_run_history_path"),
+            "current_url": _trim_text(str(state.get("current_url", "")), 500),
+            "last_screenshot_path": state.get("last_screenshot_path"),
+            "last_notify_message": state.get("last_notify_message"),
         }
+        # Include short previews of saved state keys so the AI knows what data is available (e.g. latex_text, doc_text).
+        saved_keys = [k for k, v in state.items() if k not in (
+            "run_dir", "last_run_history_path", "adapter_telemetry", "telemetry",
+            "autonomy_goal", "autonomy_loops"
+        ) and v is not None and str(v).strip()]
+        if saved_keys:
+            compact_state["saved_state_keys"] = saved_keys
+            for key in ["latex_text", "doc_text", "console_errors"]:
+                if key in state and state[key]:
+                    s = str(state[key])
+                    compact_state[f"{key}_preview"] = _trim_text(s, 800)
         schema = {
             "done": "boolean",
             "reason": "string",
@@ -206,6 +228,8 @@ class LLMBrain:
             "- NAVIGATION: Use 'browser_click_text' for robust navigation without CSS selectors. It works in 'devtools' mode.\n"
             "- AUTONOMY: If a site blocks you, switch mode and try an alternative tool. Do NOT ask the user for help unless you are blocked by a CAPTCHA.\n"
             "- CAPTCHAS: Use 'request_human_help' only if you see a CAPTCHA or 'Verify you are human' screen.\n"
+            "- WHEN last_error IS SET: The previous step failed. Adapt: suggest 'wait' (longer, e.g. 30–120s), a different action, or request_human_help. Do not repeat the same failing step without a change (e.g. wait first, or try another selector/tool).\n"
+            "- RELIABILITY OVER SPEED: Sites and LLMs (Grok, ChatGPT) often need 60–120s to respond. Prefer adding a 'wait' step rather than assuming the page is ready.\n"
         )
 
     def _build_draft_prompt(

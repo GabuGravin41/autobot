@@ -4,6 +4,7 @@ import json
 
 from .engine import TaskStep, WorkflowPlan
 from .workflows import (
+    code_iteration_workflow,
     console_fix_assist_workflow,
     open_target_workflow,
     research_paper_workflow,
@@ -42,6 +43,13 @@ def build_plan_from_text(task: str) -> WorkflowPlan:
             download_check_path=parts[2],
             outgoing_message=parts[3] or "Autobot tool-calling test message",
         )
+
+    if lower.startswith("run code iteration"):
+        cmd = (text[18:].strip() or "pytest")
+        return code_iteration_workflow(cmd)
+    if lower.startswith("code iteration"):
+        cmd = (text[16:].strip() or "pytest")
+        return code_iteration_workflow(cmd)
 
     if lower.startswith("run "):
         return WorkflowPlan(

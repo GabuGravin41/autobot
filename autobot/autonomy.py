@@ -95,9 +95,32 @@ class AutonomousRunner:
                 close_on_finish=False,
             )
             if not loop_result.success:
-                self.logger("Action plan failed, stopping autonomous mode.")
-                self.engine.close()
-                return loop_result
+                # Plan evolved: replan with failure context so the brain can suggest fallbacks (wait longer, different action, human help).
+                self.logger("Action plan failed; asking brain for fallback steps (plan evolves from state).")
+                fallback_decision = self.brain.decide_next_steps(
+                    goal=f"{goal} [RECOVERY: The previous action plan failed. last_error is in state. Suggest fallback: wait longer (e.g. 30-120s), try a different action or selector, or request_human_help. Then continue toward the goal.]",
+                    state=self.engine.state,
+                    allowed_actions=_allowed_actions(config.allow_desktop_actions),
+                    max_steps=4,
+                )
+                fallback_steps = _sanitize_decision_steps(fallback_decision.steps, config.allow_sensitive_adapter_actions)
+                if fallback_steps:
+                    for s in fallback_steps:
+                        s.continue_on_error = True
+                    recovery_result = self.engine.run_steps(
+                        steps=fallback_steps,
+                        plan_name=f"autonomy_recovery_{loop_index}",
+                        plan_description="Execute fallback steps after failure.",
+                        close_on_finish=False,
+                    )
+                    if not recovery_result.success:
+                        self.logger("Recovery plan also failed; stopping autonomous mode.")
+                        self.engine.close()
+                        return recovery_result
+                else:
+                    self.logger("Brain returned no fallback steps; stopping autonomous mode.")
+                    self.engine.close()
+                    return loop_result
 
         self.engine.close()
         return ExecutionResult(
@@ -172,6 +195,7 @@ def _allowed_actions(allow_desktop_actions: bool) -> list[str]:
         "browser_get_url",
         "browser_set_mode",
         "request_human_help",
+        "request_human_input",
         "browser_read_text",
         "browser_read_console_errors",
         "run_command",

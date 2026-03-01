@@ -27,6 +27,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 // ── Status ─────────────────────────────────────────────────────────────────
+export interface HumanInputPending {
+    prompt: string;
+    key: string;
+}
+
 export interface BackendStatus {
     status: string;
     run_status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -35,6 +40,7 @@ export interface BackendStatus {
     llm_enabled: boolean;
     llm_provider: string;
     llm_model: string;
+    human_input_pending?: HumanInputPending | null;
 }
 
 export const getStatus = (): Promise<BackendStatus> =>
@@ -148,27 +154,101 @@ export const updateSettings = (settings: Partial<{
 }>): Promise<{ status: string; keys_changed: string[] }> =>
     apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(settings) });
 
-// ── WebSocket log streaming ─────────────────────────────────────────────────
+// ── Logs (polling fallback when WebSocket is unavailable) ────────────────────
+export interface LogsResponse {
+    logs: string[];
+}
+
+export const getLogs = (limit: number = 500): Promise<LogsResponse> =>
+    apiFetch(`/api/logs?limit=${limit}`).then((r: any) => ({ logs: r.logs || [] }));
+
+// ── WebSocket log streaming (with exponential backoff and optional polling fallback) ─
+const WS_RECONNECT_BASE_MS = 2000;
+const WS_RECONNECT_MAX_MS = 30000;
+const WS_MAX_RECONNECT_ATTEMPTS = 15;
+
 export function connectLogStream(
     onMessage: (line: string) => void,
     onClose?: () => void,
+    options?: { usePollingFallback?: boolean; onLogsSnapshot?: (logs: string[]) => void },
 ): () => void {
-    const wsUrl = (BASE_URL.replace('http', 'ws')) + '/ws/logs';
-    const ws = new WebSocket(wsUrl);
+    let closed = false;
+    let reconnectAttempt = 0;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-    ws.onmessage = (e) => {
-        if (e.data !== '__ping__') onMessage(e.data);
+    const wsUrl = (BASE_URL.replace(/^http/, 'ws') || 'ws://127.0.0.1:8000').replace(/\/?$/, '') + '/ws/logs';
+
+    function scheduleReconnect() {
+        if (closed) return;
+        reconnectAttempt += 1;
+        if (options?.usePollingFallback && reconnectAttempt >= 5) {
+            if (!pollInterval && (options.onLogsSnapshot || onMessage)) {
+                pollInterval = setInterval(async () => {
+                    if (closed) return;
+                    try {
+                        const { logs } = await getLogs(300);
+                        if (options.onLogsSnapshot) options.onLogsSnapshot(logs);
+                        else logs.forEach((line) => onMessage(line));
+                    } catch { /* ignore */ }
+                }, 3000);
+            }
+            return;
+        }
+        const delay = Math.min(WS_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt - 1), WS_RECONNECT_MAX_MS);
+        setTimeout(tryConnect, delay);
+    }
+
+    function tryConnect() {
+        if (closed) return;
+        const ws = new WebSocket(wsUrl);
+
+        ws.onmessage = (e) => {
+            if (e.data !== '__ping__') onMessage(e.data);
+        };
+
+        ws.onerror = () => {
+            ws.close();
+        };
+
+        ws.onclose = () => {
+            onClose?.();
+            if (!closed) scheduleReconnect();
+        };
+
+        ws.onopen = () => {
+            reconnectAttempt = 0;
+        };
+    }
+
+    tryConnect();
+
+    return () => {
+        closed = true;
+        if (pollInterval) clearInterval(pollInterval);
+        // Note: we don't have a ref to the current WebSocket to close it; next reconnect will be no-op due to closed
     };
-
-    ws.onclose = () => {
-        onClose?.();
-        // Auto-reconnect after 3 seconds
-        setTimeout(() => connectLogStream(onMessage, onClose), 3000);
-    };
-
-    // Return a disconnect function
-    return () => ws.close();
 }
+
+// ── Workflows ───────────────────────────────────────────────────────────────
+export interface BackendWorkflow {
+    id: string;
+    name: string;
+    description: string;
+    topic_label: string;
+}
+
+export const getWorkflows = (): Promise<{ workflows: BackendWorkflow[] }> =>
+    apiFetch('/api/workflows');
+
+export const runWorkflow = (workflow_id: string, topic: string = ''): Promise<{ run_id: string; status: string; plan_name: string }> =>
+    apiFetch('/api/workflows/run', { method: 'POST', body: JSON.stringify({ workflow_id, topic }) });
+
+// ── Human input (when a run requests password/token) ────────────────────────
+export const getPendingHumanInput = (): Promise<{ pending: boolean; prompt?: string; key?: string }> =>
+    apiFetch('/api/human_input');
+
+export const submitHumanInput = (key: string, value: string): Promise<{ status: string; key: string }> =>
+    apiFetch('/api/human_input', { method: 'POST', body: JSON.stringify({ key, value }) });
 
 // ── Browser Utils ──────────────────────────────────────────────────────────
 export const getBrowserScreenshotUrl = (): string =>

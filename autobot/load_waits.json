@@ -1,20 +1,33 @@
 {
-  "whatsapp_web": {
+  "grok_web": {
     "open_home": 8,
-    "open_chat": 6
+    "ask_latex_from_clipboard": 100,
+    "copy_visible_response": 5
+  },
+  "chatgpt_web": {
+    "open_home": 10,
+    "send_message": 120,
+    "copy_response": 5
   },
   "overleaf_web": {
-    "open_dashboard": 5,
-    "open_project": 4
+    "open_dashboard": 8,
+    "open_project": 6,
+    "replace_editor_text": 3,
+    "compile_project": 15
   },
-  "google_docs_web": {
-    "open_new_document": 5,
-    "open_document_url": 4
+  "whatsapp_web": {
+    "open_home": 20,
+    "open_chat": 6
   },
-  "grok_web": {
-    "open_home": 4
+  "leetcode_web": {
+    "open_home": 6,
+    "open_problem": 8,
+    "submit": 15
   },
-  "instagram_web": {
-    "open_home": 5
+  "kaggle_web": {
+    "open_home": 6,
+    "open_competition": 8,
+    "run_notebook": 90,
+    "submit_to_competition": 10
   }
 }

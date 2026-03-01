@@ -70,50 +70,62 @@ import {
   getAdapters,
   getRuns,
   runPlan,
+  runWorkflow,
+  getWorkflows,
   cancelRun,
   connectLogStream,
   updateSettings,
   getBrowserScreenshotUrl,
+  submitHumanInput,
   BackendStatus,
   BackendAdapter,
   BackendRun,
+  BackendWorkflow,
 } from './services/apiService';
 
-// --- Mock Data ---
-const MOCK_WORKFLOWS: WorkflowPlan[] = [
-  {
-    id: 'tool_call_stress',
-    name: 'Tool Call Stress Test',
-    description: 'WhatsApp → Google Docs → Grok → Overleaf chain.',
-    steps: [
-      { action: 'open_url', args: { url: 'https://web.whatsapp.com' }, description: 'Open WhatsApp Web' },
-      { action: 'find_element', args: { selector: 'chat_list' }, description: 'Locate chat list' },
-      { action: 'click', args: { selector: 'target_chat' }, description: 'Select target contact' },
-      { action: 'type', args: { text: 'Automated message from Autobot' }, description: 'Type message' },
-      { action: 'click', args: { selector: 'send_btn' }, description: 'Send message' }
-    ]
-  },
-  {
-    id: 'website_builder',
-    name: 'Website Builder',
-    description: 'Open VS Code, Grok, and Google search for layout ideas.',
-    steps: [
-      { action: 'open_app', args: { app: 'VS Code' }, description: 'Launch VS Code' },
-      { action: 'open_url', args: { url: 'https://grok.com' }, description: 'Open Grok for ideas' },
-      { action: 'search', args: { query: 'modern landing page layouts' }, description: 'Search Google for inspiration' }
-    ]
-  },
-  {
-    id: 'research_paper',
-    name: 'Research Paper Assistant',
-    description: 'Open Grok, DeepSeek, Overleaf, and search for references.',
-    steps: [
-      { action: 'open_url', args: { url: 'https://overleaf.com' }, description: 'Open Overleaf' },
-      { action: 'open_url', args: { url: 'https://deepseek.com' }, description: 'Open DeepSeek' },
-      { action: 'search', args: { query: 'latest AI research papers 2026' }, description: 'Find references' }
-    ]
-  }
-];
+// Workflow card with topic input and run (used in Workflows page)
+const WorkflowCard = ({
+  workflow,
+  onRun,
+  disabled,
+}: {
+  workflow: BackendWorkflow;
+  onRun: (topic: string) => void;
+  disabled: boolean;
+}) => {
+  const [topic, setTopic] = useState('');
+  return (
+    <div className="glass-panel p-8 rounded-3xl border-white/5 hover:border-brand-500/30 transition-all group flex flex-col h-full">
+      <div className="flex items-start justify-between mb-6">
+        <div className="w-14 h-14 rounded-2xl bg-brand-500/10 flex items-center justify-center group-hover:bg-brand-500/20 transition-colors">
+          <Zap size={28} className="text-brand-400" />
+        </div>
+      </div>
+      <h3 className="text-xl font-bold mb-3 group-hover:text-brand-400 transition-colors">{workflow.name}</h3>
+      <p className="text-sm text-white/40 mb-6 leading-relaxed flex-1">{workflow.description}</p>
+      {workflow.topic_label ? (
+        <div className="mb-4">
+          <label className="block text-[10px] font-bold uppercase tracking-widest text-white/40 mb-2">{workflow.topic_label}</label>
+          <input
+            type="text"
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            placeholder={workflow.topic_label}
+            className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 px-4 text-sm focus:outline-none focus:border-brand-500/50"
+          />
+        </div>
+      ) : null}
+      <button
+        onClick={() => onRun(topic)}
+        disabled={disabled}
+        className="w-full py-4 rounded-xl bg-brand-500 text-black font-bold text-xs uppercase tracking-widest hover:bg-brand-400 transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(var(--brand-500-rgb),0.2)] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <Play size={16} fill="currentColor" />
+        Initialize Run
+      </button>
+    </div>
+  );
+};
 
 const MOCK_RUNS: RunHistory[] = [
   {
@@ -186,13 +198,16 @@ export default function App() {
   const [liveAdapters, setLiveAdapters] = useState<BackendAdapter[]>([]);
   const [liveRuns, setLiveRuns] = useState<BackendRun[]>([]);
   const [liveLogLines, setLiveLogLines] = useState<string[]>([]);
+  const [workflows, setWorkflows] = useState<BackendWorkflow[]>([]);
   const [backendOnline, setBackendOnline] = useState(false);
+  const [humanInputValue, setHumanInputValue] = useState('');
+  const [humanInputSubmitting, setHumanInputSubmitting] = useState(false);
   const [screenshotUrl, setScreenshotUrl] = useState<string>('');
   const [browserMode, setBrowserMode] = useState<BrowserMode>(BrowserMode.HUMAN_PROFILE);
   const [policy, setPolicy] = useState<AdapterPolicy>(AdapterPolicy.BALANCED);
   const [isAutonomous, setIsAutonomous] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [theme, setTheme] = useState<'blue-violet' | 'emerald' | 'blue' | 'amber'>('blue-violet');
+  const [theme, setTheme] = useState<'beam' | 'blue-violet' | 'emerald' | 'blue' | 'amber'>('beam');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const [apiKey, setApiKey] = useState('');
@@ -254,14 +269,16 @@ export default function App() {
 
     const poll = async () => {
       try {
-        const [status, adaptersData, runsData] = await Promise.all([
+        const [status, adaptersData, runsData, workflowsData] = await Promise.all([
           getStatus(),
           getAdapters(),
           getRuns(),
+          getWorkflows().catch(() => ({ workflows: [] })),
         ]);
         setBackendStatus(status);
         setLiveAdapters(adaptersData.adapters);
         setLiveRuns(runsData.runs);
+        if (workflowsData.workflows?.length) setWorkflows(workflowsData.workflows);
         setBackendOnline(true);
       } catch {
         setBackendOnline(false);
@@ -272,9 +289,14 @@ export default function App() {
     const interval = setInterval(poll, 5000);
 
     // Real-time log streaming via WebSocket
-    disconnectLogs = connectLogStream((line) => {
-      setLiveLogLines(prev => [...prev.slice(-200), line]);
-    });
+    disconnectLogs = connectLogStream(
+      (line) => setLiveLogLines(prev => [...prev.slice(-199), line]),
+      undefined,
+      {
+        usePollingFallback: true,
+        onLogsSnapshot: (logs) => setLiveLogLines(logs.slice(-200)),
+      },
+    );
 
     return () => {
       clearInterval(interval);
@@ -308,17 +330,18 @@ export default function App() {
 
 
   useEffect(() => {
-    if (!backendOnline || !backendStatus?.browser?.active) {
+    if (!backendOnline) {
       setScreenshotUrl('');
       return;
     }
-    const updateScreenshot = () => {
-      setScreenshotUrl(getBrowserScreenshotUrl());
-    };
+    if (!backendStatus?.browser?.active) return;
+    const updateScreenshot = () => setScreenshotUrl(getBrowserScreenshotUrl());
     updateScreenshot();
     const interval = setInterval(updateScreenshot, 3000);
     return () => clearInterval(interval);
   }, [backendOnline, backendStatus?.browser?.active]);
+
+  const refreshScreenPreview = () => setScreenshotUrl(getBrowserScreenshotUrl());
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -779,29 +802,46 @@ export default function App() {
                               </div>
                             </div>
 
-                            {backendStatus?.browser?.active && screenshotUrl && (
+                            {backendOnline && (
                               <div className="space-y-4">
-                                <div className="text-[10px] font-bold uppercase tracking-widest text-white/40 flex items-center gap-2">
-                                  <Monitor size={12} />
-                                  Live Browser Feed
+                                <div className="text-[10px] font-bold uppercase tracking-widest text-white/40 flex items-center gap-2 justify-between">
+                                  <span className="flex items-center gap-2">
+                                    <Monitor size={12} />
+                                    Screen preview
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={refreshScreenPreview}
+                                    className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-[10px] font-bold uppercase tracking-wider transition-colors"
+                                  >
+                                    {screenshotUrl ? 'Refresh' : 'See current screen'}
+                                  </button>
                                 </div>
-                                <div className="relative aspect-video rounded-2xl overflow-hidden border border-white/10 group/feed">
-                                  <img
-                                    src={screenshotUrl}
-                                    alt="Live Feed"
-                                    className="w-full h-full object-cover"
-                                    onError={(e) => (e.currentTarget.style.display = 'none')}
-                                  />
-                                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover/feed:opacity-100 transition-opacity flex items-end p-4">
-                                    <div className="text-[10px] font-mono text-white/80 truncate">
-                                      {backendStatus.browser.url}
+                                {screenshotUrl ? (
+                                  <div className="relative aspect-video rounded-2xl overflow-hidden border border-white/10 group/feed">
+                                    <img
+                                      src={screenshotUrl}
+                                      alt="Current screen"
+                                      className="w-full h-full object-cover"
+                                      onError={(e) => (e.currentTarget.style.display = 'none')}
+                                    />
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover/feed:opacity-100 transition-opacity flex items-end p-4">
+                                      <div className="text-[10px] font-mono text-white/80 truncate">
+                                        {backendStatus?.browser?.url ?? 'Desktop / browser'}
+                                      </div>
                                     </div>
+                                    {backendStatus?.browser?.active && (
+                                      <div className="absolute top-3 right-3 flex items-center gap-2 px-2 py-1 rounded bg-black/60 backdrop-blur-md border border-white/10">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                                        <span className="text-[8px] font-bold text-white tracking-widest uppercase">Live</span>
+                                      </div>
+                                    )}
                                   </div>
-                                  <div className="absolute top-3 right-3 flex items-center gap-2 px-2 py-1 rounded bg-black/60 backdrop-blur-md border border-white/10">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                                    <span className="text-[8px] font-bold text-white tracking-widest uppercase">Live</span>
+                                ) : (
+                                  <div className="aspect-video rounded-2xl border border-dashed border-white/20 flex items-center justify-center text-white/40 text-sm">
+                                    Click &quot;See current screen&quot; to show what’s on the computer
                                   </div>
-                                </div>
+                                )}
                               </div>
                             )}
                           </div>
@@ -939,6 +979,42 @@ export default function App() {
                     </div>
 
                     <div className="space-y-6">
+                      {backendOnline && (
+                        <div className="glass-panel p-4 rounded-3xl border-white/5">
+                          <div className="flex items-center justify-between gap-2 mb-3">
+                            <h3 className="text-sm font-bold tracking-tight flex items-center gap-2">
+                              <Monitor size={14} />
+                              Screen preview
+                            </h3>
+                            <button
+                              type="button"
+                              onClick={refreshScreenPreview}
+                              className="px-2 py-1 rounded-lg bg-brand-500/20 hover:bg-brand-500/30 text-[10px] font-bold uppercase tracking-wider transition-colors"
+                            >
+                              {screenshotUrl ? 'Refresh' : 'See screen'}
+                            </button>
+                          </div>
+                          {screenshotUrl ? (
+                            <div className="relative aspect-video rounded-xl overflow-hidden border border-white/10">
+                              <img
+                                src={screenshotUrl}
+                                alt="Current screen"
+                                className="w-full h-full object-cover"
+                                onError={(e) => (e.currentTarget.style.display = 'none')}
+                              />
+                              {backendStatus?.browser?.active && (
+                                <div className="absolute top-2 right-2 flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-black/60 text-[8px] font-bold text-white uppercase">
+                                  <span className="w-1 h-1 rounded-full bg-red-500 animate-pulse" /> Live
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="aspect-video rounded-xl border border-dashed border-white/20 flex items-center justify-center text-white/40 text-xs">
+                              Click &quot;See screen&quot; to show current state
+                            </div>
+                          )}
+                        </div>
+                      )}
                       <h3 className="text-xl font-bold tracking-tight px-2">Recent Artifacts</h3>
                       <div className="glass-panel p-6 rounded-3xl border-white/5 space-y-6">
                         {artifacts.map((artifact, idx) => (
@@ -1139,60 +1215,48 @@ export default function App() {
                   <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
                       <h2 className="text-4xl font-bold tracking-tight mb-2">Workflow Library</h2>
-                      <p className="text-white/40">Launch pre-configured automation sequences.</p>
-                    </div>
-                    <div className="flex items-center gap-2 bg-white/5 p-1 rounded-xl border border-white/10">
-                      <button className="px-4 py-1.5 rounded-lg bg-white/10 text-[10px] font-bold uppercase tracking-widest">All</button>
-                      <button className="px-4 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-white transition-colors">Social</button>
-                      <button className="px-4 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-white transition-colors">Productivity</button>
-                      <button className="px-4 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-white transition-colors">DevOps</button>
+                      <p className="text-white/40">Launch pre-configured automation sequences from the backend.</p>
                     </div>
                   </header>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {MOCK_WORKFLOWS.map((workflow) => (
-                      <div key={workflow.id} className="glass-panel p-8 rounded-3xl border-white/5 hover:border-brand-500/30 transition-all group flex flex-col h-full">
-                        <div className="flex items-start justify-between mb-6">
-                          <div className="w-14 h-14 rounded-2xl bg-brand-500/10 flex items-center justify-center group-hover:bg-brand-500/20 transition-colors">
-                            <Zap size={28} className="text-brand-400" />
-                          </div>
-                          <div className="flex gap-1">
-                            <span className="px-2 py-0.5 rounded bg-white/5 text-[9px] font-bold uppercase tracking-widest text-white/40">v2.1</span>
-                          </div>
-                        </div>
-
-                        <h3 className="text-xl font-bold mb-3 group-hover:text-brand-400 transition-colors">{workflow.name}</h3>
-                        <p className="text-sm text-white/40 mb-8 leading-relaxed flex-1">{workflow.description}</p>
-
-                        <div className="space-y-6">
-                          <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                              <div className="text-[9px] font-bold uppercase tracking-widest text-white/20">Est. Time</div>
-                              <div className="text-xs font-mono">~4.5 min</div>
-                              <Terminal size={14} />
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => executePlan({ ...workflow, steps: workflow.steps || [] })}
-                            className="w-full py-4 rounded-xl bg-brand-500 text-black font-bold text-xs uppercase tracking-widest hover:bg-brand-400 transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(var(--brand-500-rgb),0.2)] active:scale-[0.98]"
-                          >
-                            <Play size={16} fill="currentColor" />
-                            Initialize Run
-                          </button>
-                        </div>
-                      </div>
+                    {workflows.map((wf) => (
+                      <WorkflowCard
+                        key={wf.id}
+                        workflow={wf}
+                        onRun={async (topic) => {
+                          navigate('/dashboard');
+                          setActiveRun({
+                            id: 'pending',
+                            planName: wf.name,
+                            timestamp: new Date().toLocaleString(),
+                            status: 'running',
+                            stepsCompleted: 0,
+                            totalSteps: 0,
+                            artifacts: {},
+                            screenshots: [],
+                            logs: [`▶ Starting workflow: ${wf.name}...`],
+                          });
+                          try {
+                            const res = await runWorkflow(wf.id, topic);
+                            setActiveRun(prev => prev ? { ...prev, id: res.run_id } : null);
+                          } catch (e) {
+                            setActiveRun(prev => prev ? { ...prev, status: 'failed', logs: [...(prev.logs || []), 'Failed: ' + (e instanceof Error ? e.message : 'Unknown')] } : null);
+                          }
+                        }}
+                        disabled={backendStatus?.run_status === 'running'}
+                      />
                     ))}
-
                     <button
                       onClick={handleAddWorkflow}
-                      className="glass-panel p-8 rounded-3xl border-dashed border-white/10 hover:border-brand-500/30 hover:bg-brand-500/5 transition-all flex flex-col items-center justify-center gap-4 group min-h-[400px]"
+                      className="glass-panel p-8 rounded-3xl border-dashed border-white/10 hover:border-brand-500/30 hover:bg-brand-500/5 transition-all flex flex-col items-center justify-center gap-4 group min-h-[320px]"
                     >
                       <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center group-hover:bg-brand-500/10 transition-colors">
                         <Plus size={32} className="text-white/20 group-hover:text-brand-400" />
                       </div>
                       <div className="text-center">
                         <div className="font-bold text-lg">Custom Workflow</div>
-                        <div className="text-xs text-white/40 mt-1">Build your own sequence</div>
+                        <div className="text-xs text-white/40 mt-1">Use AI Planner to build a custom sequence</div>
                       </div>
                     </button>
                   </div>
@@ -1377,16 +1441,17 @@ export default function App() {
                         <div className="space-y-4">
                           <label className="text-xs font-bold text-white/40 uppercase tracking-widest">Accent Color</label>
                           <div className="grid grid-cols-2 gap-3">
-                            {(['blue-violet', 'emerald', 'blue', 'amber'] as const).map((t) => (
+                            {(['beam', 'blue-violet', 'emerald', 'blue', 'amber'] as const).map((t) => (
                               <button
                                 key={t}
                                 onClick={() => setTheme(t)}
-                                className={`p-4 rounded-2xl border transition-all flex flex-col items-center gap-2 ${theme === t ? 'bg-brand-500/10 border-brand-500 shadow-[0_0_20px_rgba(var(--brand-500-rgb),0.2)]' : 'bg-white/5 border-white/10 hover:bg-white/10'
+                                className={`p-4 rounded border transition-all flex flex-col items-center gap-2 ${theme === t ? 'bg-brand-500/10 border-brand-500 shadow-[0_0_20px_rgba(var(--brand-500-rgb),0.2)]' : 'bg-white/5 border-white/10 hover:bg-white/10'
                                   }`}
                               >
-                                <div className={`w-6 h-6 rounded-full ${t === 'blue-violet' ? 'bg-[#8b5cf6]' :
-                                  t === 'emerald' ? 'bg-[#22c55e]' :
-                                    t === 'blue' ? 'bg-[#3b82f6]' : 'bg-[#f59e0b]'
+                                <div className={`w-6 h-6 rounded ${t === 'beam' ? 'bg-gradient-to-br from-cyan-400 to-violet-500' :
+                                  t === 'blue-violet' ? 'bg-[#8b5cf6]' :
+                                    t === 'emerald' ? 'bg-[#22c55e]' :
+                                      t === 'blue' ? 'bg-[#3b82f6]' : 'bg-[#f59e0b]'
                                   }`} />
                                 <span className="text-[10px] font-bold uppercase tracking-widest capitalize">{t.replace('-', ' ')}</span>
                               </button>
@@ -1691,6 +1756,56 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Human input modal (password/token when workflow requests it) */}
+      <AnimatePresence>
+        {backendStatus?.human_input_pending && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="w-full max-w-md glass-panel p-8 rounded-3xl relative z-10"
+            >
+              <h3 className="text-xl font-bold mb-2">Input required</h3>
+              <p className="text-sm text-white/60 mb-4">{backendStatus.human_input_pending.prompt}</p>
+              <input
+                type="password"
+                value={humanInputValue}
+                onChange={(e) => setHumanInputValue(e.target.value)}
+                placeholder="Enter value..."
+                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 text-sm focus:outline-none focus:border-brand-500/50 mb-4"
+                autoFocus
+              />
+              <div className="flex gap-3">
+                <button
+                  onClick={async () => {
+                    setHumanInputSubmitting(true);
+                    try {
+                      await submitHumanInput(backendStatus!.human_input_pending!.key, humanInputValue);
+                      setHumanInputValue('');
+                    } catch (e) {
+                      alert('Submit failed: ' + (e instanceof Error ? e.message : 'Unknown'));
+                    } finally {
+                      setHumanInputSubmitting(false);
+                    }
+                  }}
+                  disabled={humanInputSubmitting || !humanInputValue.trim()}
+                  className="btn-primary flex-1 py-3 text-xs uppercase tracking-widest"
+                >
+                  {humanInputSubmitting ? 'Submitting...' : 'Submit'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Detail Modals */}
       <AnimatePresence>

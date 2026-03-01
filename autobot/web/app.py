@@ -38,6 +38,18 @@ from pydantic import BaseModel
 from ..engine import AutomationEngine, TaskStep, WorkflowPlan
 from ..planner import build_plan_from_text
 from ..llm_brain import LLMBrain
+from ..workflows import (
+    builtin_workflows,
+    code_iteration_workflow,
+    console_fix_assist_workflow,
+    kaggle_submit_workflow,
+    leetcode_solve_workflow,
+    open_whatsapp_stay_workflow,
+    portfolio_workflow,
+    research_paper_workflow,
+    tool_call_stress_workflow,
+    website_builder_workflow,
+)
 
 # ── Module-level shared state ─────────────────────────────────────────────────
 
@@ -46,8 +58,10 @@ _brain: LLMBrain | None = None
 _run_log: list[str] = []
 _active_run_id: str | None = None
 _run_status: str = "idle"   # idle | running | done | failed | cancelled
-_ws_clients: list[WebSocket] = []
+_ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
+# Human input: when request_human_input runs, callback sets this and waits; POST /api/human_input clears it
+_human_input_pending: dict[str, Any] | None = None
 
 # All actions the AI planner is allowed to use
 ALLOWED_ACTIONS = [
@@ -59,7 +73,7 @@ ALLOWED_ACTIONS = [
     "clipboard_set", "clipboard_get", "screenshot", "wait",
     "desktop_type", "desktop_hotkey", "desktop_click", "desktop_move",
     "desktop_switch_window", "run_command", "open_app", "open_path",
-    "request_human_help", "log",
+    "request_human_help", "request_human_input", "log",
 ]
 
 
@@ -75,26 +89,39 @@ def _log(msg: str) -> None:
 
 async def _broadcast(msg: str) -> None:
     dead = []
-    for ws in _ws_clients:
+    for ws in list(_ws_clients):
         try:
             await ws.send_text(msg)
         except Exception:
             dead.append(ws)
     for ws in dead:
-        try:
-            _ws_clients.remove(ws)
-        except ValueError:
-            pass
+        _ws_clients.discard(ws)
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
+
+def _human_input_callback(prompt: str, state_key: str) -> str:
+    """Called from engine thread when a step needs password/token. Blocks until frontend submits value."""
+    global _human_input_pending
+    result_holder: list[str] = [""]
+    evt = threading.Event()
+    _human_input_pending = {"prompt": prompt, "key": state_key, "event": evt, "result": result_holder}
+    _log(f"!!! Human input required: {state_key} — check the React UI to enter value !!!")
+    if _event_loop and not _event_loop.is_closed():
+        asyncio.run_coroutine_threadsafe(_broadcast(json.dumps({"type": "human_input_required", "prompt": prompt, "key": state_key})), _event_loop)
+    ok = evt.wait(timeout=300)
+    _human_input_pending = None
+    if not ok:
+        _log("Human input timed out after 300s; using empty string.")
+    return (result_holder[0] or "").strip()
+
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     global _engine, _brain, _event_loop
     _event_loop = asyncio.get_event_loop()
     _log("Autobot engine starting...")
-    _engine = AutomationEngine(logger=_log)
+    _engine = AutomationEngine(logger=_log, human_input_callback=_human_input_callback)
     _brain = LLMBrain(logger=_log)
     if _brain.enabled:
         _log(f"LLM Brain enabled: provider={_brain.provider}, model={_brain.model_name}")
@@ -140,6 +167,16 @@ class SettingsUpdate(BaseModel):
     openrouter_api_key: str | None = None
     openai_api_key: str | None = None
     browser_mode: str | None = None
+
+
+class RunWorkflowRequest(BaseModel):
+    workflow_id: str
+    topic: str = ""
+
+
+class HumanInputSubmit(BaseModel):
+    key: str
+    value: str
 
 
 # ── Plan conversion helpers ───────────────────────────────────────────────────
@@ -202,6 +239,9 @@ def get_status():
         except Exception:
             pass
 
+    human_input = None
+    if _human_input_pending:
+        human_input = {"prompt": _human_input_pending.get("prompt", ""), "key": _human_input_pending.get("key", "")}
     return {
         "status": "ok",
         "run_status": _run_status,
@@ -215,6 +255,7 @@ def get_status():
         "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "none"),
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", "default"),
         "log_lines": len(_run_log),
+        "human_input_pending": human_input,
     }
 
 
@@ -332,21 +373,28 @@ def delete_run(run_id: str):
 
 @app.get("/api/browser/screenshot")
 def get_browser_screenshot():
-    """Capture a live screenshot of the current browser state."""
+    """Capture a live screenshot: browser tab or full desktop (so user can see current state of the screen)."""
     if not _engine:
         raise HTTPException(status_code=400, detail="Engine not initialized")
-    
+
     tmp_path = Path.cwd() / "tmp" / "live_screenshot.png"
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     try:
         _engine.browser.screenshot(str(tmp_path))
         if tmp_path.exists():
             return FileResponse(tmp_path, media_type="image/png")
     except Exception as e:
         _log(f"Screenshot error: {e}")
+        try:
+            import pyautogui
+            pyautogui.screenshot(imageFilename=str(tmp_path))
+            if tmp_path.exists():
+                return FileResponse(tmp_path, media_type="image/png")
+        except Exception as e2:
+            _log(f"Desktop screenshot fallback error: {e2}")
         raise HTTPException(status_code=500, detail=f"Failed to capture screenshot: {e}")
-    
+
     raise HTTPException(status_code=503, detail="Browser not ready for screenshot")
 
 
@@ -401,6 +449,95 @@ def run_plan_endpoint(req: RunPlanRequest):
 
     threading.Thread(target=_run_in_thread, daemon=True, name=f"plan-{run_id}").start()
     return {"run_id": run_id, "status": "started", "plan_name": plan.name}
+
+
+# ── Builtin workflows (same as React frontend / former Tkinter UI) ─────────────
+
+WORKFLOW_LIST: list[dict[str, Any]] = [
+    {"id": "open_whatsapp_stay", "name": "Open WhatsApp Stay", "description": "Open WhatsApp Web and leave it open.", "topic_label": "Phone (optional)"},
+    {"id": "website_builder", "name": "Website Builder", "description": "Open VS Code, CASA, Grok, and search for layout ideas.", "topic_label": "Topic"},
+    {"id": "research_paper", "name": "Research Paper", "description": "Search, ask Grok for LaTeX, open Overleaf, compile.", "topic_label": "Topic"},
+    {"id": "portfolio", "name": "Portfolio", "description": "Google AI Studio sign-in, Gemini portfolio, save, git, Vercel.", "topic_label": "Topic (optional)"},
+    {"id": "leetcode_solve", "name": "LeetCode Solve", "description": "Solve one LeetCode problem with Grok (slug).", "topic_label": "Problem slug (e.g. two-sum)"},
+    {"id": "kaggle_submit", "name": "Kaggle Submit", "description": "Open competition, run notebook, submit, wait for score.", "topic_label": "Competition slug (e.g. titanic)"},
+    {"id": "console_fix_assist", "name": "Console Fix Assist", "description": "Capture console errors and open Grok with context.", "topic_label": "URL (optional)"},
+    {"id": "code_iteration", "name": "Code Iteration", "description": "Run tests, open Grok with failure context.", "topic_label": "Test command (e.g. pytest)"},
+    {"id": "tool_call_stress", "name": "Tool Call Stress", "description": "WhatsApp → Google Docs → Grok → Overleaf chain.", "topic_label": "phone|docs_url|path|message"},
+]
+
+
+@app.get("/api/workflows")
+def list_workflows():
+    """Return builtin workflow definitions for the React frontend."""
+    return {"workflows": WORKFLOW_LIST}
+
+
+def _workflow_plan(workflow_id: str, topic: str) -> WorkflowPlan:
+    """Build a WorkflowPlan from workflow_id and topic (same logic as Tkinter UI)."""
+    key = (workflow_id or "").strip()
+    t = (topic or "").strip()
+    if key == "open_whatsapp_stay":
+        return open_whatsapp_stay_workflow(phone=t)
+    if key == "website_builder":
+        return website_builder_workflow(t)
+    if key == "research_paper":
+        return research_paper_workflow(t)
+    if key == "portfolio":
+        return portfolio_workflow(t)
+    if key == "leetcode_solve":
+        return leetcode_solve_workflow(t or "two-sum")
+    if key == "kaggle_submit":
+        return kaggle_submit_workflow(t or "titanic", 1200)
+    if key == "console_fix_assist":
+        return console_fix_assist_workflow(t or "http://localhost:3000")
+    if key == "code_iteration":
+        return code_iteration_workflow(t or "pytest")
+    if key == "tool_call_stress":
+        parts = [p.strip() for p in t.split("|")] if t else []
+        while len(parts) < 4:
+            parts.append("")
+        return tool_call_stress_workflow(whatsapp_phone=parts[0], docs_existing_url=parts[1], download_check_path=parts[2], outgoing_message=parts[3] or "Autobot test")
+    raise ValueError(f"Unknown workflow: {workflow_id}")
+
+
+@app.post("/api/workflows/run")
+def run_workflow(req: RunWorkflowRequest):
+    """Run a builtin workflow by id with optional topic. Returns run_id."""
+    try:
+        plan = _workflow_plan(req.workflow_id, req.topic)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return run_plan_endpoint(RunPlanRequest(plan=_plan_to_dict(plan)))
+
+
+@app.get("/api/human_input")
+def get_pending_human_input():
+    """Return current pending human input request, if any (for polling or initial load)."""
+    global _human_input_pending
+    if not _human_input_pending:
+        return {"pending": False}
+    return {
+        "pending": True,
+        "prompt": _human_input_pending.get("prompt", ""),
+        "key": _human_input_pending.get("key", ""),
+    }
+
+
+@app.post("/api/human_input")
+def submit_human_input(req: HumanInputSubmit):
+    """Submit a value for a pending request_human_input step. Unblocks the engine."""
+    global _human_input_pending
+    if not _human_input_pending:
+        raise HTTPException(status_code=400, detail="No human input request pending.")
+    if _human_input_pending.get("key") != req.key:
+        raise HTTPException(status_code=400, detail=f"Key mismatch. Expected: {_human_input_pending.get('key')}")
+    result = _human_input_pending.get("result")
+    evt = _human_input_pending.get("event")
+    if isinstance(result, list):
+        result[:] = [req.value]
+    if evt is not None:
+        evt.set()
+    return {"status": "submitted", "key": req.key}
 
 
 @app.post("/api/run/{run_id}/cancel")
@@ -606,12 +743,21 @@ def update_settings(req: SettingsUpdate):
     return {"status": "updated", "keys_changed": list(updates.keys())}
 
 
+# ── Logs (polling fallback when WebSocket is unavailable) ─────────────────────
+
+@app.get("/api/logs")
+def get_logs(limit: int = 500):
+    """Return recent log lines for polling fallback. Use when WebSocket is unreliable."""
+    n = max(1, min(2000, limit))
+    return {"logs": list(_run_log[-n:])}
+
+
 # ── WebSocket: real-time log streaming ───────────────────────────────────────
 
 @app.websocket("/ws/logs")
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
-    _ws_clients.append(websocket)
+    _ws_clients.add(websocket)
     # Send the current log backlog immediately on connect
     for line in list(_run_log):
         try:
@@ -621,14 +767,19 @@ async def ws_logs(websocket: WebSocket):
     try:
         while True:
             await asyncio.sleep(30)
-            await websocket.send_text("__ping__")
+            # Ping each client; remove dead ones so one bad client doesn't break others
+            dead = []
+            for ws in list(_ws_clients):
+                try:
+                    await ws.send_text("__ping__")
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                _ws_clients.discard(ws)
     except (WebSocketDisconnect, Exception):
         pass
     finally:
-        try:
-            _ws_clients.remove(websocket)
-        except ValueError:
-            pass
+        _ws_clients.discard(websocket)
 
 
 # ── Serve built React frontend ────────────────────────────────────────────────

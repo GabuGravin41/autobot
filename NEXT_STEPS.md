@@ -1,6 +1,8 @@
 # Autobot Build Roadmap (Execution Queue)
 
-This is the prioritized build queue to continue polishing Autobot while you are away.
+See **VISION.md** for product direction: functionality over speed, professional UI (sharp corners, beam/gradient colors), OpenRouter + DeepSeek V3.1 default, and target use cases (gene annotation, Kaggle, LeetCode, etc.).
+
+This is the prioritized build queue to continue polishing Autobot.
 
 ## Phase 1 - Reliability Hardening (today)
 

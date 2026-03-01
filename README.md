@@ -2,6 +2,8 @@
 
 Autobot is a local desktop automation controller designed to execute your repetitive workflows through your existing laptop setup.
 
+**Product direction and long-term vision (gene annotation, Kaggle, LeetCode, AI iteration):** see **[VISION.md](VISION.md)** in the project root.
+
 ## Current capabilities
 
 - Uses a persistent Chrome automation profile directory (bootstrapped from your Chrome profile on first run when possible).
@@ -124,6 +126,22 @@ python -m autobot.run_stress
 ```
 
 With empty topic or `|||message`, WhatsApp and file-download steps are skipped; the rest of the chain still runs and screenshots are captured so you can confirm behavior when you return.
+
+## Code iteration and Autonomous mode (iterate until it works)
+
+To get the system to **iterate with the AI until tests pass** (or until a goal is met):
+
+1. **Code iteration preset**  
+   - In the UI, choose preset **code_iteration** and in Topic enter the test command (e.g. `pytest`, `npm test`, `python -m pytest tests/`).  
+   - Or in the quick task box: **run code iteration** or **code iteration pytest**.  
+   - This runs the command, captures output, opens Grok, and puts the failure output in the clipboard so you (or the next step) can paste and get a fix. Run the preset again after applying the fix to repeat.
+
+2. **Autonomous mode (AI decides next steps from state)**  
+   - Set **Goal** to something like “Make the tests in my project pass” or “Fix the failing build.”  
+   - Set **Diagnostics command** to the command that checks success (e.g. `pytest`, `npm test`).  
+   - Optionally set **Target URL** to your app (e.g. `http://localhost:3000`) so the engine can open it and capture console errors.  
+   - Run **Autonomous mode**. Each loop: the engine runs the diagnostics command, captures exit code and output, passes that **state** to the AI (OpenRouter/DeepSeek by default). The AI returns the next steps (e.g. open Grok, set clipboard with a fix request, run a command). The engine executes them and loops until the goal is met or max loops are reached.  
+   - So: **functionality first**—the AI uses real state (test output, errors, clipboard) to decide what to do next, and you can iterate until the “crazy” goal is achieved.
 
 ## Notes
 

@@ -10,7 +10,9 @@ from .chatgpt_web import ChatGPTWebAdapter
 from .google_docs_web import GoogleDocsWebAdapter
 from .grok_web import GrokWebAdapter
 from .instagram_web import InstagramWebAdapter
+from .kaggle_web import KaggleWebAdapter
 from .overleaf_web import OverleafWebAdapter
+from .leetcode_web import LeetCodeWebAdapter
 from .vscode_desktop import VSCodeDesktopAdapter
 from .whatsapp_web import WhatsAppWebAdapter
 from .anydesk import AnyDeskAdapter
@@ -28,7 +30,9 @@ class AdapterManager:
         self._adapters: dict[str, BaseAdapter] = {
             "whatsapp_web": WhatsAppWebAdapter(browser=browser, logger=self.logger),
             "instagram_web": InstagramWebAdapter(browser=browser, logger=self.logger),
+            "kaggle_web": KaggleWebAdapter(browser=browser, logger=self.logger),
             "overleaf_web": OverleafWebAdapter(browser=browser, logger=self.logger),
+            "leetcode_web": LeetCodeWebAdapter(browser=browser, logger=self.logger),
             "google_docs_web": GoogleDocsWebAdapter(browser=browser, logger=self.logger),
             "grok_web": GrokWebAdapter(browser=browser, logger=self.logger),
             "chatgpt_web": ChatGPTWebAdapter(browser=browser, logger=self.logger),
