@@ -37,11 +37,12 @@ export interface WorkflowPlan {
 
 export interface RunHistory {
   id: string;
-  planName: string;
+  planName?: string;
   timestamp: string;
-  status: 'success' | 'failed' | 'running';
+  status: 'success' | 'failed' | 'running' | 'cancelled';
   stepsCompleted: number;
   totalSteps: number;
+  progress?: number;
   artifacts: Record<string, any>;
   screenshots: string[];
   logs: string[];

@@ -19,6 +19,8 @@ from .anydesk import AnyDeskAdapter
 from .excel_desktop import ExcelDesktopAdapter
 from .word_desktop import WordDesktopAdapter
 from .notepad_desktop import NotepadDesktopAdapter
+from .ncbi_blast_web import NCBIBlastWebAdapter
+from .claude_web import ClaudeWebAdapter
 
 
 class AdapterManager:
@@ -36,11 +38,13 @@ class AdapterManager:
             "google_docs_web": GoogleDocsWebAdapter(browser=browser, logger=self.logger),
             "grok_web": GrokWebAdapter(browser=browser, logger=self.logger),
             "chatgpt_web": ChatGPTWebAdapter(browser=browser, logger=self.logger),
+            "claude_web": ClaudeWebAdapter(browser=browser, logger=self.logger),
             "vscode_desktop": VSCodeDesktopAdapter(browser=browser, logger=self.logger),
             "anydesk": AnyDeskAdapter(browser=browser, logger=self.logger),
             "excel_desktop": ExcelDesktopAdapter(browser=browser, logger=self.logger),
             "word_desktop": WordDesktopAdapter(browser=browser, logger=self.logger),
             "notepad_desktop": NotepadDesktopAdapter(browser=browser, logger=self.logger),
+            "ncbi_blast_web": NCBIBlastWebAdapter(browser=browser, logger=self.logger),
         }
 
     def list_adapters(self) -> dict[str, dict[str, dict[str, Any]]]:

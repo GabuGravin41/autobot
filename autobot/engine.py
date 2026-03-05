@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .knowledge_base import KnowledgeBase
 from .adapters.base import AdapterConfirmationError
 from .adapters.manager import AdapterManager
 from .browser_agent import BrowserController
@@ -134,10 +135,12 @@ class AutomationEngine:
         self.logger = logger or (lambda _msg: None)
         self.browser = BrowserController()
         self.adapters = AdapterManager(browser=self.browser, logger=self.logger)
+        self.knowledge = KnowledgeBase()
         self.state: dict[str, Any] = {}
         self._cancel_requested = False
         self._limiter = ActionLimiter(logger=self.logger)
         self._human_input_callback = human_input_callback
+
 
     def cancel(self) -> None:
         self._cancel_requested = True
@@ -786,6 +789,31 @@ class AutomationEngine:
             self.state[key] = value
             self.logger(f"State set: {key}")
             return value
+
+        if action == "knowledge_get":
+            key = str(args.get("key", "")).strip()
+            if not key:
+                raise ValueError("knowledge_get requires key.")
+            value = self.knowledge.get(key)
+            self.logger(f"Knowledge retrieved for '{key}'.")
+            return value
+
+        if action == "knowledge_set":
+            key = str(args.get("key", "")).strip()
+            value = args.get("value")
+            if not key:
+                raise ValueError("knowledge_set requires key.")
+            self.knowledge.set(key, value)
+            self.logger(f"Knowledge saved for '{key}'.")
+            return value
+
+        if action == "knowledge_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                raise ValueError("knowledge_search requires query.")
+            results = self.knowledge.search(query)
+            self.logger(f"Knowledge search for '{query}' returned {len(results)} results.")
+            return results
 
         if action == "screenshot":
             filename = str(args.get("filename", "")).strip()

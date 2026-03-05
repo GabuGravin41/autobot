@@ -8,9 +8,9 @@
 // In dev: Vite proxy forwards /api → http://127.0.0.1:8000 so BASE_URL = ''
 // In production: React and FastAPI are on the same origin so BASE_URL = ''
 // Override with VITE_API_URL only if explicitly set (e.g. for a remote backend)
-const BASE_URL: string =
-    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_URL)
-    || '';
+import { API_BASE, WS_BASE } from '../config';
+
+const BASE_URL = API_BASE;
 
 
 /** Generic fetch helper with JSON body */
@@ -109,6 +109,27 @@ export const runPlan = (plan: BackendPlan): Promise<{ run_id: string; status: st
 export const cancelRun = (runId: string): Promise<{ status: string }> =>
     apiFetch(`/api/run/${runId}/cancel`, { method: 'POST' });
 
+// ── Autonomous Multi-Agent Runner ───────────────────────────────────────────
+export interface AutonomousStatus {
+    status: 'idle' | 'running' | 'done' | 'cancelled' | 'failed';
+    goal: string;
+    phase: string;
+    loops: number;
+    last_log: string;
+}
+
+export const runAutonomous = (goal: string, pageContext?: { url: string, title: string, text: string }): Promise<{ status: string; goal: string }> =>
+    apiFetch('/api/run_autonomous', {
+        method: 'POST',
+        body: JSON.stringify({ goal, page_context: pageContext, max_hours: 8.0 }),
+    });
+
+export const getAutonomousStatus = (): Promise<AutonomousStatus> =>
+    apiFetch('/api/autonomous/status');
+
+export const cancelAutonomous = (): Promise<{ status: string }> =>
+    apiFetch('/api/autonomous/cancel', { method: 'POST' });
+
 // ── AI Chat ─────────────────────────────────────────────────────────────────
 export interface ChatResponse {
     reply: string;
@@ -176,7 +197,7 @@ export function connectLogStream(
     let reconnectAttempt = 0;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-    const wsUrl = (BASE_URL.replace(/^http/, 'ws') || 'ws://127.0.0.1:8000').replace(/\/?$/, '') + '/ws/logs';
+    const wsUrl = (WS_BASE || 'ws://127.0.0.1:8000').replace(/\/?$/, '') + '/ws/logs';
 
     function scheduleReconnect() {
         if (closed) return;

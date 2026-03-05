@@ -3,18 +3,21 @@ autobot/web/app.py — FastAPI application bridging the React frontend
 to the core AutomationEngine / LLMBrain backend.
 
 API surface (all under /api):
-  GET  /api/status            → engine health, run state, browser mode
-  GET  /api/adapters          → list all registered adapters + their actions
-  GET  /api/runs              → run history list (from runs/ folder)
-  GET  /api/run/{run_id}      → details + logs for a specific run
-  POST /api/run/{run_id}/cancel  → cancel an active run
-  POST /api/plan/text         → build a WorkflowPlan from natural language
-  POST /api/plan/run          → execute a WorkflowPlan (async)
-  GET  /api/settings          → read current settings
-  POST /api/settings          → update .env-based settings
-  POST /api/chat              → chat with the LLM planner, get a plan back
+  GET  /api/status                → engine health, run state, browser mode
+  GET  /api/adapters              → list all registered adapters + their actions
+  GET  /api/runs                  → run history list (from runs/ folder)
+  GET  /api/run/{run_id}          → details + logs for a specific run
+  POST /api/run/{run_id}/cancel   → cancel an active run
+  POST /api/plan/text             → build a WorkflowPlan from natural language
+  POST /api/plan/run              → execute a WorkflowPlan (async)
+  GET  /api/settings              → read current settings
+  POST /api/settings              → update .env-based settings
+  POST /api/chat                  → chat with the LLM planner, get a plan back
+  POST /api/run_autonomous        → start autonomous goal runner (multi-agent)
+  GET  /api/autonomous/status     → status of the running autonomous task
+  POST /api/autonomous/cancel     → cancel the autonomous runner
 
-WS  /ws/logs                  → real-time log streaming for the active run
+WS  /ws/logs                      → real-time log streaming for the active run
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ from pydantic import BaseModel
 from ..engine import AutomationEngine, TaskStep, WorkflowPlan
 from ..planner import build_plan_from_text
 from ..llm_brain import LLMBrain
+from ..autonomy import AutonomousRunner, AutonomousConfig
 from ..workflows import (
     builtin_workflows,
     code_iteration_workflow,
@@ -62,6 +66,11 @@ _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
 # Human input: when request_human_input runs, callback sets this and waits; POST /api/human_input clears it
 _human_input_pending: dict[str, Any] | None = None
+
+# Autonomous runner state
+_autonomous_runner: AutonomousRunner | None = None
+_autonomous_goal: str = ""
+_autonomous_status: str = "idle"  # idle | running | done | cancelled | failed
 
 # All actions the AI planner is allowed to use
 ALLOWED_ACTIONS = [
@@ -135,13 +144,15 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
 
-# Allow Vite dev server (various ports) + any localhost origin
+# Allow Vite dev server (various ports) + any localhost origin + configurable extra origins (e.g. Vercel deploy URL)
+_extra_origins = [o.strip() for o in os.getenv("AUTOBOT_CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000", "http://127.0.0.1:3000",
         "http://localhost:5173", "http://127.0.0.1:5173",
         "http://localhost:8000", "http://127.0.0.1:8000",
+        *_extra_origins,
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -177,6 +188,19 @@ class RunWorkflowRequest(BaseModel):
 class HumanInputSubmit(BaseModel):
     key: str
     value: str
+
+
+class PageContext(BaseModel):
+    url: str = ""
+    title: str = ""
+    text: str = ""
+
+
+class RunAutonomousRequest(BaseModel):
+    goal: str
+    page_context: PageContext = PageContext()
+    max_hours: float = 8.0
+    allow_desktop_actions: bool = False
 
 
 # ── Plan conversion helpers ───────────────────────────────────────────────────
@@ -553,6 +577,97 @@ def cancel_run(run_id: str):
     _run_status = "cancelled"
     _log("⚠ Run cancelled by user.")
     return {"status": "cancelled", "run_id": run_id}
+
+
+# ── Autonomous runner endpoints ───────────────────────────────────────────────
+
+@app.post("/api/run_autonomous")
+def start_autonomous(req: RunAutonomousRequest):
+    """
+    Start the multi-agent autonomous runner for a natural-language goal.
+    Accepts optional page_context from the browser extension.
+    Returns immediately with run_id; poll /api/autonomous/status for progress.
+    """
+    global _autonomous_runner, _autonomous_goal, _autonomous_status
+    global _active_run_id, _run_status, _run_log
+
+    if _autonomous_status == "running" or _run_status == "running":
+        raise HTTPException(status_code=409, detail="A run is already in progress. Cancel it first.")
+
+    engine = _engine
+    if not engine:
+        raise HTTPException(status_code=503, detail="Engine not ready.")
+
+    if not req.goal.strip():
+        raise HTTPException(status_code=400, detail="Goal cannot be empty.")
+
+    run_id = f"autonomous_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    _active_run_id = run_id
+    _run_status = "running"
+    _autonomous_status = "running"
+    _autonomous_goal = req.goal
+    _run_log.clear()
+    _log(f"🤖 Autonomous goal: {req.goal}")
+    if req.page_context.url:
+        _log(f"📄 Page context: {req.page_context.url}")
+
+    runner = AutonomousRunner(engine=engine, logger=_log)
+    _autonomous_runner = runner
+
+    config = AutonomousConfig(
+        max_steps_per_loop=5,
+        max_hours=req.max_hours,
+        allow_desktop_actions=req.allow_desktop_actions,
+        allow_sensitive_adapter_actions=False,
+    )
+    page_ctx = {
+        "url": req.page_context.url,
+        "title": req.page_context.title,
+        "text": req.page_context.text,
+    }
+
+    def _run_in_thread():
+        global _run_status, _autonomous_status
+        try:
+            result = runner.run(goal=req.goal, config=config, page_context=page_ctx)
+            _autonomous_status = "done" if result.success else "failed"
+            _run_status = _autonomous_status
+            _log(f"{'✅' if result.success else '❌'} Autonomous run finished: success={result.success}")
+        except Exception as ex:
+            _autonomous_status = "failed"
+            _run_status = "failed"
+            _log(f"❌ Autonomous run crashed: {ex}")
+
+    threading.Thread(target=_run_in_thread, daemon=True, name=f"autonomous-{run_id}").start()
+    return {"run_id": run_id, "status": "started", "goal": req.goal}
+
+
+@app.get("/api/autonomous/status")
+def get_autonomous_status():
+    """Return the current status of the autonomous runner."""
+    runner_status: dict[str, Any] = {}
+    if _autonomous_runner:
+        runner_status = _autonomous_runner.get_status()
+    return {
+        "status": _autonomous_status,
+        "goal": _autonomous_goal,
+        "run_id": _active_run_id,
+        **runner_status,
+    }
+
+
+@app.post("/api/autonomous/cancel")
+def cancel_autonomous():
+    """Cancel the currently running autonomous task."""
+    global _autonomous_status, _run_status
+    if _autonomous_status != "running":
+        raise HTTPException(status_code=400, detail=f"No autonomous run is active (status: {_autonomous_status}).")
+    if _autonomous_runner:
+        _autonomous_runner.cancel()
+    _autonomous_status = "cancelled"
+    _run_status = "cancelled"
+    _log("⚠ Autonomous run cancelled by user.")
+    return {"status": "cancelled"}
 
 
 @app.post("/api/chat")

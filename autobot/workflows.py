@@ -539,7 +539,7 @@ def kaggle_submit_workflow(competition_slug: str = "", wait_seconds: float = 120
     """Open Kaggle competition, run notebook, submit. Long wait for scoring (default 20 min).
     Topic = competition slug (e.g. titanic). Use wait_seconds to allow multi-task switch during wait."""
     slug = (competition_slug or "titanic").strip()
-    wait_s = max(60, min(3600, wait_seconds))  # 1 min to 1 hour
+    wait_s = max(60, min(3600, int(wait_seconds)))  # 1 min to 1 hour
     return WorkflowPlan(
         name="kaggle_submit",
         description=f"Open Kaggle competition '{slug}', run notebook, submit, wait {wait_s}s for score.",
@@ -566,20 +566,41 @@ def kaggle_submit_workflow(competition_slug: str = "", wait_seconds: float = 120
             TaskStep(action="wait", args={"seconds": 10}, description="Time to open notebook"),
             TaskStep(
                 action="adapter_call",
-                args={"adapter": "kaggle_web", "adapter_action": "run_notebook", "params": {}},
-                description="Run notebook",
+                args={"adapter": "kaggle_web", "adapter_action": "run_all_cells", "params": {}},
+                description="Run all cells in the notebook",
                 continue_on_error=True,
             ),
-            TaskStep(action="wait", args={"seconds": 60}, description="Notebook execution (adjust if needed)"),
+            TaskStep(action="wait", args={"seconds": 10}, description="Let execution start"),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "kaggle_web", "adapter_action": "read_notebook_status", "params": {}},
+                save_as="kaggle_status",
+                description="Monitor execution status",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "kaggle_web", "adapter_action": "read_last_cell_output", "params": {}},
+                save_as="last_output",
+                description="Capture logs/errors for feedback",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="log",
+                args={"message": "Notebook status: {kaggle_status}. Output head: {last_output}"},
+                description="Log feedback to state",
+            ),
             TaskStep(
                 action="adapter_call",
                 args={"adapter": "kaggle_web", "adapter_action": "submit_to_competition", "params": {}},
-                description="Submit to competition",
+                condition="state.get('kaggle_status') != 'ERROR'",
+                description="Submit to competition (if no errors)",
                 continue_on_error=True,
             ),
             TaskStep(
                 action="wait",
                 args={"seconds": wait_s},
+                condition="state.get('kaggle_status') != 'ERROR'",
                 description=f"Wait for Kaggle to score submission (~{wait_s // 60} min)",
             ),
             TaskStep(
@@ -593,6 +614,66 @@ def kaggle_submit_workflow(competition_slug: str = "", wait_seconds: float = 120
                 action="log",
                 args={"message": "Kaggle submission wait done. Check leaderboard. While waiting, you can run other tasks (LeetCode, portfolio) in a separate run."},
                 description="Log next steps",
+            ),
+        ],
+    )
+
+
+def gene_annotation_workflow(sequence: str = "") -> WorkflowPlan:
+    """Run NCBI BLAST, get top hit, write a short summary doc in VS Code.
+    Topic = FASTA sequence or protein name."""
+    seq = str(sequence or "MVKVGVNGFGRIGRLVTRAAFNSGKVDIVAINDPFIDLNYMVYMFQYDSTHGKFHGTVKAE").strip()
+    return WorkflowPlan(
+        name="gene_annotation",
+        description=f"Protein annotation pipeline for sequence: {seq[0:20]}...",
+        steps=[
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "ncbi_blast_web", "adapter_action": "open_protein_blast", "params": {}},
+                description="Open NCBI Protein BLAST",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "ncbi_blast_web", "adapter_action": "submit_sequence", "params": {"sequence": seq}},
+                description="Submit sequence for BLAST search",
+                continue_on_error=True,
+            ),
+            TaskStep(action="wait", args={"seconds": 20}, description="Wait for BLAST search to start"),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "ncbi_blast_web", "adapter_action": "check_job_status", "params": {}},
+                save_as="blast_status",
+                description="Check BLAST job status",
+                continue_on_error=True,
+            ),
+            TaskStep(action="wait", args={"seconds": 40}, description="Extended wait for BLAST results", condition="state.get('blast_status') != 'Done'"),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "ncbi_blast_web", "adapter_action": "get_top_hit", "params": {}},
+                save_as="top_hit",
+                description="Capture top BLAST hit",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="knowledge_set",
+                args={"key": "last_gene_annotation", "value": "{top_hit}"},
+                description="Persist annotation result in Knowledge Base",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="write_file",
+                args={
+                    "path": "{run_dir}/annotation_report.txt",
+                    "text": "Gene Annotation Report\nGenerated by Autobot\n\nSequence: {seq}\n\n{top_hit}",
+                },
+                description="Write report file",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="log",
+                args={"message": "Gene annotation complete. Result: {top_hit}. Report saved to run folder."},
+                description="Log completion",
             ),
         ],
     )
@@ -630,6 +711,67 @@ def open_whatsapp_stay_workflow(phone: str = "") -> WorkflowPlan:
     )
 
 
+def autonomous_kaggle_mission() -> WorkflowPlan:
+    """The 'Grand Loop': find competition, use external AI to code, submit.
+    Repeats until 3 successful submissions are stored in Knowledge Base."""
+    return WorkflowPlan(
+        name="autonomous_kaggle_mission",
+        description="Participate in Kaggle competitions until 3 successful submissions are achieve.",
+        steps=[
+            TaskStep(
+                action="knowledge_get",
+                args={"key": "kaggle_submission_count"},
+                save_as="sub_count",
+                description="Check current submission count",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="log",
+                args={"message": "Starting Kaggle Mission. Current submissions: {sub_count or 0}/3"},
+                description="Log mission start",
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "kaggle_web", "adapter_action": "find_joined_competitions", "params": {}},
+                save_as="competitions",
+                description="Find joined competitions",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="log",
+                args={"message": "Targeting competition from: {competitions}"},
+                description="Log target",
+            ),
+            # The autonomous agent will take over from here in the 'run_inner' loop,
+            # but we provides a starting point.
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "kaggle_web", "adapter_action": "open_competition", "params": {"slug": ""}},
+                description="Open selected competition",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "kaggle_web", "adapter_action": "read_competition_overview", "params": {}},
+                save_as="comp_details",
+                description="Read competition requirements",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="adapter_call",
+                args={"adapter": "claude_web", "adapter_action": "open_home", "params": {}},
+                description="Prepare Claude for coding assistant",
+                continue_on_error=True,
+            ),
+            TaskStep(
+                action="log",
+                args={"message": "Mission initialized. Passing details to Autonomous Runner for execution loop."},
+                description="Hand off to autonomy",
+            ),
+        ],
+    )
+
+
 def builtin_workflows() -> dict[str, WorkflowPlan]:
     return {
         "open_whatsapp_stay": open_whatsapp_stay_workflow(""),
@@ -638,6 +780,8 @@ def builtin_workflows() -> dict[str, WorkflowPlan]:
         "portfolio": portfolio_workflow(""),
         "leetcode_solve": leetcode_solve_workflow("two-sum"),
         "kaggle_submit": kaggle_submit_workflow("titanic", 1200),
+        "kaggle_3_missions": autonomous_kaggle_mission(),
+        "gene_annotation": gene_annotation_workflow(""),
         "console_fix_assist": console_fix_assist_workflow(),
         "code_iteration": code_iteration_workflow("pytest"),
         "tool_call_stress": tool_call_stress_workflow(
