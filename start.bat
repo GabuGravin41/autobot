@@ -1,11 +1,21 @@
 @echo off
 echo ============================================================
-echo  Autobot Local Agent Launcher
+echo  Autobot Local Agent Launcher (Windows)
 echo ============================================================
 echo.
 
-:: Install Python dependencies
-echo [1/3] Installing Python dependencies...
+:: 1. Setup Python Virtual Environment
+IF NOT EXIST venv (
+    echo [1/4] Creating Python virtual environment...
+    python -m venv venv
+) ELSE (
+    echo [1/4] Virtual environment already exists.
+)
+
+echo Activating virtual environment...
+call venv\Scripts\activate.bat
+
+echo [2/4] Installing Python dependencies...
 pip install -r requirements.txt --quiet
 if %ERRORLEVEL% neq 0 (
     echo ERROR: pip install failed. Is Python installed?
@@ -14,21 +24,29 @@ if %ERRORLEVEL% neq 0 (
 )
 
 :: Install Playwright browsers (first run only)
-echo [2/3] Checking Playwright browsers...
+echo [3/4] Checking Playwright browsers...
 python -m playwright install chromium 2>nul
 if %ERRORLEVEL% neq 0 (
     echo WARNING: Playwright browser install failed (may already be installed).
 )
 
-:: Start Autobot
-echo [3/3] Starting Autobot on http://127.0.0.1:8000
+:: Setup Node environment & Start
+echo [4/4] Installing frontend dependencies and launching...
+cd frontend
+call npm install --silent
+
 echo.
-echo  Dashboard:  http://127.0.0.1:8000
-echo  API docs:   http://127.0.0.1:8000/docs
+echo ============================================================
+echo  Starting Servers...
+echo  Backend: http://127.0.0.1:8000
+echo  Frontend: http://localhost:3000
+echo  Leave this window open to keep servers running.
+echo ============================================================
 echo.
-echo  To expose publicly (for Vercel frontend), run in another terminal:
-echo    cloudflared tunnel --url http://localhost:8000
-echo  Then paste the tunnel URL into the Vercel deploy's VITE_API_BASE env var.
-echo.
-python -m autobot
+
+set PYTHONPATH=%~dp0
+start "Autobot Backend" cmd /c "call ..\venv\Scripts\activate.bat && python -m autobot.main"
+start "Autobot Frontend" cmd /c "npm run dev"
+
+cd ..
 pause
