@@ -1,7 +1,0 @@
-{
-  "login_google_button": [
-    "button:has-text('Continue with Google')",
-    "a:has-text('Continue with Google')",
-    "[aria-label*='Google']"
-  ]
-}

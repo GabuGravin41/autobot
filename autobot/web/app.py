@@ -1,23 +1,18 @@
 """
 autobot/web/app.py — FastAPI application bridging the React frontend
-to the core AutomationEngine / LLMBrain backend.
+to the new Agent architecture.
 
-API surface (all under /api):
-  GET  /api/status                → engine health, run state, browser mode
-  GET  /api/adapters              → list all registered adapters + their actions
-  GET  /api/runs                  → run history list (from runs/ folder)
-  GET  /api/run/{run_id}          → details + logs for a specific run
-  POST /api/run/{run_id}/cancel   → cancel an active run
-  POST /api/plan/text             → build a WorkflowPlan from natural language
-  POST /api/plan/run              → execute a WorkflowPlan (async)
-  GET  /api/settings              → read current settings
-  POST /api/settings              → update .env-based settings
-  POST /api/chat                  → chat with the LLM planner, get a plan back
-  POST /api/run_autonomous        → start autonomous goal runner (multi-agent)
-  GET  /api/autonomous/status     → status of the running autonomous task
-  POST /api/autonomous/cancel     → cancel the autonomous runner
+API surface:
+  POST /api/agent/run      → start the new agent loop
+  GET  /api/agent/status   → get status of active agent
+  POST /api/agent/cancel   → cancel active agent
 
-WS  /ws/logs                      → real-time log streaming for the active run
+  GET  /api/settings       → read current settings
+  POST /api/settings       → update .env-based settings
+  GET  /api/runs           → historical runs
+  DELETE /api/runs         → format/delete all historical runs
+
+  WS   /ws/logs            → real-time log streaming
 """
 from __future__ import annotations
 
@@ -31,59 +26,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Response
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-# ── Core autobot imports ──────────────────────────────────────────────────────
-from ..engine import AutomationEngine, TaskStep, WorkflowPlan
-from ..planner import build_plan_from_text
-from ..llm_brain import LLMBrain
-from ..autonomy import AutonomousRunner, AutonomousConfig
-from ..workflows import (
-    builtin_workflows,
-    code_iteration_workflow,
-    console_fix_assist_workflow,
-    kaggle_submit_workflow,
-    leetcode_solve_workflow,
-    open_whatsapp_stay_workflow,
-    portfolio_workflow,
-    research_paper_workflow,
-    tool_call_stress_workflow,
-    website_builder_workflow,
-)
+from ..agent.runner import AgentRunner
 
-# ── Module-level shared state ─────────────────────────────────────────────────
 
-_engine: AutomationEngine | None = None
-_brain: LLMBrain | None = None
-_run_log: list[str] = []
+# ── State ─────────────────────────────────────────────────────────────────────
+
+_agent_runner: AgentRunner | None = None
+_agent_status: str = "idle"  # idle | running | done | failed | cancelled
 _active_run_id: str | None = None
-_run_status: str = "idle"   # idle | running | done | failed | cancelled
+_run_log: list[str] = []
 _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
-# Human input: when request_human_input runs, callback sets this and waits; POST /api/human_input clears it
-_human_input_pending: dict[str, Any] | None = None
-
-# Autonomous runner state
-_autonomous_runner: AutonomousRunner | None = None
-_autonomous_goal: str = ""
-_autonomous_status: str = "idle"  # idle | running | done | cancelled | failed
-
-# All actions the AI planner is allowed to use
-ALLOWED_ACTIONS = [
-    "open_url", "search_google", "browser_fill", "browser_click",
-    "browser_press", "browser_scroll", "browser_snapshot",
-    "browser_get_status", "browser_get_url", "browser_set_mode",
-    "adapter_call", "adapter_list_actions", "adapter_set_policy",
-    "adapter_prepare_sensitive", "adapter_confirm_sensitive",
-    "clipboard_set", "clipboard_get", "screenshot", "wait",
-    "desktop_type", "desktop_hotkey", "desktop_click", "desktop_move",
-    "desktop_switch_window", "run_command", "open_app", "open_path",
-    "request_human_help", "request_human_input", "log",
-]
 
 
 # ── Logging + WebSocket broadcast ────────────────────────────────────────────
@@ -109,42 +67,20 @@ async def _broadcast(msg: str) -> None:
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
-def _human_input_callback(prompt: str, state_key: str) -> str:
-    """Called from engine thread when a step needs password/token. Blocks until frontend submits value."""
-    global _human_input_pending
-    result_holder: list[str] = [""]
-    evt = threading.Event()
-    _human_input_pending = {"prompt": prompt, "key": state_key, "event": evt, "result": result_holder}
-    _log(f"!!! Human input required: {state_key} — check the React UI to enter value !!!")
-    if _event_loop and not _event_loop.is_closed():
-        asyncio.run_coroutine_threadsafe(_broadcast(json.dumps({"type": "human_input_required", "prompt": prompt, "key": state_key})), _event_loop)
-    ok = evt.wait(timeout=300)
-    _human_input_pending = None
-    if not ok:
-        _log("Human input timed out after 300s; using empty string.")
-    return (result_holder[0] or "").strip()
-
-
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    global _engine, _brain, _event_loop
+    global _event_loop
     _event_loop = asyncio.get_event_loop()
-    _log("Autobot engine starting...")
-    _engine = AutomationEngine(logger=_log, human_input_callback=_human_input_callback)
-    _brain = LLMBrain(logger=_log)
-    if _brain.enabled:
-        _log(f"LLM Brain enabled: provider={_brain.provider}, model={_brain.model_name}")
-    else:
-        _log("LLM Brain disabled (no API key configured). Using text-based planner fallback.")
+    _log("Autobot backend starting...")
     yield
-    _log("Autobot engine shutting down.")
-    if _engine:
-        _engine.close()
+    _log("Autobot backend shutting down.")
+    if _agent_runner:
+        _agent_runner.cancel()
 
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
 
-# Allow Vite dev server (various ports) + any localhost origin + configurable extra origins (e.g. Vercel deploy URL)
+# Allow Vite dev server
 _extra_origins = [o.strip() for o in os.getenv("AUTOBOT_CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -160,17 +96,13 @@ app.add_middleware(
 )
 
 
-# ── Pydantic request models ───────────────────────────────────────────────────
+# ── Pydantic Request Models ───────────────────────────────────────────────────
 
-class TextPlanRequest(BaseModel):
-    task: str
+class AgentRunRequest(BaseModel):
+    goal: str
+    max_steps: int = 25
+    use_vision: bool = True
 
-class RunPlanRequest(BaseModel):
-    plan: dict[str, Any]
-
-class ChatRequest(BaseModel):
-    message: str
-    state: dict[str, Any] = {}
 
 class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
@@ -180,657 +112,148 @@ class SettingsUpdate(BaseModel):
     browser_mode: str | None = None
 
 
-class RunWorkflowRequest(BaseModel):
-    workflow_id: str
-    topic: str = ""
+# ── Agent Endpoints ───────────────────────────────────────────────────────────
 
-
-class HumanInputSubmit(BaseModel):
-    key: str
-    value: str
-
-
-class PageContext(BaseModel):
-    url: str = ""
-    title: str = ""
-    text: str = ""
-
-
-class RunAutonomousRequest(BaseModel):
-    goal: str
-    page_context: PageContext = PageContext()
-    max_hours: float = 8.0
-    allow_desktop_actions: bool = False
-
-
-# ── Plan conversion helpers ───────────────────────────────────────────────────
-
-def _dict_to_plan(data: dict[str, Any]) -> WorkflowPlan:
-    steps = [
-        TaskStep(
-            action=str(s.get("action", "")),
-            args=dict(s.get("args") or {}),
-            description=str(s.get("description", "")),
-            save_as=s.get("save_as") or None,
-            retries=int(s.get("retries") or 0),
-            continue_on_error=bool(s.get("continue_on_error", False)),
-            target_node=s.get("target_node") or None,
-        )
-        for s in (data.get("steps") or [])
-        if isinstance(s, dict) and s.get("action")
-    ]
-    return WorkflowPlan(
-        name=str(data.get("name") or "unnamed"),
-        description=str(data.get("description") or ""),
-        steps=steps,
-    )
-
-
-def _plan_to_dict(plan: WorkflowPlan, plan_id: str | None = None) -> dict[str, Any]:
-    return {
-        "id": plan_id or f"plan_{int(time.time())}",
-        "name": plan.name,
-        "description": plan.description,
-        "steps": [
-            {
-                "action": s.action,
-                "args": s.args,
-                "description": s.description,
-                "save_as": s.save_as,
-                "retries": s.retries,
-                "continue_on_error": s.continue_on_error,
-                "target_node": s.target_node,
-            }
-            for s in plan.steps
-        ],
-    }
-
-
-# ── API Routes ────────────────────────────────────────────────────────────────
-
-@app.get("/api/status")
-def get_status():
-    """Engine health, browser state, and current run status."""
-    browser_active = False
-    browser_mode = "unknown"
-    current_url = "none"
-    if _engine:
-        try:
-            browser_active = _engine.browser.is_active()
-            browser_mode = _engine.browser.mode
-            if browser_active and browser_mode != "human_profile":
-                current_url = _engine.browser.get_url()
-        except Exception:
-            pass
-
-    human_input = None
-    if _human_input_pending:
-        human_input = {"prompt": _human_input_pending.get("prompt", ""), "key": _human_input_pending.get("key", "")}
-    return {
-        "status": "ok",
-        "run_status": _run_status,
-        "active_run_id": _active_run_id,
-        "browser": {
-            "active": browser_active,
-            "mode": browser_mode,
-            "url": current_url,
-        },
-        "llm_enabled": bool(_brain and _brain.enabled),
-        "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "none"),
-        "llm_model": os.getenv("AUTOBOT_LLM_MODEL", "default"),
-        "log_lines": len(_run_log),
-        "human_input_pending": human_input,
-    }
-
-
-@app.get("/api/adapters")
-def get_adapters():
-    """List all registered adapters and their available actions."""
-    if not _engine:
-        return {"adapters": []}
-    lib = _engine.get_adapter_library()
-    result = []
-    for name, info in lib.items():
-        actions = list(info.get("actions", {}).keys())
-        result.append({
-            "name": name,
-            "description": info.get("description", ""),
-            "actions": actions,
-            "telemetry": info.get("telemetry", {}),
-        })
-    return {"adapters": result}
-
-
-@app.get("/api/runs")
-def get_runs():
-    """List all completed/active run folders from the runs/ directory."""
-    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
-    runs = []
-    if runs_root.exists():
-        for run_dir in sorted(runs_root.iterdir(), reverse=True):
-            if not run_dir.is_dir():
-                continue
-            history_file = run_dir / "history.json"
-            if history_file.exists():
-                try:
-                    data = json.loads(history_file.read_text(encoding="utf-8"))
-                    data["id"] = run_dir.name
-                    # Normalize field names for React frontend
-                    data["planName"] = data.get("plan_name", "unnamed")
-                    data["timestamp"] = data.get("started_at", "unknown")
-                    data["status"] = "success" if data.get("success") else "failed"
-                    data["stepsCompleted"] = data.get("completed_steps", 0)
-                    data["totalSteps"] = data.get("total_steps", 0)
-                    
-                    # Compute progress
-                    if data["totalSteps"] > 0:
-                        data["progress"] = int((data["stepsCompleted"] / data["totalSteps"]) * 100)
-                    else:
-                        data["progress"] = 100
-                    
-                    # Add a snippet of the latest logs for the UI
-                    console_log = run_dir / "console.log"
-                    if console_log.exists():
-                        lines = console_log.read_text(encoding="utf-8").splitlines()
-                        data["logs"] = lines[-10:] if lines else []
-                    else:
-                        data["logs"] = []
-
-                    runs.append(data)
-                except Exception:
-                    pass
-    return {"runs": runs[:50]}
-
-
-@app.get("/api/run/{run_id}")
-def get_run(run_id: str):
-    """Get details and logs for a specific run."""
-    # Active run: return live data
-    if run_id == _active_run_id:
-        return {
-            "id": run_id,
-            "planName": "Active Run",
-            "status": _run_status,
-            "stepsCompleted": len([l for l in _run_log if "Executing:" in l]),
-            "totalSteps": 0,
-            "logs": list(_run_log),
-            "active": True,
-        }
-    # Historical run
-    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
-    run_dir = runs_root / run_id
-    if not run_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Run not found")
-    history_file = run_dir / "history.json"
-    if not history_file.exists():
-        raise HTTPException(status_code=404, detail="History file not found")
-    data = json.loads(history_file.read_text(encoding="utf-8"))
-    data["id"] = run_id
-    console_log = run_dir / "console.log"
-    if console_log.exists():
-        data["logs"] = console_log.read_text(encoding="utf-8").splitlines()
-    elif "steps" in data:
-        # Fallback to step logs if console.log is missing
-        data["logs"] = [f"Step {i+1}: {s.get('description', '')}" for i, s in enumerate(data.get("steps", []))]
-    
-    # Normalize for frontend
-    data["planName"] = data.get("plan_name", "historical_run")
-    data["timestamp"] = data.get("started_at", "unknown")
-    data["status"] = "success" if data.get("success") else "failed"
-    data["stepsCompleted"] = data.get("completed_steps", 0)
-    data["totalSteps"] = data.get("total_steps", 0)
-    
-    return data
-
-
-@app.delete("/api/run/{run_id}")
-def delete_run(run_id: str):
-    """Delete a run folder and its history."""
-    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
-    run_dir = runs_root / run_id
-    if run_dir.exists() and run_dir.is_dir():
-        import shutil
-        shutil.rmtree(run_dir)
-        return {"status": "deleted"}
-    raise HTTPException(status_code=404, detail="Run not found")
-
-
-@app.get("/api/browser/screenshot")
-def get_browser_screenshot():
-    """Capture a live screenshot: browser tab or full desktop (so user can see current state of the screen)."""
-    if not _engine:
-        raise HTTPException(status_code=400, detail="Engine not initialized")
-
-    tmp_path = Path.cwd() / "tmp" / "live_screenshot.png"
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        _engine.browser.screenshot(str(tmp_path))
-        if tmp_path.exists():
-            return FileResponse(tmp_path, media_type="image/png")
-    except Exception as e:
-        _log(f"Screenshot error: {e}")
-        try:
-            import pyautogui
-            pyautogui.screenshot(imageFilename=str(tmp_path))
-            if tmp_path.exists():
-                return FileResponse(tmp_path, media_type="image/png")
-        except Exception as e2:
-            _log(f"Desktop screenshot fallback error: {e2}")
-        raise HTTPException(status_code=500, detail=f"Failed to capture screenshot: {e}")
-
-    raise HTTPException(status_code=503, detail="Browser not ready for screenshot")
-
-
-@app.post("/api/plan/text")
-def plan_from_text(req: TextPlanRequest):
-    """Convert a natural-language task string into a structured WorkflowPlan."""
-    try:
-        plan = build_plan_from_text(req.task)
-        return {"plan": _plan_to_dict(plan)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/plan/run")
-def run_plan_endpoint(req: RunPlanRequest):
+@app.post("/api/agent/run")
+def start_agent_run(req: AgentRunRequest):
     """
-    Execute a WorkflowPlan asynchronously.
-    Returns immediately with a run_id; poll /api/status or /api/run/{run_id} for progress.
+    Start the AgentRunner (CDP browser + DOM intelligence).
     """
-    global _active_run_id, _run_status, _run_log
+    global _agent_runner, _agent_status, _active_run_id, _run_log
 
-    if _run_status == "running":
-        raise HTTPException(status_code=409, detail="A plan is already running. Cancel it first.")
-
-    engine = _engine
-    if not engine:
-        raise HTTPException(status_code=503, detail="Engine not ready.")
-
-    try:
-        plan = _dict_to_plan(req.plan)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid plan: {e}")
-
-    if not plan.steps:
-        raise HTTPException(status_code=400, detail="Plan has no steps to execute.")
-
-    run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    _active_run_id = run_id
-    _run_status = "running"
-    _run_log.clear()
-    _log(f"▶ Starting plan: '{plan.name}' ({len(plan.steps)} steps)")
-
-    def _run_in_thread():
-        global _run_status
-        try:
-            engine.run_plan(plan)
-            _run_status = "done"
-            _log(f"✓ Plan '{plan.name}' completed successfully.")
-        except Exception as ex:
-            _run_status = "failed"
-            _log(f"✗ Plan failed: {ex}")
-
-    threading.Thread(target=_run_in_thread, daemon=True, name=f"plan-{run_id}").start()
-    return {"run_id": run_id, "status": "started", "plan_name": plan.name}
-
-
-# ── Builtin workflows (same as React frontend / former Tkinter UI) ─────────────
-
-WORKFLOW_LIST: list[dict[str, Any]] = [
-    {"id": "open_whatsapp_stay", "name": "Open WhatsApp Stay", "description": "Open WhatsApp Web and leave it open.", "topic_label": "Phone (optional)"},
-    {"id": "website_builder", "name": "Website Builder", "description": "Open VS Code, CASA, Grok, and search for layout ideas.", "topic_label": "Topic"},
-    {"id": "research_paper", "name": "Research Paper", "description": "Search, ask Grok for LaTeX, open Overleaf, compile.", "topic_label": "Topic"},
-    {"id": "portfolio", "name": "Portfolio", "description": "Google AI Studio sign-in, Gemini portfolio, save, git, Vercel.", "topic_label": "Topic (optional)"},
-    {"id": "leetcode_solve", "name": "LeetCode Solve", "description": "Solve one LeetCode problem with Grok (slug).", "topic_label": "Problem slug (e.g. two-sum)"},
-    {"id": "kaggle_submit", "name": "Kaggle Submit", "description": "Open competition, run notebook, submit, wait for score.", "topic_label": "Competition slug (e.g. titanic)"},
-    {"id": "console_fix_assist", "name": "Console Fix Assist", "description": "Capture console errors and open Grok with context.", "topic_label": "URL (optional)"},
-    {"id": "code_iteration", "name": "Code Iteration", "description": "Run tests, open Grok with failure context.", "topic_label": "Test command (e.g. pytest)"},
-    {"id": "tool_call_stress", "name": "Tool Call Stress", "description": "WhatsApp → Google Docs → Grok → Overleaf chain.", "topic_label": "phone|docs_url|path|message"},
-]
-
-
-@app.get("/api/workflows")
-def list_workflows():
-    """Return builtin workflow definitions for the React frontend."""
-    return {"workflows": WORKFLOW_LIST}
-
-
-def _workflow_plan(workflow_id: str, topic: str) -> WorkflowPlan:
-    """Build a WorkflowPlan from workflow_id and topic (same logic as Tkinter UI)."""
-    key = (workflow_id or "").strip()
-    t = (topic or "").strip()
-    if key == "open_whatsapp_stay":
-        return open_whatsapp_stay_workflow(phone=t)
-    if key == "website_builder":
-        return website_builder_workflow(t)
-    if key == "research_paper":
-        return research_paper_workflow(t)
-    if key == "portfolio":
-        return portfolio_workflow(t)
-    if key == "leetcode_solve":
-        return leetcode_solve_workflow(t or "two-sum")
-    if key == "kaggle_submit":
-        return kaggle_submit_workflow(t or "titanic", 1200)
-    if key == "console_fix_assist":
-        return console_fix_assist_workflow(t or "http://localhost:3000")
-    if key == "code_iteration":
-        return code_iteration_workflow(t or "pytest")
-    if key == "tool_call_stress":
-        parts = [p.strip() for p in t.split("|")] if t else []
-        while len(parts) < 4:
-            parts.append("")
-        return tool_call_stress_workflow(whatsapp_phone=parts[0], docs_existing_url=parts[1], download_check_path=parts[2], outgoing_message=parts[3] or "Autobot test")
-    raise ValueError(f"Unknown workflow: {workflow_id}")
-
-
-@app.post("/api/workflows/run")
-def run_workflow(req: RunWorkflowRequest):
-    """Run a builtin workflow by id with optional topic. Returns run_id."""
-    try:
-        plan = _workflow_plan(req.workflow_id, req.topic)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return run_plan_endpoint(RunPlanRequest(plan=_plan_to_dict(plan)))
-
-
-@app.get("/api/human_input")
-def get_pending_human_input():
-    """Return current pending human input request, if any (for polling or initial load)."""
-    global _human_input_pending
-    if not _human_input_pending:
-        return {"pending": False}
-    return {
-        "pending": True,
-        "prompt": _human_input_pending.get("prompt", ""),
-        "key": _human_input_pending.get("key", ""),
-    }
-
-
-@app.post("/api/human_input")
-def submit_human_input(req: HumanInputSubmit):
-    """Submit a value for a pending request_human_input step. Unblocks the engine."""
-    global _human_input_pending
-    if not _human_input_pending:
-        raise HTTPException(status_code=400, detail="No human input request pending.")
-    if _human_input_pending.get("key") != req.key:
-        raise HTTPException(status_code=400, detail=f"Key mismatch. Expected: {_human_input_pending.get('key')}")
-    result = _human_input_pending.get("result")
-    evt = _human_input_pending.get("event")
-    if isinstance(result, list):
-        result[:] = [req.value]
-    if evt is not None:
-        evt.set()
-    return {"status": "submitted", "key": req.key}
-
-
-@app.post("/api/run/{run_id}/cancel")
-def cancel_run(run_id: str):
-    """Cancel the currently active run."""
-    global _run_status
-    if run_id != _active_run_id:
-        raise HTTPException(status_code=400, detail="Run ID does not match active run.")
-    if _run_status != "running":
-        raise HTTPException(status_code=400, detail=f"Run is not active (status: {_run_status}).")
-    if _engine:
-        _engine.cancel()
-    _run_status = "cancelled"
-    _log("⚠ Run cancelled by user.")
-    return {"status": "cancelled", "run_id": run_id}
-
-
-# ── Autonomous runner endpoints ───────────────────────────────────────────────
-
-@app.post("/api/run_autonomous")
-def start_autonomous(req: RunAutonomousRequest):
-    """
-    Start the multi-agent autonomous runner for a natural-language goal.
-    Accepts optional page_context from the browser extension.
-    Returns immediately with run_id; poll /api/autonomous/status for progress.
-    """
-    global _autonomous_runner, _autonomous_goal, _autonomous_status
-    global _active_run_id, _run_status, _run_log
-
-    if _autonomous_status == "running" or _run_status == "running":
-        raise HTTPException(status_code=409, detail="A run is already in progress. Cancel it first.")
-
-    engine = _engine
-    if not engine:
-        raise HTTPException(status_code=503, detail="Engine not ready.")
+    if _agent_status == "running":
+        raise HTTPException(status_code=409, detail="A run is already in progress.")
 
     if not req.goal.strip():
         raise HTTPException(status_code=400, detail="Goal cannot be empty.")
 
-    run_id = f"autonomous_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"agent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     _active_run_id = run_id
-    _run_status = "running"
-    _autonomous_status = "running"
-    _autonomous_goal = req.goal
+    _agent_status = "running"
     _run_log.clear()
-    _log(f"🤖 Autonomous goal: {req.goal}")
-    if req.page_context.url:
-        _log(f"📄 Page context: {req.page_context.url}")
 
-    runner = AutonomousRunner(engine=engine, logger=_log)
-    _autonomous_runner = runner
-
-    config = AutonomousConfig(
-        max_steps_per_loop=5,
-        max_hours=req.max_hours,
-        allow_desktop_actions=req.allow_desktop_actions,
-        allow_sensitive_adapter_actions=False,
-    )
-    page_ctx = {
-        "url": req.page_context.url,
-        "title": req.page_context.title,
-        "text": req.page_context.text,
-    }
+    _agent_runner = AgentRunner.from_env(log_callback=_log)
 
     def _run_in_thread():
-        global _run_status, _autonomous_status
+        global _agent_status
+        import asyncio
         try:
-            result = runner.run(goal=req.goal, config=config, page_context=page_ctx)
-            _autonomous_status = "done" if result.success else "failed"
-            _run_status = _autonomous_status
-            _log(f"{'✅' if result.success else '❌'} Autonomous run finished: success={result.success}")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(_agent_runner.run(goal=req.goal, max_steps=req.max_steps))
+            _agent_status = "done"
+            # Dump history into runs folder for later retrieval
+            _save_run_history(run_id, req.goal, True, result)
         except Exception as ex:
-            _autonomous_status = "failed"
-            _run_status = "failed"
-            _log(f"❌ Autonomous run crashed: {ex}")
+            _agent_status = "failed"
+            _save_run_history(run_id, req.goal, False, str(ex))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
 
-    threading.Thread(target=_run_in_thread, daemon=True, name=f"autonomous-{run_id}").start()
+    threading.Thread(target=_run_in_thread, daemon=True, name=f"agent-{run_id}").start()
     return {"run_id": run_id, "status": "started", "goal": req.goal}
 
 
-@app.get("/api/autonomous/status")
-def get_autonomous_status():
-    """Return the current status of the autonomous runner."""
+@app.get("/api/agent/status")
+@app.get("/api/status")  # Backwards compat for old dashboard
+def get_agent_status():
+    """Return the status of the new agent loop."""
     runner_status: dict[str, Any] = {}
-    if _autonomous_runner:
-        runner_status = _autonomous_runner.get_status()
+    if _agent_runner:
+        try:
+            runner_status = _agent_runner.get_status()
+        except Exception:
+            pass
+            
+    # Include some backwards compat fields so the old React UI doesn't crash completely
     return {
-        "status": _autonomous_status,
-        "goal": _autonomous_goal,
+        "status": "ok",  # Legacy
+        "run_status": _agent_status,  # Legacy and new
+        "agent_status": _agent_status,
         "run_id": _active_run_id,
+        "active_run_id": _active_run_id,  # Legacy
+        "browser": {
+            "active": _agent_status == "running",
+            "mode": "cdp",
+        },
         **runner_status,
     }
 
 
-@app.post("/api/autonomous/cancel")
-def cancel_autonomous():
-    """Cancel the currently running autonomous task."""
-    global _autonomous_status, _run_status
-    if _autonomous_status != "running":
-        raise HTTPException(status_code=400, detail=f"No autonomous run is active (status: {_autonomous_status}).")
-    if _autonomous_runner:
-        _autonomous_runner.cancel()
-    _autonomous_status = "cancelled"
-    _run_status = "cancelled"
-    _log("⚠ Autonomous run cancelled by user.")
+@app.post("/api/agent/cancel")
+@app.post("/api/run/{run_id}/cancel")  # Backwards compat
+def cancel_agent(run_id: str = ""):
+    """Cancel the running agent task."""
+    global _agent_status
+    if _agent_status != "running":
+        raise HTTPException(status_code=400, detail=f"No agent run active.")
+    if _agent_runner:
+        _agent_runner.cancel()
+    _agent_status = "cancelled"
+    if _active_run_id:
+        _save_run_history(_active_run_id, "Cancelled", False, "Cancelled by user")
+    _log("⚠️ Agent run cancelled.")
     return {"status": "cancelled"}
 
 
-@app.post("/api/chat")
-def chat(req: ChatRequest):
-    """
-    Send a message to the AI planner.
-    
-    Flow:
-    1. If LLM is configured → use LLMBrain.generate_plan_draft() to get an AI plan
-    2. Fallback → use text-based planner (build_plan_from_text)
-    
-    Returns: { reply: str, plan: PlanDict | null }
-    """
-    brain = _brain
-
-    if brain and brain.enabled:
-        try:
-            # Build tool catalog from registered adapters so LLM knows available tools
-            tool_catalog = "## GENERAL BROWSER TOOLS (Any website)\n"
-            tool_catalog += "### Mode: devtools (Fast, DOM Access)\n"
-            tool_catalog += "- browser_get_content(): COPY/CAPTURE all text from page. Use for extraction.\n"
-            tool_catalog += "- browser_click_text(text): Click button/link by its name. Very robust.\n"
-            tool_catalog += "- browser_click(selector): Click element by CSS selector.\n"
-            tool_catalog += "- browser_fill(selector, text): Type into input by CSS selector.\n"
-            tool_catalog += "- browser_snapshot(): Get visible text-tree of buttons/inputs.\n"
-            tool_catalog += "### Mode: human_profile (Stealth, Simulation)\n"
-            tool_catalog += "- desktop_type(text): Simulate typing via system keyboard. Bypasses detection.\n"
-            tool_catalog += "- desktop_press(key): Simulate key press (e.g. 'enter').\n"
-            tool_catalog += "### Global Tools (Any Mode)\n"
-            tool_catalog += "- open_url(url): Navigate to site.\n"
-            tool_catalog += "- browser_set_mode(mode): Switch capability between 'devtools' and 'human_profile'.\n"
-            tool_catalog += "- browser_press(key): Press key 'enter' on browser window.\n"
-            tool_catalog += "- search_google(query): Search and open top result.\n\n"
-            
-            tool_catalog += "## SERVICE ADAPTERS (Use ONLY for these specific services)\n"
-            if _engine:
-                lib = _engine.get_adapter_library()
-                catalog_lines: list[str] = []
-                for adapter_name, info in lib.items():
-                    adapter_desc = info.get("description", "")
-                    catalog_lines.append(f"### Adapter: {adapter_name}")
-                    if adapter_desc:
-                        catalog_lines.append(f"Description: {adapter_desc}")
-                    catalog_lines.append("Actions:")
-                    for action_name, action_info in info.get("actions", {}).items():
-                        desc = action_info.get("description", "No description")
-                        catalog_lines.append(f"  - {action_name}: {desc}")
-                    catalog_lines.append("")
-                if catalog_lines:
-                    tool_catalog += "\n".join(catalog_lines)
-
-            draft = brain.generate_plan_draft(
-                user_prompt=req.message,
-                allowed_actions=ALLOWED_ACTIONS,
-                max_steps=10,
-                tool_catalog=tool_catalog or None,
-            )
-
-            if draft and draft.steps:
-                # Convert PlanDraft → plan dict (PlanDraft has .title, .summary, .steps)
-                plan_dict: dict[str, Any] = {
-                    "id": f"plan_{int(time.time())}",
-                    "name": draft.title or "AI Plan",
-                    "description": draft.summary or req.message,
-                    "steps": [
-                        {
-                            "action": s.action,
-                            "args": s.args,
-                            "description": s.description,
-                            "save_as": s.save_as,
-                            "retries": s.retries,
-                            "continue_on_error": s.continue_on_error,
-                            "target_node": s.target_node,
-                        }
-                        for s in draft.steps
-                    ],
-                }
-                reply = (
-                    f"I've created a plan: **{plan_dict['name']}**\n\n"
-                    f"{draft.summary}\n\n"
-                    f"Ready to execute {len(draft.steps)} step(s)?"
-                )
-                return {"reply": reply, "plan": plan_dict}
-            else:
-                return {
-                    "reply": "I couldn't generate a plan for that request. Try rephrasing, or be more specific.",
-                    "plan": None,
-                }
-        except Exception as e:
-            _log(f"LLM chat error: {e}")
-            # Fall through to text-based planner
-
-    # Fallback: rule-based text planner
+def _save_run_history(run_id: str, goal: str, success: bool, result: str):
+    """Save run details so they show up in historical runs."""
     try:
-        plan = build_plan_from_text(req.message)
-        plan_dict = _plan_to_dict(plan)
-        if plan.steps:
-            reply = (
-                f"Here's a workflow for: **{plan.name}**\n\n"
-                f"{plan.description}\n\n"
-                f"This plan has {len(plan.steps)} step(s). Ready to execute?"
-            )
-            return {"reply": reply, "plan": plan_dict}
-        else:
-            return {
-                "reply": (
-                    "I understand what you're asking, but I need more specifics. "
-                    "Try commands like: \"search for Python tutorials\", "
-                    "\"open WhatsApp\", or \"run stress test\". "
-                    "Configure an LLM API key in Settings for full AI planning."
-                ),
-                "plan": None,
-            }
-    except Exception:
-        return {
-            "reply": (
-                f'I heard: "{req.message}". '
-                "To get a proper plan, configure an LLM API key in Settings, "
-                "or try a command like \"search for X\" or \"open Y\"."
-            ),
-            "plan": None,
+        runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
+        run_dir = runs_root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        
+        hist = {
+            "plan_name": goal[:50],
+            "description": goal,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "success": success,
+            "result": result,
+            "completed_steps": _agent_runner.current_step if _agent_runner else 0,
+            "total_steps": _agent_runner.max_steps if _agent_runner else 0,
         }
+        (run_dir / "history.json").write_text(json.dumps(hist, indent=2), encoding="utf-8")
+        (run_dir / "console.log").write_text("\n".join(_run_log), encoding="utf-8")
+    except Exception as e:
+        _log(f"Failed to save run history: {e}")
 
+
+# ── Settings & Runs (Utility endpoints) ───────────────────────────────────────
 
 @app.get("/api/settings")
 def get_settings():
-    """Return current configuration (no secret values exposed)."""
     return {
-        "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "none"),
+        "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter"),
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", ""),
-        "browser_mode": os.getenv("AUTOBOT_BROWSER_MODE", "human_profile"),
+        "browser_mode": "cdp",  # Enforced now
         "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
-        "has_gemini_key": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
-        "llm_enabled": bool(_brain and _brain.enabled),
+        "llm_enabled": True,
     }
 
 
 @app.post("/api/settings")
 def update_settings(req: SettingsUpdate):
-    """Update .env settings at runtime."""
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     updates: dict[str, str] = {}
     if req.llm_provider is not None:
         updates["AUTOBOT_LLM_PROVIDER"] = req.llm_provider
     if req.llm_model is not None:
         updates["AUTOBOT_LLM_MODEL"] = req.llm_model
-    if req.browser_mode is not None:
-        updates["AUTOBOT_BROWSER_MODE"] = req.browser_mode
     if req.openrouter_api_key:
         updates["OPENROUTER_API_KEY"] = req.openrouter_api_key
-        # Automatically set provider if user is saving an OpenRouter key
         if not req.llm_provider:
             updates["AUTOBOT_LLM_PROVIDER"] = "openrouter"
     if req.openai_api_key:
         updates["OPENAI_API_KEY"] = req.openai_api_key
 
     if updates:
-        # Update environment variables immediately for the running process
         for key, val in updates.items():
             os.environ[key] = val
-
-        # Also persist to .env file
+            
         if env_path.exists():
             lines = env_path.read_text(encoding="utf-8").splitlines()
             updated_keys: set[str] = set()
@@ -847,24 +270,88 @@ def update_settings(req: SettingsUpdate):
                     new_lines.append(f"{key}={val}")
             env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
-        # Re-initialise LLM brain with new settings
-        global _brain
-        _brain = LLMBrain(logger=_log)
-        if _brain.enabled:
-            _log(f"LLM Brain re-initialised: provider={_brain.provider}, model={_brain.model_name}")
-        else:
-            _log("LLM Brain re-initialised but not enabled (check API key).")
-
     return {"status": "updated", "keys_changed": list(updates.keys())}
 
 
-# ── Logs (polling fallback when WebSocket is unavailable) ─────────────────────
+@app.get("/api/runs")
+def get_runs():
+    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
+    runs = []
+    if runs_root.exists():
+        for run_dir in sorted(runs_root.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+            history_file = run_dir / "history.json"
+            if history_file.exists():
+                try:
+                    data = json.loads(history_file.read_text(encoding="utf-8"))
+                    data["id"] = run_dir.name
+                    data["planName"] = data.get("plan_name", "unnamed")
+                    data["timestamp"] = data.get("started_at", "unknown")
+                    data["status"] = "success" if data.get("success") else "failed"
+                    data["stepsCompleted"] = data.get("completed_steps", 0)
+                    data["totalSteps"] = data.get("total_steps", 0)
+                    data["progress"] = int((data["stepsCompleted"] / max(1, data["totalSteps"])) * 100)
+                    
+                    console_log = run_dir / "console.log"
+                    if console_log.exists():
+                        lines = console_log.read_text(encoding="utf-8").splitlines()
+                        data["logs"] = lines[-10:] if lines else []
+                    else:
+                        data["logs"] = []
 
-@app.get("/api/logs")
-def get_logs(limit: int = 500):
-    """Return recent log lines for polling fallback. Use when WebSocket is unreliable."""
-    n = max(1, min(2000, limit))
-    return {"logs": list(_run_log[-n:])}
+                    runs.append(data)
+                except Exception:
+                    pass
+    return {"runs": runs[:50]}
+
+
+@app.delete("/api/runs")
+def clear_all_runs():
+    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
+    if runs_root.exists():
+        import shutil
+        for item in runs_root.iterdir():
+            if item.is_dir():
+                try:
+                    shutil.rmtree(item)
+                except Exception:
+                    pass
+    return {"status": "cleared"}
+
+
+@app.get("/api/run/{run_id}")
+def get_run(run_id: str):
+    if run_id == _active_run_id:
+        return {
+            "id": run_id,
+            "planName": "Active Run",
+            "status": _agent_status,
+            "stepsCompleted": _agent_runner.current_step if _agent_runner else 0,
+            "totalSteps": _agent_runner.max_steps if _agent_runner else 0,
+            "logs": list(_run_log),
+            "active": True,
+        }
+    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
+    run_dir = runs_root / run_id
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Run not found")
+    history_file = run_dir / "history.json"
+    if not history_file.exists():
+        raise HTTPException(status_code=404, detail="History file not found")
+    
+    data = json.loads(history_file.read_text(encoding="utf-8"))
+    data["id"] = run_id
+    console_log = run_dir / "console.log"
+    if console_log.exists():
+        data["logs"] = console_log.read_text(encoding="utf-8").splitlines()
+    
+    data["planName"] = data.get("plan_name", "historical_run")
+    data["timestamp"] = data.get("started_at", "unknown")
+    data["status"] = "success" if data.get("success") else "failed"
+    data["stepsCompleted"] = data.get("completed_steps", 0)
+    data["totalSteps"] = data.get("total_steps", 0)
+    return data
 
 
 # ── WebSocket: real-time log streaming ───────────────────────────────────────
@@ -873,7 +360,6 @@ def get_logs(limit: int = 500):
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
     _ws_clients.add(websocket)
-    # Send the current log backlog immediately on connect
     for line in list(_run_log):
         try:
             await websocket.send_text(line)
@@ -882,7 +368,6 @@ async def ws_logs(websocket: WebSocket):
     try:
         while True:
             await asyncio.sleep(30)
-            # Ping each client; remove dead ones so one bad client doesn't break others
             dead = []
             for ws in list(_ws_clients):
                 try:
@@ -897,7 +382,40 @@ async def ws_logs(websocket: WebSocket):
         _ws_clients.discard(websocket)
 
 
-# ── Serve built React frontend ────────────────────────────────────────────────
+# ── Server configuration ──────────────────────────────────────────────────────
+
+# Stub routes for old React components that crash if 404
+@app.get("/api/workflows")
+def stub_workflows(): return {"workflows": []}
+
+@app.get("/api/adapters")
+def stub_adapters(): return {"adapters": []}
+
+@app.get("/api/human_input")
+def stub_human_input(): return {"pending": False}
+
+@app.get("/api/logs")
+def get_logs(limit: int = 500):
+    global _run_log
+    return {"logs": _run_log[-limit:] if _run_log else []}
+
+class ChatRequest(BaseModel):
+    message: str
+    state: dict = {}
+
+@app.post("/api/chat")
+def chat(req: ChatRequest):
+    plan = {
+        "id": f"plan_{int(time.time())}",
+        "name": "Auto Task",
+        "description": req.message,
+        "steps": [{"action": "auto_execute", "args": {}, "description": f"Autonomously execute: {req.message}"}]
+    }
+    return {
+        "reply": "I have created a direct automation plan for your task. Click Execute to begin.",
+        "plan": plan
+    }
+
 
 _frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 

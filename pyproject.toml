@@ -1,0 +1,87 @@
+[project]
+name = "autobot"
+description = "A sovereign digital agent — AI with full control of your computer: browser, keyboard, mouse, and more."
+authors = [{ name = "Autobot Team" }]
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+dependencies = [
+    # Core
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.25.0",
+
+    # Web server (dashboard)
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "websockets>=12.0",
+
+    # LLM
+    "openai>=1.0.0",
+
+    # Browser automation
+    "playwright>=1.44.0",
+
+    # OS control
+    "pyautogui>=0.9.54",
+
+    # Utilities
+    "psutil>=5.9.0",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+# Full browser intelligence (Phase 1 - Browser Use patterns)
+browser = [
+    "cdp-use>=1.0.0",
+    "markdownify>=0.11.0",
+]
+# Development
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+# All optional dependencies
+all = ["autobot[browser,dev]"]
+
+[project.scripts]
+autobot = "autobot.cli:main"
+
+[project.urls]
+Repository = "https://github.com/GabuGravin41/autobot"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = [
+    "autobot/**/*.py",
+    "autobot/prompts/**/*.md",
+    "autobot/**/*.json",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+timeout = 120
+
+[tool.ruff]
+line-length = 120
+fix = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
