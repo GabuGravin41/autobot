@@ -20,13 +20,13 @@ export default function HistoryPage({ runs, onViewDetails, onDeleteRun }: Histor
         >
             <header>
                 <h2 className="text-4xl font-bold tracking-tight mb-2">Operation History</h2>
-                <p className="text-white/40">Audit trail of all system activities.</p>
+                <p className="text-[var(--base-text-muted)]">Audit trail of all system activities.</p>
             </header>
 
             <div className="glass-panel rounded-3xl overflow-hidden">
                 <table className="w-full text-left border-collapse">
                     <thead>
-                        <tr className="bg-white/5 text-[10px] font-bold uppercase tracking-widest text-white/40 border-b border-white/10">
+                        <tr className="bg-[var(--base-border)] text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] border-b border-[var(--base-border)]">
                             <th className="px-6 py-4">Status</th>
                             <th className="px-6 py-4">Operation</th>
                             <th className="px-6 py-4">Timestamp</th>
@@ -36,40 +36,40 @@ export default function HistoryPage({ runs, onViewDetails, onDeleteRun }: Histor
                     </thead>
                     <tbody>
                         {runs.map(run => (
-                            <tr key={run.id} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors group">
+                            <tr key={run.id} className="border-b border-[var(--base-border)] hover:bg-white/[0.02] transition-colors group">
                                 <td className="px-6 py-4">
-                                    <div className={`flex items-center gap-2 ${run.status === 'success' ? 'text-emerald-400' : run.status === 'running' ? 'text-brand-400' : 'text-red-400'}`}>
+                                    <div className={`flex items-center gap-2 ${run.status === 'success' ? 'text-emerald-400' : run.status === 'running' ? 'text-[var(--brand-primary)]' : 'text-red-400'}`}>
                                         {run.status === 'success' ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
                                         <span className="text-[10px] font-bold uppercase tracking-widest">{run.status}</span>
                                     </div>
                                 </td>
                                 <td className="px-6 py-4">
                                     <div className="text-sm font-bold">{run.planName}</div>
-                                    <div className="text-[10px] text-white/20 font-mono truncate max-w-[200px]">{run.id}</div>
+                                    <div className="text-[10px] text-[var(--base-text-muted)] font-mono truncate max-w-[200px]">{run.id}</div>
                                 </td>
                                 <td className="px-6 py-4">
-                                    <div className="text-xs text-white/60">{run.timestamp}</div>
+                                    <div className="text-xs text-[var(--base-text-muted)]">{run.timestamp}</div>
                                 </td>
                                 <td className="px-6 py-4">
                                     <div className="flex items-center gap-3">
-                                        <div className="w-20 h-1 bg-white/10 rounded-full overflow-hidden">
-                                            <div className="h-full bg-brand-500" style={{ width: `${run.progress ?? 0}%` }} />
+                                        <div className="w-20 h-1 bg-[var(--base-border)] rounded-full overflow-hidden">
+                                            <div className="h-full bg-[var(--brand-primary)]" style={{ width: `${run.progress ?? 0}%` }} />
                                         </div>
-                                        <span className="text-[10px] text-white/40">{run.progress ?? 0}%</span>
+                                        <span className="text-[10px] text-[var(--base-text-muted)]">{run.progress ?? 0}%</span>
                                     </div>
                                 </td>
                                 <td className="px-6 py-4 text-right">
                                     <div className="flex items-center justify-end gap-2">
                                         <button
                                             onClick={() => onViewDetails(run)}
-                                            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-brand-400 transition-colors"
+                                            className="p-2 rounded-lg bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[var(--base-text-muted)] hover:text-[var(--brand-primary)] transition-colors"
                                             title="View Details"
                                         >
                                             <Eye size={16} />
                                         </button>
                                         <button
                                             onClick={() => onDeleteRun(run.id)}
-                                            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-red-400 transition-colors"
+                                            className="p-2 rounded-lg bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[var(--base-text-muted)] hover:text-red-400 transition-colors"
                                             title="Delete Record"
                                         >
                                             <Trash2 size={16} />
@@ -80,7 +80,7 @@ export default function HistoryPage({ runs, onViewDetails, onDeleteRun }: Histor
                         ))}
                         {runs.length === 0 && (
                             <tr>
-                                <td colSpan={5} className="px-6 py-16 text-center text-white/30 text-sm">No runs recorded yet.</td>
+                                <td colSpan={5} className="px-6 py-16 text-center text-[var(--base-text-muted)] text-sm">No runs recorded yet.</td>
                             </tr>
                         )}
                     </tbody>

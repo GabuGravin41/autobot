@@ -29,12 +29,13 @@ export default function DashboardPage({
 }: DashboardPageProps) {
     const navigate = useNavigate();
 
-    const artifacts = liveAdapters.map(a => ({
-        id: a.name,
-        title: a.description,
-        type: 'adapter',
-        timestamp: 'online',
-    }));
+    const runArtifacts = activeRun?.artifacts ? Object.entries(activeRun.artifacts).map(([k, v]) => ({
+        id: k,
+        title: k,
+        type: 'file',
+        timestamp: 'New',
+        content: v
+    })) : [];
 
     return (
         <motion.div
@@ -56,25 +57,25 @@ export default function DashboardPage({
                         <div className="flex justify-between items-start mb-8">
                             <div>
                                 <div className="flex items-center gap-3 mb-2">
-                                    <div className="px-2 py-0.5 rounded bg-brand-500/20 text-brand-400 text-[10px] font-bold uppercase tracking-wider flex items-center gap-2">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-brand-500 animate-pulse" />
+                                    <div className="px-2 py-0.5 rounded bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] text-[10px] font-bold uppercase tracking-wider flex items-center gap-2">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--brand-primary)] animate-pulse" />
                                         Active Operation
                                     </div>
                                     <h3 className="text-2xl font-bold tracking-tight">{activeRun.planName}</h3>
                                 </div>
-                                <p className="text-white/40 text-sm">Initialized at {activeRun.timestamp} • Session ID: {activeRun.id}</p>
+                                <p className="text-[var(--base-text-muted)] text-sm">Initialized at {activeRun.timestamp} • Session ID: {activeRun.id}</p>
                             </div>
                             <div className="text-right">
                                 {activeRun.id === 'autonomous' && (
                                     <div className="mb-2">
-                                        <div className="text-[10px] text-brand-400 uppercase tracking-widest font-bold">Autonomous Phase</div>
-                                        <div className="text-sm font-mono text-white italic">{activeRun.artifacts?.current_phase || 'Decomposing...'}</div>
+                                        <div className="text-[10px] text-[var(--brand-primary)] uppercase tracking-widest font-bold">Autonomous Phase</div>
+                                        <div className="text-sm font-mono text-[var(--base-text)] italic">{activeRun.artifacts?.current_phase || 'Decomposing...'}</div>
                                     </div>
                                 )}
-                                <div className="text-3xl font-mono font-bold text-brand-400">
+                                <div className="text-3xl font-mono font-bold text-[var(--brand-primary)]">
                                     {activeRun.totalSteps > 0 ? Math.round((activeRun.stepsCompleted / activeRun.totalSteps) * 100) : (activeRun.id === 'autonomous' ? 'AU' : '0%')}
                                 </div>
-                                <div className="text-[10px] text-white/40 uppercase tracking-widest font-bold">Execution Progress</div>
+                                <div className="text-[10px] text-[var(--base-text-muted)] uppercase tracking-widest font-bold">Execution Progress</div>
                             </div>
                         </div>
 
@@ -82,11 +83,11 @@ export default function DashboardPage({
                             <div className="lg:col-span-2 space-y-6">
                                 {/* Progress bar */}
                                 <div className="space-y-3">
-                                    <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-white/40">
+                                    <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
                                         <span>Step {activeRun.stepsCompleted} of {activeRun.totalSteps}</span>
-                                        <span className="text-brand-400">{activeRun.status === 'running' ? 'Processing...' : activeRun.status}</span>
+                                        <span className="text-[var(--brand-primary)]">{activeRun.status === 'running' ? 'Processing...' : activeRun.status}</span>
                                     </div>
-                                    <div className="h-3 w-full bg-white/5 rounded-full overflow-hidden p-0.5 border border-white/10">
+                                    <div className="h-3 w-full bg-[var(--base-border)] rounded-full overflow-hidden p-0.5 border border-[var(--base-border)]">
                                         <motion.div
                                             initial={{ width: 0 }}
                                             animate={{ width: `${activeRun.totalSteps > 0 ? (activeRun.stepsCompleted / activeRun.totalSteps) * 100 : 0}%` }}
@@ -96,9 +97,9 @@ export default function DashboardPage({
                                 </div>
 
                                 {/* Log terminal */}
-                                <div className="glass-panel bg-black/40 rounded-2xl p-6 h-[280px] flex flex-col">
-                                    <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
-                                        <div className="text-[10px] font-bold uppercase tracking-widest text-white/40 flex items-center gap-2">
+                                <div className="glass-panel bg-[var(--base-border)] rounded-2xl p-6 h-[280px] flex flex-col">
+                                    <div className="flex items-center justify-between mb-4 pb-4 border-b border-[var(--base-border)]">
+                                        <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] flex items-center gap-2">
                                             <Terminal size={14} /> Execution Logs
                                         </div>
                                         <div className="flex gap-1">
@@ -110,11 +111,11 @@ export default function DashboardPage({
                                     <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar space-y-2 font-mono text-[11px]">
                                         {activeRun.logs.map((log, i) => (
                                             <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} key={i} className="flex gap-3">
-                                                <span className="text-white/20">[{i.toString().padStart(2, '0')}]</span>
-                                                <span className={i === activeRun.logs.length - 1 ? 'text-brand-400' : 'text-white/60'}>{log}</span>
+                                                <span className="text-[var(--base-text-muted)]">[{i.toString().padStart(2, '0')}]</span>
+                                                <span className={i === activeRun.logs.length - 1 ? 'text-[var(--brand-primary)]' : 'text-[var(--base-text-muted)]'}>{log}</span>
                                             </motion.div>
                                         ))}
-                                        <div className="animate-pulse text-brand-400/50">_</div>
+                                        <div className="animate-pulse text-[var(--brand-primary)]/50">_</div>
                                     </div>
                                 </div>
                             </div>
@@ -123,28 +124,28 @@ export default function DashboardPage({
                             <div className="space-y-6">
                                 {backendOnline && (
                                     <div className="space-y-4">
-                                        <div className="text-[10px] font-bold uppercase tracking-widest text-white/40 flex items-center gap-2 justify-between">
+                                        <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] flex items-center gap-2 justify-between">
                                             <span className="flex items-center gap-2"><Monitor size={12} /> Screen preview</span>
                                             <button
                                                 onClick={onRefreshScreenshot}
-                                                className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-[10px] font-bold uppercase tracking-wider transition-colors"
+                                                className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[10px] font-bold uppercase tracking-wider transition-colors"
                                             >
                                                 {screenshotUrl ? 'Refresh' : 'See current screen'}
                                             </button>
                                         </div>
                                         {screenshotUrl ? (
-                                            <div className="relative aspect-video rounded-2xl overflow-hidden border border-white/10">
+                                            <div className="relative aspect-video rounded-2xl overflow-hidden border border-[var(--base-border)]">
                                                 <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
                                                     onError={(e) => (e.currentTarget.style.display = 'none')} />
                                                 {backendStatus?.browser?.active && (
-                                                    <div className="absolute top-3 right-3 flex items-center gap-2 px-2 py-1 rounded bg-black/60 backdrop-blur-md border border-white/10">
+                                                    <div className="absolute top-3 right-3 flex items-center gap-2 px-2 py-1 rounded bg-[var(--base-border)] backdrop-blur-md border border-[var(--base-border)]">
                                                         <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                                                        <span className="text-[8px] font-bold text-white tracking-widest uppercase">Live</span>
+                                                        <span className="text-[8px] font-bold text-[var(--base-text)] tracking-widest uppercase">Live</span>
                                                     </div>
                                                 )}
                                             </div>
                                         ) : (
-                                            <div className="aspect-video rounded-2xl border border-dashed border-white/20 flex items-center justify-center text-white/40 text-sm">
+                                            <div className="aspect-video rounded-2xl border border-dashed border-[var(--base-border)] flex items-center justify-center text-[var(--base-text-muted)] text-sm">
                                                 Click "See current screen" to preview
                                             </div>
                                         )}
@@ -152,9 +153,9 @@ export default function DashboardPage({
                                 )}
 
                                 {/* Latest log snippet */}
-                                <div className="p-4 rounded-2xl bg-brand-500/5 border border-brand-500/10">
-                                    <div className="text-[9px] font-bold uppercase tracking-widest text-brand-400 mb-2">Latest Log</div>
-                                    <div className="text-xs text-white/60 leading-relaxed font-mono truncate">
+                                <div className="p-4 rounded-2xl bg-[var(--brand-primary)]/20 border border-brand-500/10">
+                                    <div className="text-[9px] font-bold uppercase tracking-widest text-[var(--brand-primary)] mb-2">Latest Log</div>
+                                    <div className="text-xs text-[var(--base-text-muted)] leading-relaxed font-mono truncate">
                                         {activeRun.logs.length > 0 ? activeRun.logs[activeRun.logs.length - 1] : 'Waiting for engine output...'}
                                     </div>
                                 </div>
@@ -178,7 +179,7 @@ export default function DashboardPage({
             <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                     <h2 className="text-4xl font-bold tracking-tight mb-2">Command Center</h2>
-                    <p className="text-white/40">Real-time overview of your autonomous operations.</p>
+                    <p className="text-[var(--base-text-muted)]">Real-time overview of your autonomous operations.</p>
                 </div>
                 <div className="flex items-center gap-3">
                     <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-widest ${backendOnline
@@ -213,12 +214,12 @@ export default function DashboardPage({
             {/* Stats row */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
                 {[
-                    { label: 'Active Runs', value: liveRuns.filter(r => r.status === 'running').length + (activeRun?.status === 'running' ? 1 : 0), color: 'text-brand-400' },
-                    { label: 'Total Runs', value: liveRuns.length, color: 'text-white/40' },
+                    { label: 'Active Runs', value: liveRuns.filter(r => r.status === 'running').length + (activeRun?.status === 'running' ? 1 : 0), color: 'text-[var(--brand-primary)]' },
+                    { label: 'Total Runs', value: liveRuns.length, color: 'text-[var(--base-text-muted)]' },
                     { label: 'Adapters', value: liveAdapters.length, color: 'text-amber-400' },
-                    { label: 'Backend Uptime', value: backendOnline ? '100%' : '0%', color: 'text-brand-400' },
+                    { label: 'Backend Uptime', value: backendOnline ? '100%' : '0%', color: 'text-[var(--brand-primary)]' },
                 ].map(({ label, value, color }) => (
-                    <div key={label} className="glass-panel p-6 rounded-3xl border-white/5">
+                    <div key={label} className="glass-panel p-6 rounded-3xl border-[var(--base-border)]">
                         <div className={`text-[10px] font-bold uppercase tracking-[0.2em] mb-1 ${color}`}>{label}</div>
                         <div className="text-4xl font-bold tracking-tighter">{value}</div>
                     </div>
@@ -230,7 +231,7 @@ export default function DashboardPage({
                 <div className="lg:col-span-2 space-y-6">
                     <div className="flex items-center justify-between px-2">
                         <h3 className="text-xl font-bold tracking-tight">Active Operations</h3>
-                        <button onClick={() => navigate('/history')} className="text-[10px] font-bold uppercase tracking-widest text-brand-400 hover:underline">
+                        <button onClick={() => navigate('/history')} className="text-[10px] font-bold uppercase tracking-widest text-[var(--brand-primary)] hover:underline">
                             View All
                         </button>
                     </div>
@@ -239,11 +240,11 @@ export default function DashboardPage({
                             <div
                                 key={run.id}
                                 onClick={() => onSelectRun(run as any)}
-                                className="glass-panel p-6 rounded-3xl border-white/5 hover:border-brand-500/30 transition-all group cursor-pointer"
+                                className="glass-panel p-6 rounded-3xl border-[var(--base-border)] hover:border-brand-500/30 transition-all group cursor-pointer"
                             >
                                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                                     <div className="flex items-center gap-4">
-                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${run.status === 'running' ? 'bg-brand-500/10 text-brand-400 animate-pulse'
+                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${run.status === 'running' ? 'bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] animate-pulse'
                                             : run.status === 'success' ? 'bg-emerald-500/10 text-emerald-400'
                                                 : 'bg-red-500/10 text-red-400'
                                             }`}>
@@ -252,31 +253,31 @@ export default function DashboardPage({
                                                     : <AlertCircle size={20} />}
                                         </div>
                                         <div>
-                                            <div className="font-bold group-hover:text-brand-400 transition-colors">{run.planName}</div>
-                                            <div className="text-[10px] text-white/40 uppercase tracking-widest flex items-center gap-2 mt-1">
+                                            <div className="font-bold group-hover:text-[var(--brand-primary)] transition-colors">{run.planName}</div>
+                                            <div className="text-[10px] text-[var(--base-text-muted)] uppercase tracking-widest flex items-center gap-2 mt-1">
                                                 <span>{run.id}</span>
-                                                <span className="w-1 h-1 rounded-full bg-white/20" />
+                                                <span className="w-1 h-1 rounded-full bg-[var(--base-border)]" />
                                                 <span>{run.timestamp}</span>
                                             </div>
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-6">
                                         <div className="text-right hidden xs:block">
-                                            <div className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-1">Progress</div>
+                                            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-1">Progress</div>
                                             <div className="flex items-center gap-3">
-                                                <div className="w-24 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                                                    <div className="h-full bg-brand-500 transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
+                                                <div className="w-24 h-1.5 bg-[var(--base-border)] rounded-full overflow-hidden">
+                                                    <div className="h-full bg-[var(--brand-primary)] transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
                                                 </div>
                                                 <span className="text-xs font-mono">{run.progress ?? 0}%</span>
                                             </div>
                                         </div>
-                                        <ChevronRight size={16} className="text-white/20 group-hover:text-brand-400 transition-colors" />
+                                        <ChevronRight size={16} className="text-[var(--base-text-muted)] group-hover:text-[var(--brand-primary)] transition-colors" />
                                     </div>
                                 </div>
                             </div>
                         ))}
                         {liveRuns.length === 0 && !activeRun && (
-                            <div className="glass-panel p-10 rounded-3xl border-dashed border-white/10 text-center text-white/30 text-sm">
+                            <div className="glass-panel p-10 rounded-3xl border-dashed border-[var(--base-border)] text-center text-[var(--base-text-muted)] text-sm">
                                 No runs yet — start a workflow from the AI Planner or Workflows tab.
                             </div>
                         )}
@@ -286,14 +287,14 @@ export default function DashboardPage({
                 {/* Artifacts sidebar */}
                 <div className="space-y-6">
                     {backendOnline && screenshotUrl && (
-                        <div className="glass-panel p-4 rounded-3xl border-white/5">
+                        <div className="glass-panel p-4 rounded-3xl border-[var(--base-border)]">
                             <div className="flex items-center justify-between gap-2 mb-3">
                                 <h3 className="text-sm font-bold tracking-tight flex items-center gap-2"><Monitor size={14} /> Screen</h3>
-                                <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-brand-500/20 hover:bg-brand-500/30 text-[10px] font-bold uppercase tracking-wider transition-colors">
+                                <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-[var(--brand-primary)]/20 hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors">
                                     Refresh
                                 </button>
                             </div>
-                            <div className="relative aspect-video rounded-xl overflow-hidden border border-white/10">
+                            <div className="relative aspect-video rounded-xl overflow-hidden border border-[var(--base-border)]">
                                 <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
                                     onError={(e) => (e.currentTarget.style.display = 'none')} />
                             </div>
@@ -301,22 +302,22 @@ export default function DashboardPage({
                     )}
 
                     <h3 className="text-xl font-bold tracking-tight px-2">Recent Artifacts</h3>
-                    <div className="glass-panel p-6 rounded-3xl border-white/5 space-y-6">
-                        {artifacts.length === 0 && (
-                            <p className="text-white/30 text-sm text-center py-4">Adapters will appear here once the backend is online.</p>
+                    <div className="glass-panel p-6 rounded-3xl border-[var(--base-border)] space-y-6">
+                        {runArtifacts.length === 0 && (
+                            <p className="text-[var(--base-text-muted)] text-sm text-center py-4">No artifacts generated in the current run.</p>
                         )}
-                        {artifacts.map((artifact, idx) => (
-                            <div key={artifact.id} className={`flex items-start gap-4 ${idx !== artifacts.length - 1 ? 'pb-6 border-b border-white/5' : ''}`}>
-                                <div className="p-2 rounded-lg bg-white/5 text-white/40">
-                                    {artifact.type === 'email' ? <Mail size={16} /> : <FileText size={16} />}
+                        {runArtifacts.map((artifact, idx) => (
+                            <div key={artifact.id} className={`flex items-start gap-4 ${idx !== runArtifacts.length - 1 ? 'pb-6 border-b border-[var(--base-border)]' : ''}`}>
+                                <div className="p-2 rounded-lg bg-[var(--base-border)] text-[var(--base-text-muted)]">
+                                    <FileText size={16} />
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <div className="text-sm font-bold truncate">{artifact.title}</div>
-                                    <div className="text-[10px] text-white/40 uppercase tracking-widest mt-0.5">{artifact.timestamp}</div>
+                                    <div className="text-[10px] text-[var(--base-text-muted)] uppercase tracking-widest mt-0.5">{artifact.timestamp}</div>
                                     <div className="mt-3 flex items-center gap-2">
                                         <button
                                             onClick={() => onSelectArtifact(artifact)}
-                                            className="px-2 py-1 rounded bg-brand-500/10 text-brand-400 text-[9px] font-bold uppercase tracking-widest hover:bg-brand-500/20 transition-colors"
+                                            className="px-2 py-1 rounded bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] text-[9px] font-bold uppercase tracking-widest hover:bg-[var(--brand-primary)]/20 transition-colors"
                                         >View</button>
                                     </div>
                                 </div>

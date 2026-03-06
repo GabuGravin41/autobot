@@ -22,16 +22,16 @@ export default function ProfilePage({ user, onLogout }: ProfilePageProps) {
             <header className="flex flex-col md:flex-row md:items-end gap-6">
                 <div className="relative group">
                     <img src={user.avatar} alt={user.name} className="w-32 h-32 rounded-3xl object-cover border-2 border-brand-500/20 shadow-2xl" />
-                    <button className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity rounded-3xl">
+                    <button className="absolute inset-0 flex items-center justify-center bg-[var(--base-border)] opacity-0 group-hover:opacity-100 transition-opacity rounded-3xl">
                         <ImageIcon size={24} />
                     </button>
                 </div>
                 <div className="flex-1">
                     <h2 className="text-4xl font-bold tracking-tight mb-1">{user.name}</h2>
-                    <p className="text-brand-400 font-bold uppercase tracking-widest text-xs mb-4">{user.role}</p>
+                    <p className="text-[var(--brand-primary)] font-bold uppercase tracking-widest text-xs mb-4">{user.role}</p>
                     <div className="flex flex-wrap gap-2">
                         <span className="px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase tracking-widest">Verified Human</span>
-                        <span className="px-3 py-1 rounded-full bg-brand-500/10 border border-brand-500/20 text-brand-400 text-[10px] font-bold uppercase tracking-widest">Admin Access</span>
+                        <span className="px-3 py-1 rounded-full bg-[var(--brand-primary)]/20 border border-brand-500/20 text-[var(--brand-primary)] text-[10px] font-bold uppercase tracking-widest">Admin Access</span>
                     </div>
                 </div>
                 <button
@@ -47,16 +47,16 @@ export default function ProfilePage({ user, onLogout }: ProfilePageProps) {
                 <div className="md:col-span-2 space-y-8">
                     <section className="glass-panel p-8 rounded-3xl space-y-6">
                         <h3 className="text-xl font-bold flex items-center gap-2">
-                            <User size={20} className="text-brand-400" />
+                            <User size={20} className="text-[var(--brand-primary)]" />
                             Personal Information
                         </h3>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                             <div className="space-y-2">
-                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 ml-1">Full Name</label>
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] ml-1">Full Name</label>
                                 <input type="text" className="input-field" defaultValue={user.name} />
                             </div>
                             <div className="space-y-2">
-                                <label className="text-[10px] font-bold uppercase tracking-widest text-white/40 ml-1">Email Address</label>
+                                <label className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] ml-1">Email Address</label>
                                 <input type="email" className="input-field" defaultValue={user.email} />
                             </div>
                         </div>
@@ -67,18 +67,18 @@ export default function ProfilePage({ user, onLogout }: ProfilePageProps) {
 
                     <section className="glass-panel p-8 rounded-3xl space-y-6">
                         <h3 className="text-xl font-bold flex items-center gap-2">
-                            <Smartphone size={20} className="text-brand-400" />
+                            <Smartphone size={20} className="text-[var(--brand-primary)]" />
                             Device Authorization
                         </h3>
                         <div className="space-y-4">
-                            <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10">
+                            <div className="flex items-center justify-between p-4 rounded-2xl bg-[var(--base-border)] border border-[var(--base-border)]">
                                 <div className="flex items-center gap-4">
-                                    <div className="p-3 rounded-xl bg-brand-500/10 text-brand-400">
+                                    <div className="p-3 rounded-xl bg-[var(--brand-primary)]/20 text-[var(--brand-primary)]">
                                         <Smartphone size={20} />
                                     </div>
                                     <div>
                                         <div className="text-sm font-bold">iPhone 15 Pro</div>
-                                        <div className="text-[10px] text-white/40">Last active: 2 minutes ago • San Francisco, CA</div>
+                                        <div className="text-[10px] text-[var(--base-text-muted)]">Last active: 2 minutes ago • San Francisco, CA</div>
                                     </div>
                                 </div>
                                 <button className="text-[10px] font-bold uppercase tracking-widest text-red-400 hover:underline">Revoke</button>
@@ -90,17 +90,17 @@ export default function ProfilePage({ user, onLogout }: ProfilePageProps) {
                 <div className="space-y-8">
                     <section className="glass-panel p-8 rounded-3xl space-y-6">
                         <h3 className="text-xl font-bold flex items-center gap-2">
-                            <Activity size={20} className="text-brand-400" />
+                            <Activity size={20} className="text-[var(--brand-primary)]" />
                             Usage Stats
                         </h3>
                         <div className="space-y-6">
                             <div className="space-y-2">
-                                <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-white/40">
+                                <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
                                     <span>Monthly API Credits</span>
                                     <span>84%</span>
                                 </div>
-                                <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                                    <div className="h-full w-[84%] bg-brand-500 shadow-[0_0_10px_rgba(var(--brand-500-rgb),0.5)]" />
+                                <div className="h-1.5 w-full bg-[var(--base-border)] rounded-full overflow-hidden">
+                                    <div className="h-full w-[84%] bg-[var(--brand-primary)] shadow-[0_0_10px_rgba(var(--brand-500-rgb),0.5)]" />
                                 </div>
                             </div>
                         </div>
@@ -108,7 +108,7 @@ export default function ProfilePage({ user, onLogout }: ProfilePageProps) {
 
                     <section className="glass-panel p-8 rounded-3xl space-y-6">
                         <h3 className="text-xl font-bold flex items-center gap-2">
-                            <Lock size={20} className="text-brand-400" />
+                            <Lock size={20} className="text-[var(--brand-primary)]" />
                             Security Level
                         </h3>
                         <div className="flex items-center gap-4">
@@ -118,7 +118,7 @@ export default function ProfilePage({ user, onLogout }: ProfilePageProps) {
                             </div>
                             <div>
                                 <div className="text-sm font-bold">High Security</div>
-                                <div className="text-[10px] text-white/40 leading-relaxed">Your account is protected by 2FA.</div>
+                                <div className="text-[10px] text-[var(--base-text-muted)] leading-relaxed">Your account is protected by 2FA.</div>
                             </div>
                         </div>
                     </section>

@@ -101,13 +101,13 @@ export interface BackendPlan {
 export const planFromText = (task: string): Promise<{ plan: BackendPlan }> =>
     apiFetch('/api/plan/text', { method: 'POST', body: JSON.stringify({ task }) });
 
-/** Execute a plan. Returns immediately with run_id; poll /api/run/:id for status */
+/** Execute a plan. Now routed to the NEW Agent architecture. */
 export const runPlan = (plan: BackendPlan): Promise<{ run_id: string; status: string }> =>
-    apiFetch('/api/plan/run', { method: 'POST', body: JSON.stringify({ plan }) });
+    apiFetch('/api/agent/run', { method: 'POST', body: JSON.stringify({ goal: plan.description || plan.name || "Execute plan" }) });
 
 /** Cancel a running plan */
 export const cancelRun = (runId: string): Promise<{ status: string }> =>
-    apiFetch(`/api/run/${runId}/cancel`, { method: 'POST' });
+    apiFetch(`/api/agent/cancel`, { method: 'POST' });
 
 // ── Autonomous Multi-Agent Runner ───────────────────────────────────────────
 export interface AutonomousStatus {
@@ -118,17 +118,18 @@ export interface AutonomousStatus {
     last_log: string;
 }
 
+/** Now routed to the NEW Agent architecture. */
 export const runAutonomous = (goal: string, pageContext?: { url: string, title: string, text: string }): Promise<{ status: string; goal: string }> =>
-    apiFetch('/api/run_autonomous', {
+    apiFetch('/api/agent/run', {
         method: 'POST',
-        body: JSON.stringify({ goal, page_context: pageContext, max_hours: 8.0 }),
+        body: JSON.stringify({ goal, use_vision: true }),
     });
 
 export const getAutonomousStatus = (): Promise<AutonomousStatus> =>
-    apiFetch('/api/autonomous/status');
+    apiFetch('/api/agent/status');
 
 export const cancelAutonomous = (): Promise<{ status: string }> =>
-    apiFetch('/api/autonomous/cancel', { method: 'POST' });
+    apiFetch('/api/agent/cancel', { method: 'POST' });
 
 // ── AI Chat ─────────────────────────────────────────────────────────────────
 export interface ChatResponse {

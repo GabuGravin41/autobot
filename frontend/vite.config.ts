@@ -17,7 +17,6 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3000,
       host: '0.0.0.0',
-      hmr: process.env.DISABLE_HMR !== 'true',
       proxy: {
         // Forward /api/* to the FastAPI backend — eliminates CORS in dev
         '/api': {

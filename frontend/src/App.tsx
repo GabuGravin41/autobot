@@ -41,7 +41,7 @@ const MOCK_USER: UserProfile = {
 };
 
 const DEFAULT_MODELS: LLMModel[] = [
-  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash (Free)', provider: 'Google' },
+  { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash', provider: 'Google' },
   { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', provider: 'Google' },
   { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', provider: 'OpenRouter' },
   { id: 'gpt-4o', name: 'GPT-4o', provider: 'OpenAI' },
@@ -65,12 +65,12 @@ export default function App() {
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isAutonomous, setIsAutonomous] = useState(false);
-  const [theme, setTheme] = useState<'beam' | 'blue-violet' | 'emerald' | 'blue' | 'amber'>('beam');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [browserMode, setBrowserMode] = useState<BrowserMode>(BrowserMode.HUMAN_PROFILE);
   const [policy, setPolicy] = useState<AdapterPolicy>(AdapterPolicy.BALANCED);
   const [models, setModels] = useState<LLMModel[]>(DEFAULT_MODELS);
-  const [selectedModelId, setSelectedModelId] = useState('google/gemini-2.0-flash-exp:free');
+  const [selectedModelId, setSelectedModelId] = useState('google/gemini-2.0-flash-001');
 
   // ── Chat / planner ────────────────────────────────────────────────────────
   const [chatMessages, setChatMessages] = useState<any[]>([
@@ -142,7 +142,7 @@ export default function App() {
       const finalStatus = run_status === 'done' ? 'success' : (run_status === 'cancelled' ? 'failed' : 'failed');
       setActiveRun(prev => prev ? { ...prev, status: finalStatus, logs: liveLogLines } : null);
     } else if (run_status === 'idle') {
-      setActiveRun(null);
+      setActiveRun(prev => (prev?.id === 'pending' ? prev : null));
     }
   }, [backendStatus?.run_status, backendStatus?.active_run_id, liveLogLines]);
 
@@ -165,18 +165,6 @@ export default function App() {
     setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setIsGenerating(true);
     try {
-      if (isAutonomous) {
-        setChatInput('');
-        setChatMessages(prev => [...prev, { role: 'bot', content: 'Activating Autonomous Mode... Decomposing goal into phases.' }]);
-        const context = backendStatus?.browser?.active ? {
-          url: backendStatus.browser.url,
-          title: '', // We don't have title in status but backend can fetch it
-          text: ''   // Backend can fetch text if needed
-        } : undefined;
-        await runAutonomous(userMsg, context);
-        navigate('/dashboard');
-        return;
-      }
 
       const { reply, plan } = await sendChat(userMsg, {
         browser_mode: backendStatus?.browser?.mode,
@@ -223,16 +211,16 @@ export default function App() {
   // ── Login screen ──────────────────────────────────────────────────────────
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-obsidian-bg flex items-center justify-center p-6 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/10 blur-[120px] rounded-full -z-10 animate-pulse" />
+      <div className="min-h-screen  flex items-center justify-center p-6 relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-[var(--brand-primary)]/20 blur-[120px] rounded-full -z-10 animate-pulse" />
         <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="w-full max-w-md glass-panel p-10 rounded-3xl space-y-8">
           <div className="flex flex-col items-center gap-4">
-            <div className="w-16 h-16 rounded-2xl bg-brand-500 flex items-center justify-center shadow-[0_0_30px_rgba(var(--brand-500-rgb),0.5)]">
-              <Bot className="text-black" size={32} />
+            <div className="w-16 h-16 rounded-2xl bg-[var(--brand-primary)] flex items-center justify-center shadow-xl shadow-[var(--brand-primary)]/30">
+              <Bot className="text-white" size={32} />
             </div>
             <div className="text-center">
               <h1 className="text-3xl font-bold tracking-tight">AUTOBOT</h1>
-              <p className="text-xs uppercase tracking-[0.3em] text-brand-400 font-bold">Secure Access</p>
+              <p className="text-xs uppercase tracking-[0.3em] text-[var(--brand-primary)] font-bold">Secure Access</p>
             </div>
           </div>
           <div className="space-y-4">
@@ -249,18 +237,18 @@ export default function App() {
 
   // ── Main layout ───────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen flex flex-col md:flex-row font-sans overflow-hidden bg-obsidian-bg">
+    <div className="min-h-screen flex flex-col md:flex-row font-sans overflow-hidden ">
       <Sidebar
         user={MOCK_USER}
         isOpen={isSidebarOpen}
         setIsOpen={setIsSidebarOpen}
-        isAutonomous={isAutonomous}
-        setIsAutonomous={setIsAutonomous}
+        isCollapsed={isSidebarCollapsed}
+        setIsCollapsed={setIsSidebarCollapsed}
         onLogout={() => setIsAuthenticated(false)}
       />
 
-      <main className="flex-1 h-[calc(100vh-64px)] md:h-screen overflow-y-auto bg-obsidian-bg relative custom-scrollbar">
-        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] rounded-full -z-10" />
+      <main className="flex-1 h-[calc(100vh-64px)] md:h-screen overflow-y-auto  relative custom-scrollbar">
+        <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-[var(--brand-primary)]/20 blur-[120px] rounded-full -z-10" />
         <div className="max-w-7xl mx-auto p-6 md:p-10 pb-24">
           <AnimatePresence mode="wait">
             <Routes location={location}>
@@ -321,18 +309,18 @@ export default function App() {
       </main>
 
       {/* Status bar */}
-      <footer className="fixed bottom-0 left-0 md:left-72 right-0 h-10 glass-panel border-t border-white/5 flex items-center px-4 md:px-8 justify-between z-20">
+      <footer className={`fixed bottom-0 left-0 ${isSidebarCollapsed ? 'md:left-20' : 'md:left-72'} right-0 h-10 glass-panel border-t border-[var(--base-border)] flex items-center px-4 md:px-8 justify-between z-20 transition-all duration-300`}>
         <div className="flex items-center gap-4 md:gap-6">
           <div className="flex items-center gap-2">
-            <div className="w-1.5 h-1.5 rounded-full bg-brand-400 shadow-[0_0_8px_rgba(var(--brand-500-rgb),0.6)]" />
-            <span className="text-[10px] font-bold uppercase tracking-widest text-white/60 hidden sm:inline">System Ready</span>
+            <div className="w-1.5 h-1.5 rounded-full bg-[var(--brand-primary)] shadow-md shadow-[var(--brand-primary)]/40" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] hidden sm:inline">System Ready</span>
           </div>
-          <div className="flex items-center gap-2"><MousePointer2 size={12} className="text-white/30" /><span className="text-[10px] text-white/40 hidden sm:inline">Mouse: Active</span></div>
-          <div className="flex items-center gap-2"><Keyboard size={12} className="text-white/30" /><span className="text-[10px] text-white/40 hidden sm:inline">Keyboard: Active</span></div>
+          <div className="flex items-center gap-2"><MousePointer2 size={12} className="text-[var(--base-text-muted)]" /><span className="text-[10px] text-[var(--base-text-muted)] hidden sm:inline">Mouse: Active</span></div>
+          <div className="flex items-center gap-2"><Keyboard size={12} className="text-[var(--base-text-muted)]" /><span className="text-[10px] text-[var(--base-text-muted)] hidden sm:inline">Keyboard: Active</span></div>
         </div>
         <div className="flex items-center gap-4">
-          <span className="text-[10px] text-white/30 font-mono hidden xs:inline">v2.0.0-alpha</span>
-          <div className="flex items-center gap-2 text-white/40 hover:text-white transition-colors cursor-pointer">
+          <span className="text-[10px] text-[var(--base-text-muted)] font-mono hidden xs:inline">v2.0.0-alpha</span>
+          <div className="flex items-center gap-2 text-[var(--base-text-muted)] hover:text-[var(--base-text)] transition-colors cursor-pointer">
             <span className="text-[10px] font-bold uppercase tracking-widest">Docs</span>
             <ExternalLink size={10} />
           </div>
