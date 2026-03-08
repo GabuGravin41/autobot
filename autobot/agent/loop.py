@@ -164,6 +164,13 @@ class AgentLoop:
             except Exception as e:
                 logger.warning(f"Failed to save agent screenshot: {e}")
 
+        # Extract native UI if applicable (e.g. if browser not in focus or as additional context)
+        native_ui = None
+        try:
+            native_ui = self.computer.window.extract_ui()
+        except Exception as e:
+            logger.debug(f"Failed to extract native UI: {e}")
+
         # Update previous state for new-element detection
         self.previous_dom_state = DOMSerializedState(
             element_tree=browser_state.element_tree,
@@ -172,7 +179,7 @@ class AgentLoop:
 
         # ─── 2. THINK ───
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
-        agent_output = await self._call_llm(browser_state)
+        agent_output = await self._call_llm(browser_state, native_ui)
 
         if agent_output is None:
             logger.error("LLM returned no output")
@@ -212,7 +219,7 @@ class AgentLoop:
 
         return None
 
-    async def _call_llm(self, browser_state: BrowserState) -> AgentOutput | None:
+    async def _call_llm(self, browser_state: BrowserState, native_ui: str | None = None) -> AgentOutput | None:
         """
         Call the LLM with the current state and parse the structured output.
         """
@@ -226,6 +233,7 @@ class AgentLoop:
             step_number=self.step_number,
             max_steps=self.max_steps,
             agent_history=history_text,
+            native_ui=native_ui,
         )
 
         user_messages = step_builder.build_messages(use_vision=self.use_vision)
@@ -407,6 +415,14 @@ class AgentLoop:
 
             elif action.computer_call is not None:
                 return await self._execute_computer_call(action.computer_call)
+
+            elif action.click_native is not None:
+                success = self.computer.window.click(action.click_native.index)
+                return ActionResult(action_name="click_native", success=success)
+
+            elif action.input_text_native is not None:
+                success = self.computer.window.type(action.input_text_native.index, action.input_text_native.text)
+                return ActionResult(action_name="input_text_native", success=success)
 
             else:
                 return ActionResult(

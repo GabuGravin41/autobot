@@ -81,12 +81,14 @@ class StepPromptBuilder:
         step_number: int,
         max_steps: int,
         agent_history: str | None = None,
+        native_ui: str | None = None,
     ):
         self.browser_state = browser_state
         self.task = task
         self.step_number = step_number
         self.max_steps = max_steps
         self.agent_history = agent_history
+        self.native_ui = native_ui
 
     def build_text(self) -> str:
         """
@@ -125,6 +127,10 @@ class StepPromptBuilder:
         # 3. Browser state
         browser_state_text = self._build_browser_state()
         parts.append(f"<browser_state>\n{browser_state_text}\n</browser_state>")
+
+        # 4. Native OS state
+        if self.native_ui:
+            parts.append(f"<native_os_state>\n{self.native_ui}\n</native_os_state>")
 
         return "\n\n".join(parts)
 

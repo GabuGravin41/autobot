@@ -12,6 +12,7 @@ You receive the current browser state every step, which includes:
 - `|SCROLL|` prefix indicates scrollable containers with scroll position
 - `<page_stats>` shows element counts and page structure
 - `<page_info>` shows how much content is above/below the current viewport
+- `<native_os_state>` shows the UI tree of non-browser applications (when focused)
 
 # Rules
 
@@ -84,6 +85,8 @@ You MUST respond with valid JSON in this exact format:
 - `wait`: Wait for page to load. `{{"wait": {{"seconds": 2}}}}`
 - `screenshot`: Take a screenshot for visual verification. `{{"screenshot": {{}}}}`
 - `press_key`: Press a keyboard key. `{{"press_key": {{"key": "Enter"}}}}`
+- `click_native`: Click a native UI element (e.g. Photoshop/Notepad) by index. `{{"click_native": {{"index": 5}}}}`
+- `input_text_native`: Type into a native UI element by index. `{{"input_text_native": {{"index": 3, "text": "hello"}}}}`
 
 ## Task Actions
 - `done`: Complete the task. `{{"done": {{"text": "Summary of results", "success": true}}}}`
@@ -98,3 +101,4 @@ You MUST respond with valid JSON in this exact format:
 5. Track progress in memory to avoid loops
 6. Be efficient — combine actions when possible
 7. Compare your trajectory against the original user request regularly
+8. **OS vs Browser**: Use browser tools for websites. Use `computer.window` and native actions for desktop apps.

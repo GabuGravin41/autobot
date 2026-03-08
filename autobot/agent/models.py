@@ -38,6 +38,17 @@ class InputTextAction(BaseModel):
     text: str
 
 
+class ClickNativeAction(BaseModel):
+    """Click a native UI element by its index."""
+    index: int
+
+
+class InputTextNativeAction(BaseModel):
+    """Type text into a native UI element by its index."""
+    index: int
+    text: str
+
+
 class ScrollAction(BaseModel):
     """Scroll the page."""
     amount: int = 3  # Number of scroll units
@@ -119,6 +130,8 @@ class ActionModel(BaseModel):
     screenshot: ScreenshotAction | None = None
     go_back: GoBackAction | None = None
     computer_call: ComputerCallAction | None = None
+    click_native: ClickNativeAction | None = None
+    input_text_native: InputTextNativeAction | None = None
 
     @property
     def action_name(self) -> str:
@@ -242,6 +255,10 @@ class StepHistoryEntry(BaseModel):
                     action_desc = f"navigate(url='{data.url[:50]}')"
                 elif isinstance(data, DoneAction):
                     action_desc = f"done(success={data.success})"
+                elif isinstance(data, ClickNativeAction):
+                    action_desc = f"click_native(index={data.index})"
+                elif isinstance(data, InputTextNativeAction):
+                    action_desc = f"input_text_native(index={data.index}, text='{data.text[:30]}')"
 
             error_text = f" Error: {result.error}" if result.error else ""
             lines.append(f"  Action {i + 1}: {status} {action_desc}{error_text}")
