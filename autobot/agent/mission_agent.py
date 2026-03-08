@@ -119,6 +119,6 @@ Respond with a JSON list of objectives:
         """Returns a text summary of completed objectives."""
         summary = []
         for obj in self.mission.objectives:
-            status_icon = "✅" if obj.status == ObjectiveStatus.COMPLETED else "⏳" if obj.status == ObjectiveStatus.PENDING else "🔄" if obj.status == ObjectiveStatus.IN_PROGRESS else "❌"
+            status_icon = "[OK]" if obj.status == ObjectiveStatus.COMPLETED else "[..]" if obj.status == ObjectiveStatus.PENDING else "[EX]" if obj.status == ObjectiveStatus.IN_PROGRESS else "[!!]"
             summary.append(f"{status_icon} {obj.description}")
         return "\n".join(summary)
