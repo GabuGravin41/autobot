@@ -38,6 +38,7 @@ dependencies = [
     # Utilities
     "psutil>=5.9.0",
     "pillow>=10.0.0",
+    "kaggle>=1.6.0",
 ]
 
 [project.optional-dependencies]

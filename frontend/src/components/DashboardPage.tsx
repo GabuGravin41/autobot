@@ -20,12 +20,14 @@ interface DashboardPageProps {
     onAbortRun: () => void;
     onSelectRun: (run: RunHistory) => void;
     onSelectArtifact: (artifact: any) => void;
+    scheduledTasks: any[];
+    onCancelTask: (id: string) => void;
 }
 
 export default function DashboardPage({
     backendOnline, backendStatus, activeRun, liveRuns, liveAdapters,
     liveLogLines, screenshotUrl, onRefreshScreenshot, onAbortRun,
-    onSelectRun, onSelectArtifact,
+    onSelectRun, onSelectArtifact, scheduledTasks, onCancelTask,
 }: DashboardPageProps) {
     const navigate = useNavigate();
 
@@ -281,6 +283,48 @@ export default function DashboardPage({
                                 No runs yet — start a workflow from the AI Planner or Workflows tab.
                             </div>
                         )}
+                    </div>
+
+                    {/* Task Queue section */}
+                    <div className="mt-12 space-y-6">
+                        <div className="flex items-center justify-between px-2">
+                            <h3 className="text-xl font-bold tracking-tight text-[var(--brand-primary)]">Operation Queue</h3>
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
+                                {scheduledTasks.length} Pending Actions
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-1 gap-4">
+                            {scheduledTasks.map(task => (
+                                <div key={task.id} className="glass-panel p-4 rounded-2xl border-[var(--base-border)] flex items-center justify-between group">
+                                    <div className="flex items-center gap-4">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                                            task.status === 'running' ? 'bg-brand-500/20 text-brand-500 animate-spin' :
+                                            task.status === 'done' ? 'bg-emerald-500/20 text-emerald-500' :
+                                            'bg-[var(--base-border)] text-[var(--base-text-muted)]'
+                                        }`}>
+                                            {task.status === 'running' ? '↻' : task.id}
+                                        </div>
+                                        <div>
+                                            <div className="text-sm font-bold">{task.goal}</div>
+                                            <div className="text-[9px] uppercase tracking-widest opacity-60">Status: {task.status} • Created: {new Date(task.created_at).toLocaleTimeString()}</div>
+                                        </div>
+                                    </div>
+                                    {task.status === 'queued' && (
+                                        <button 
+                                            onClick={() => onCancelTask(task.id)}
+                                            className="opacity-0 group-hover:opacity-100 p-2 rounded-lg hover:bg-red-500/10 text-red-400 transition-all"
+                                        >
+                                            <AlertCircle size={14} />
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                            {scheduledTasks.length === 0 && (
+                                <div className="text-center py-8 text-[var(--base-text-muted)] text-sm italic">
+                                    Queue is empty.
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </div>
 

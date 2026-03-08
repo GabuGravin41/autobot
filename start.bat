@@ -31,22 +31,26 @@ if %ERRORLEVEL% neq 0 (
 )
 
 :: Setup Node environment & Start
-echo [4/4] Installing frontend dependencies and launching...
-cd frontend
-call npm install --silent
-
+echo [4/4] Launching Autobot...
 echo.
 echo ============================================================
-echo  Starting Servers...
-echo  Backend: http://127.0.0.1:8000
-echo  Frontend: http://localhost:3000
-echo  Leave this window open to keep servers running.
+echo  Starting Server...
+echo  Access Dashboard at: http://127.0.0.1:8000
+echo  Leave this window open to keep the server running.
 echo ============================================================
 echo.
 
 set PYTHONPATH=%~dp0
-start "Autobot Backend" cmd /c "call ..\venv\Scripts\activate.bat && python -m autobot.main"
-start "Autobot Frontend" cmd /c "npm run dev"
+:: Check if frontend is built
+if not exist "frontend\dist" (
+    echo [!] Frontend build not found. Running in Dev Mode (Separate Servers)...
+    start "Autobot Backend" cmd /c "call venv\Scripts\activate.bat && python -m autobot.main"
+    cd frontend
+    start "Autobot Frontend" cmd /c "npm run dev"
+    cd ..
+) else (
+    echo [!] Frontend build found. Running in Unified Mode...
+    call venv\Scripts\activate.bat && python -m autobot.cli --server
+)
 
-cd ..
 pause

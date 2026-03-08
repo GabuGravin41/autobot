@@ -43,6 +43,11 @@ def main() -> None:
         help="Start the Autobot dashboard web server",
     )
     parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Run initial setup (install playwright browsers, etc.)",
+    )
+    parser.add_argument(
         "--host",
         default="127.0.0.1",
         help="Host for the web server (default: 127.0.0.1)",
@@ -65,10 +70,37 @@ def main() -> None:
         print("autobot 0.1.0")
         return
 
+    if args.setup:
+        _run_setup()
+        return
+
     if args.server or args.task is None:
         _start_server(args.host, args.port)
     else:
         _run_task(args.task)
+
+
+def _run_setup() -> None:
+    """Run initial environment setup."""
+    print("🛠️ Running Autobot Setup...")
+    
+    # 1. Install Playwright browsers
+    print("📦 Installing Playwright browsers (chromium)...")
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+        print("✅ Playwright ready.")
+    except Exception as e:
+        print(f"❌ Playwright setup failed: {e}")
+
+    # 2. Check for frontend build
+    frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    if not frontend_dist.exists():
+        print("💡 Tip: The dashboard frontend is not built. Run 'npm run build' in the /frontend folder to enable the web UI.")
+    else:
+        print("✅ Frontend build detected.")
+
+    print("\n🚀 Setup complete. Start the dashboard with: autobot --server")
 
 
 def _start_server(host: str, port: int) -> None:
@@ -79,8 +111,15 @@ def _start_server(host: str, port: int) -> None:
         print("Error: uvicorn not found. Install with: pip install autobot[all]")
         sys.exit(1)
 
+    # Check build status to warn user
+    frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    if not frontend_dist.exists():
+        print("⚠️  Warning: Frontend 'dist' folder not found. The dashboard will show a fallback page.")
+        print("   To fix, run 'npm install && npm run build' in the /frontend directory.")
+
     print(f"Starting Autobot Dashboard on http://{host}:{port}")
-    uvicorn.run("autobot.web.app:app", host=host, port=port, reload=True)
+    # Disable reload in 'packaged' mode for stability, but we can keep it for now
+    uvicorn.run("autobot.web.app:app", host=host, port=port, reload=False)
 
 
 def _run_task(task: str) -> None:

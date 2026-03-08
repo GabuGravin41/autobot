@@ -36,11 +36,13 @@ export interface BackendStatus {
     status: string;
     run_status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
     active_run_id: string | null;
+    screenshot_b64: string | null;
     browser: { active: boolean; mode: string; url: string };
     llm_enabled: boolean;
     llm_provider: string;
     llm_model: string;
     human_input_pending?: HumanInputPending | null;
+    anti_sleep_enabled?: boolean;
 }
 
 export const getStatus = (): Promise<BackendStatus> =>
@@ -88,6 +90,13 @@ export interface PlanStep {
     retries?: number;
     continue_on_error?: boolean;
     status?: 'pending' | 'running' | 'completed' | 'failed';
+}
+
+export interface ScheduledTask {
+    id: string;
+    name: string;
+    description: string;
+    steps: PlanStep[];
 }
 
 export interface BackendPlan {
@@ -271,6 +280,20 @@ export const getPendingHumanInput = (): Promise<{ pending: boolean; prompt?: str
 
 export const submitHumanInput = (key: string, value: string): Promise<{ status: string; key: string }> =>
     apiFetch('/api/human_input', { method: 'POST', body: JSON.stringify({ key, value }) });
+
+// ── Anti-Sleep ──────────────────────────────────────────────────────────────
+export const toggleAntiSleep = (enabled: boolean): Promise<{ status: string; enabled: boolean }> =>
+    apiFetch('/api/utils/anti-sleep', { method: 'POST', body: JSON.stringify({ enabled }) });
+
+// ── Scheduler ───────────────────────────────────────────────────────────────
+export const getTasks = (): Promise<ScheduledTask[]> =>
+    apiFetch<ScheduledTask[]>('/api/tasks');
+
+export const addTask = (goal: string): Promise<{ status: string; task_id: string }> =>
+    apiFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ goal }) });
+
+export const cancelTask = (taskId: string): Promise<{ status: string; task_id: string }> =>
+    apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
 
 // ── Browser Utils ──────────────────────────────────────────────────────────
 export const getBrowserScreenshotUrl = (): string =>

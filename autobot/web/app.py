@@ -24,14 +24,16 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import List, Dict, Any, Set
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import logging
+import base64
 
-from ..agent.runner import AgentRunner
+from ..agent.loop import AgentRunner
+from ..computer.anti_sleep import anti_sleep
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -72,6 +74,8 @@ async def lifespan(application: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_event_loop()
     _log("Autobot backend starting...")
+    from ..agent.scheduler import scheduler
+    scheduler.start()
     yield
     _log("Autobot backend shutting down.")
     if _agent_runner:
@@ -95,13 +99,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Static Files (Frontend) ──────────────────────────────────────────────────
+# If we have a 'frontend/dist' or 'frontend/build' folder, serve it as static
+# This allows running the entire app from a single python server.
+
+_frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if not _frontend_path.exists():
+    _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "build"
+
+if _frontend_path.exists():
+    app.mount("/", StaticFiles(directory=str(_frontend_path), html=True), name="static")
+else:
+    @app.get("/")
+    async def root_fallback():
+        return {"status": "backend running", "frontend": "not built (use npm run build)"}
+
 
 # ── Pydantic Request Models ───────────────────────────────────────────────────
 
 class AgentRunRequest(BaseModel):
-    goal: str
     max_steps: int = 25
     use_vision: bool = True
+
+
+class AntiSleepRequest(BaseModel):
+    enabled: bool
 
 
 class SettingsUpdate(BaseModel):
@@ -170,17 +192,29 @@ def get_agent_status():
             
     # Include some backwards compat fields so the old React UI doesn't crash completely
     return {
-        "status": "ok",  # Legacy
-        "run_status": _agent_status,  # Legacy and new
+        "status": "ok",
+        "run_status": _agent_status,
         "agent_status": _agent_status,
         "run_id": _active_run_id,
-        "active_run_id": _active_run_id,  # Legacy
+        "active_run_id": _active_run_id,
         "browser": {
             "active": _agent_status == "running",
             "mode": "cdp",
         },
+        "anti_sleep_enabled": anti_sleep.enabled,
         **runner_status,
     }
+
+@app.get("/api/browser/screenshot")
+async def get_browser_screenshot():
+    """Returns the current background browser screenshot as an image."""
+    if _agent_runner and _agent_runner.last_screenshot_path:
+        p = Path(_agent_runner.last_screenshot_path)
+        if p.exists():
+            return Response(content=p.read_bytes(), media_type="image/png")
+    
+    # Fallback to a placeholder or empty if no screenshot available
+    return Response(content=b"", media_type="image/png")
 
 
 @app.post("/api/agent/cancel")
@@ -380,6 +414,46 @@ async def ws_logs(websocket: WebSocket):
         pass
     finally:
         _ws_clients.discard(websocket)
+
+
+# ── Utility Endpoints ─────────────────────────────────────────────────────────
+
+@app.post("/api/utils/anti-sleep")
+def toggle_anti_sleep(req: AntiSleepRequest):
+    """Enable or disable the anti-sleep mouse mover."""
+    # We use a dummy runner if none exists to access the global anti_sleep instance
+    # or just use the global anti_sleep directly if we imported it
+    from ..computer.anti_sleep import anti_sleep
+    if req.enabled:
+        anti_sleep.start()
+    else:
+        anti_sleep.stop()
+    return {"status": "success", "enabled": anti_sleep.enabled}
+
+@app.get("/api/utils/anti-sleep")
+def get_anti_sleep_status():
+    from ..computer.anti_sleep import anti_sleep
+    return {"enabled": anti_sleep.enabled}
+
+
+# ── Scheduler Endpoints ───────────────────────────────────────────────────────
+
+@app.get("/api/tasks")
+async def get_tasks():
+    from ..agent.scheduler import scheduler
+    return scheduler.get_tasks()
+
+@app.post("/api/tasks")
+async def add_task(req: AgentRunRequest):
+    from ..agent.scheduler import scheduler
+    task_id = await scheduler.add_task(req.goal)
+    return {"status": "queued", "task_id": task_id}
+
+@app.delete("/api/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    from ..agent.scheduler import scheduler
+    await scheduler.cancel_task(task_id)
+    return {"status": "cancelled", "task_id": task_id}
 
 
 # ── Server configuration ──────────────────────────────────────────────────────

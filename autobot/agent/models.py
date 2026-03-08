@@ -84,6 +84,11 @@ class CloseTabAction(BaseModel):
     pass
 
 
+class ComputerCallAction(BaseModel):
+    """Call an OS-level computer tool (e.g. computer.mouse.click(x=10, y=10))."""
+    call: str
+
+
 # ─────────────────────────────────────────────
 # Action Union — all possible actions the agent can take
 # ─────────────────────────────────────────────
@@ -113,6 +118,7 @@ class ActionModel(BaseModel):
     done: DoneAction | None = None
     screenshot: ScreenshotAction | None = None
     go_back: GoBackAction | None = None
+    computer_call: ComputerCallAction | None = None
 
     @property
     def action_name(self) -> str:

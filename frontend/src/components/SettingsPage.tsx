@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
-    Shield, Zap, Palette, Sparkles, PlusCircle, CheckCircle2, Key,
+    Shield, Zap, Palette, Sparkles, PlusCircle, CheckCircle2, Key, MousePointer2
 } from 'lucide-react';
 import { BrowserMode, AdapterPolicy, LLMModel } from '../types';
-import { updateSettings } from '../services/apiService';
+import { updateSettings, toggleAntiSleep, getStatus } from '../services/apiService';
 
 type Theme = 'light' | 'dark';
 
@@ -27,6 +27,25 @@ export default function SettingsPage({
 }: SettingsPageProps) {
     const [apiKey, setApiKey] = useState('');
     const [isApiKeySaved, setIsApiKeySaved] = useState(false);
+    const [antiSleepEnabled, setAntiSleepEnabled] = useState(false);
+
+    useEffect(() => {
+        getStatus().then(status => {
+            if (status.anti_sleep_enabled !== undefined) {
+                setAntiSleepEnabled(status.anti_sleep_enabled);
+            }
+        });
+    }, []);
+
+    const handleToggleAntiSleep = async () => {
+        try {
+            const newState = !antiSleepEnabled;
+            await toggleAntiSleep(newState);
+            setAntiSleepEnabled(newState);
+        } catch (e) {
+            alert('Failed to toggle anti-sleep: ' + (e instanceof Error ? e.message : 'Unknown error'));
+        }
+    };
 
     const handleSaveApiKey = async () => {
         if (!apiKey.trim()) return;
@@ -122,6 +141,29 @@ export default function SettingsPage({
                                 {policy === AdapterPolicy.TRUSTED && "No restrictions. Autobot will execute all actions autonomously."}
                             </p>
                         </div>
+                    </div>
+                </section>
+
+                {/* Anti-Sleep Mode */}
+                <section className="glass-panel p-8 rounded-3xl space-y-6">
+                    <h3 className="text-xl font-bold flex items-center gap-2">
+                        <MousePointer2 size={20} className="text-[var(--brand-primary)]" /> System Utilities
+                    </h3>
+                    <div className="flex items-center justify-between p-4 rounded-2xl bg-[var(--base-border)] border border-[var(--base-border)]">
+                        <div>
+                            <span className="block text-sm font-bold capitalize">Anti-Sleep Mode</span>
+                            <p className="text-[10px] text-[var(--base-text-muted)] leading-relaxed">
+                                Prevents computer sleep by nudging the mouse every 60s.
+                            </p>
+                        </div>
+                        <button
+                            onClick={handleToggleAntiSleep}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${antiSleepEnabled ? 'bg-[var(--brand-primary)]' : 'bg-gray-600'}`}
+                        >
+                            <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${antiSleepEnabled ? 'translate-x-6' : 'translate-x-1'}`}
+                            />
+                        </button>
                     </div>
                 </section>
 

@@ -54,18 +54,47 @@ Autobot is a local desktop automation controller designed to execute your repeti
   - type text, send hotkeys, move cursor, click coordinates
   - switch active window, press single key
 
-## Install
+## 🚀 Quick Start (Shipping Mode)
 
-```bash
-pip install -r requirements.txt
-playwright install chrome
-```
+If you just want to run Autobot as a finished product:
 
-## Run
+1. **Clone & Setup:**
+   ```bash
+   git clone https://github.com/GabuGravin41/autobot.git
+   cd autobot
+   pip install -e .
+   autobot --setup
+   ```
 
-```bash
-python -m autobot.main
-```
+2. **Run the Dashboard:**
+   ```bash
+   autobot --server
+   ```
+   *Access the command center at http://127.0.0.1:8000. No separate frontend process needed.*
+
+3. **Try a Goal:**
+   Enter a goal in the dashboard or extension: *"Go to Kaggle, list the top 5 active competitions, and save them to a file."*
+
+## 🛠️ Installation & Setup (Dev Mode)
+
+For developers who want to modify the code:
+
+1. **Environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   pip install -r requirements.txt
+   pip install -e .
+   ```
+
+2. **Setup Tools:**
+   ```bash
+   autobot --setup
+   ```
+
+3. **Run Dev Servers:**
+   - **Backend:** `python -m autobot.main` (Port 8000)
+   - **Frontend:** `cd frontend && npm install && npm run dev` (Port 5173)
 
 ## Environment variables
 

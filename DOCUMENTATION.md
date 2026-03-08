@@ -13,20 +13,20 @@ Most automation today is "brittle." It breaks when a button moves 5 pixels. It f
 
 ---
 
-## 🚀 Current Milestone: "The Limb Alignment"
-We have achieved a stable core architecture, but we are in the "Active Debugging" phase.
+## 🚀 Current Milestone: "The Sovereign Hand"
+We have achieved a highly robust, unified architecture. The system is now ready for autonomous execution with minimal supervision.
 
 ### What works:
-- ✅ **The Brain:** Multi-provider LLM integration (OpenRouter/X.ai) with deep planning (30-step depth).
-- ✅ **The Limbs:** `human_profile` mode using PyAutoGUI to simulate literal keyboard/mouse events.
-- ✅ **The Dashboard:** A real-time Command Center on port 3000 to monitor logs and active runs.
-- ✅ **Adapters:** Specialized connectors for Kaggle, Claude, WhatsApp, and more.
-- ✅ **Discovery:** `browser_snapshot` allows the AI to read the interactive structure of any page.
+- ✅ **Unified Control:** A single `autobot --server` command handles both backend and frontend.
+- ✅ **Extension Mastery:** Real-time visual "Mini-Peek" overlay that tracks the agent across all tabs.
+- ✅ **Kaggle Baseline:** Native API support for listing, downloading, and submitting to Kaggle competitions.
+- ✅ **Resilient Loops:** Intelligent API-to-UI fallback ensures the agent doesn't give up if an API fails.
+- ✅ **OS "Muscles":** Anti-sleep prevention and direct mouse/keyboard control for sites that block automation.
 
-### Known Bugs (Active Firefighting):
-- 🛡️ **Adapter Precision:** The AI sometimes forgets to specify the `adapter` name. We have implemented **Mission Critical Guards** in the engine to stop these crashes and force the AI to self-correct.
-- 🕒 **Dynamic Loading:** Some sites (like Kaggle) load slowly. We are training the AI to use `wait` steps and `browser_snapshot` loops to handle lag.
-- 📐 **Windowing:** Automation windows were sometimes splitting or losing focus. We've added `--start-maximized` to enforce a clean workspace.
+### Robustness Features:
+- 🛡️ **Self-Healing:** The agent is instructed to switch from API mode to manual Browser mode if tools fail.
+- 🕒 **Background Persistence:** The browser extension syncs state via a background worker, allowing you to monitor progress even if you close the dashboard.
+- 📐 **Unified Setup:** `autobot --setup` automatically handles browser installations and environment checks.
 
 ---
 

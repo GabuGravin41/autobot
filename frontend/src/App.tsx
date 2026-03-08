@@ -3,7 +3,7 @@
  * All page content lives in src/components/*.tsx
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'motion/react';
 import { Bot, MousePointer2, Keyboard, ExternalLink, LogOut } from 'lucide-react';
@@ -15,7 +15,7 @@ import {
 
 // Services
 import {
-  getStatus, getAdapters, getRuns, getWorkflows, runPlan, cancelRun,
+  getStatus, getAdapters, getRuns, getWorkflows, getTasks, cancelTask, runPlan, cancelRun,
   connectLogStream, updateSettings, getBrowserScreenshotUrl, submitHumanInput,
   getRun as apiGetRun, deleteRun as apiDeleteRun, sendChat,
   runAutonomous, cancelAutonomous, getAutonomousStatus,
@@ -58,6 +58,9 @@ export default function App() {
   const [liveAdapters, setLiveAdapters] = useState<BackendAdapter[]>([]);
   const [liveRuns, setLiveRuns] = useState<RunHistory[]>([]);
   const [liveLogLines, setLiveLogLines] = useState<string[]>([]);
+  const [scheduledTasks, setScheduledTasks] = useState<any[]>([]);
+
+  const refreshTimer = useRef<NodeJS.Timeout | null>(null);
   const [workflows, setWorkflows] = useState<BackendWorkflow[]>([]);
   const [backendOnline, setBackendOnline] = useState(false);
   const [screenshotUrl, setScreenshotUrl] = useState('');
@@ -89,14 +92,16 @@ export default function App() {
     let disconnect: (() => void) | null = null;
     const poll = async () => {
       try {
-        const [status, adapters, runs, wfs] = await Promise.all([
+        const [status, adapters, runs, wfs, tasks] = await Promise.all([
           getStatus(), getAdapters(), getRuns(),
           getWorkflows().catch(() => ({ workflows: [] })),
+          getTasks(),
         ]);
         setBackendStatus(status);
         setLiveAdapters(adapters.adapters);
         setLiveRuns(runs.runs as any as RunHistory[]);
         if (wfs.workflows?.length) setWorkflows(wfs.workflows);
+        setScheduledTasks(tasks);
         setBackendOnline(true);
       } catch { setBackendOnline(false); }
     };
@@ -262,6 +267,12 @@ export default function App() {
                   onAbortRun={handleAbortRun}
                   onSelectRun={handleViewDetails}
                   onSelectArtifact={setSelectedArtifact}
+                  scheduledTasks={scheduledTasks}
+                  onCancelTask={async (id) => {
+                    await cancelTask(id);
+                    const tasks = await getTasks();
+                    setScheduledTasks(tasks);
+                  }}
                 />
               } />
               <Route path="/planner" element={

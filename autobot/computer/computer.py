@@ -24,6 +24,8 @@ from autobot.computer.mouse import Mouse
 from autobot.computer.keyboard import Keyboard
 from autobot.computer.display import Display
 from autobot.computer.clipboard import Clipboard
+from autobot.computer.kaggle_tool import Kaggle
+from autobot.computer.anti_sleep import anti_sleep
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,8 @@ class Computer:
         self.keyboard = Keyboard()
         self.display = Display()
         self.clipboard = Clipboard()
+        self.kaggle = Kaggle()
+        self.anti_sleep = anti_sleep
 
     def _get_all_tools(self) -> list[Any]:
         """Get all tool submodules."""
@@ -52,6 +56,8 @@ class Computer:
             self.keyboard,
             self.display,
             self.clipboard,
+            self.kaggle,
+            self.anti_sleep,
         ]
 
     def get_tool_catalog(self) -> str:

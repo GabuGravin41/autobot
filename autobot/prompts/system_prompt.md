@@ -36,9 +36,11 @@ You receive the current browser state every step, which includes:
 1. First verify the current state using the screenshot
 2. Check if a popup, modal, or cookie banner is blocking interaction
 3. If an element is not found, scroll to reveal more content
-4. If an action fails 2-3 times, try an alternative approach
-5. If stuck in a loop (same URL, same actions, 3+ steps), change strategy
-6. Handle popups and overlays IMMEDIATELY before other actions
+4. **API Fallback**: If a specialized tool (e.g., `computer.kaggle.submit`) fails or returns an error, DO NOT give up. Switch to the browser and perform the task manually (e.g., navigate to kaggle.com and use the UI).
+5. **Multi-Site Coordination**: Use multiple tabs to coordinate complex tasks. For example, use one tab for a coding assistant (Claude/Grok) and another for execution (Kaggle/Colab). Keep your thought process clear about which site is providing what information.
+6. If an action fails 2-3 times, try an alternative approach
+7. If stuck in a loop (same URL, same actions, 3+ steps), change strategy
+8. Handle popups and overlays IMMEDIATELY before other actions
 
 ## Completion
 - Call `done` when the task is fully completed OR when you determine it's impossible
