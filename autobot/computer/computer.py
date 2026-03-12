@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import platform
 from typing import Any
 
 from autobot.computer.mouse import Mouse
@@ -26,9 +27,10 @@ from autobot.computer.display import Display
 from autobot.computer.clipboard import Clipboard
 from autobot.computer.kaggle_tool import Kaggle
 from autobot.computer.anti_sleep import anti_sleep
-from autobot.computer.window import Window
 
-import uiautomation as auto
+if platform.system() == 'Windows':
+    from autobot.computer.window import Window
+    import uiautomation as auto
 
 logger = logging.getLogger(__name__)
 
@@ -51,19 +53,22 @@ class Computer:
         self.clipboard = Clipboard()
         self.kaggle = Kaggle()
         self.anti_sleep = anti_sleep
-        self.window = Window(self.mouse, self.keyboard)
+        if platform.system() == 'Windows':
+            self.window = Window(self.mouse, self.keyboard)
 
     def _get_all_tools(self) -> list[Any]:
         """Get all tool submodules."""
-        return [
+        tools = [
             self.mouse,
             self.keyboard,
             self.display,
             self.clipboard,
             self.kaggle,
             self.anti_sleep,
-            self.window,
         ]
+        if hasattr(self, 'window'):
+            tools.append(self.window)
+        return tools
 
     def get_tool_catalog(self) -> str:
         """
