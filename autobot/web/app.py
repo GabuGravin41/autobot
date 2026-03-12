@@ -27,13 +27,17 @@ from pathlib import Path
 from typing import List, Dict, Any, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import logging
 import base64
 
-from ..agent.loop import AgentRunner
+from ..agent.runner import AgentRunner
 from ..computer.anti_sleep import anti_sleep
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -44,6 +48,7 @@ _active_run_id: str | None = None
 _run_log: list[str] = []
 _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
+_agent_lock = threading.Lock()
 
 
 # ── Logging + WebSocket broadcast ────────────────────────────────────────────
@@ -99,14 +104,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Static Files (Frontend) ──────────────────────────────────────────────────
-# If we have a 'frontend/dist' or 'frontend/build' folder, serve it as static
-# This allows running the entire app from a single python server.
 
+# ── Static Files (Frontend) ──────────────────────────────────────────────────
 _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if not _frontend_path.exists():
     _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "build"
 
+# We mount this once.
 if _frontend_path.exists():
     app.mount("/", StaticFiles(directory=str(_frontend_path), html=True), name="static")
 else:
@@ -118,6 +122,7 @@ else:
 # ── Pydantic Request Models ───────────────────────────────────────────────────
 
 class AgentRunRequest(BaseModel):
+    goal: str
     max_steps: int = 25
     use_vision: bool = True
 
@@ -143,18 +148,17 @@ def start_agent_run(req: AgentRunRequest):
     """
     global _agent_runner, _agent_status, _active_run_id, _run_log
 
-    if _agent_status == "running":
-        raise HTTPException(status_code=409, detail="A run is already in progress.")
-
-    if not req.goal.strip():
-        raise HTTPException(status_code=400, detail="Goal cannot be empty.")
-
-    run_id = f"agent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    _active_run_id = run_id
-    _agent_status = "running"
-    _run_log.clear()
-
-    _agent_runner = AgentRunner.from_env(log_callback=_log)
+    # Use millisecond precision to ensure run_id is absolutely unique even if multiple requests arrive near-simultaneously
+    run_id = f"agent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+    
+    with _agent_lock:
+        if _agent_status == "running":
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+        
+        _active_run_id = run_id
+        _agent_status = "running"
+        _run_log.clear()
+        _agent_runner = AgentRunner.from_env(log_callback=_log)
 
     def _run_in_thread():
         global _agent_status
@@ -163,11 +167,13 @@ def start_agent_run(req: AgentRunRequest):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             result = loop.run_until_complete(_agent_runner.run(goal=req.goal, max_steps=req.max_steps))
-            _agent_status = "done"
+            with _agent_lock:
+                _agent_status = "done"
             # Dump history into runs folder for later retrieval
             _save_run_history(run_id, req.goal, True, result)
         except Exception as ex:
-            _agent_status = "failed"
+            with _agent_lock:
+                _agent_status = "failed"
             _save_run_history(run_id, req.goal, False, str(ex))
         finally:
             try:
@@ -208,12 +214,15 @@ def get_agent_status():
 @app.get("/api/browser/screenshot")
 async def get_browser_screenshot():
     """Returns the current background browser screenshot as an image."""
-    if _agent_runner and _agent_runner.last_screenshot_path:
-        p = Path(_agent_runner.last_screenshot_path)
-        if p.exists():
-            return Response(content=p.read_bytes(), media_type="image/png")
+    try:
+        if _agent_runner and _agent_runner.last_screenshot_path:
+            p = Path(_agent_runner.last_screenshot_path)
+            if p.exists():
+                # Stream the file if possible, or just read it
+                return Response(content=p.read_bytes(), media_type="image/png")
+    except Exception as e:
+        logger.debug(f"Failed to serve screenshot: {e}")
     
-    # Fallback to a placeholder or empty if no screenshot available
     return Response(content=b"", media_type="image/png")
 
 
@@ -491,7 +500,4 @@ def chat(req: ChatRequest):
     }
 
 
-_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
-
-if _frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="static")
+# Static mounting moved to top for consistency

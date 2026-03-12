@@ -5,20 +5,40 @@ echo ============================================================
 echo.
 
 :: 1. Setup Python Virtual Environment
+SET PYTHON_CMD=python
+py -0 >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    SET PYTHON_CMD=py
+)
+
 IF NOT EXIST venv (
     echo [1/4] Creating Python virtual environment...
-    python -m venv venv
+    %PYTHON_CMD% -3.13 -m venv venv 2>nul || %PYTHON_CMD% -3 -m venv venv 2>nul || %PYTHON_CMD% -m venv venv 2>nul
+    IF %ERRORLEVEL% NEQ 0 (
+        echo ERROR: Failed to create virtual environment.
+        echo Please ensure Python is installed and in your PATH.
+        pause
+        exit /b 1
+    )
 ) ELSE (
     echo [1/4] Virtual environment already exists.
 )
 
 echo Activating virtual environment...
-call venv\Scripts\activate.bat
+IF EXIST venv\Scripts\activate.bat (
+    call venv\Scripts\activate.bat
+) ELSE (
+    echo ERROR: Virtual environment exists but activation script not found.
+    echo Please delete the 'venv' folder and try again.
+    pause
+    exit /b 1
+)
 
 echo [2/4] Installing Python dependencies...
-pip install -r requirements.txt --quiet
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 if %ERRORLEVEL% neq 0 (
-    echo ERROR: pip install failed. Is Python installed?
+    echo ERROR: pip install failed.
     pause
     exit /b 1
 )

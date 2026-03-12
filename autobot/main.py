@@ -25,7 +25,8 @@ def main() -> None:
     
     print("Starting Autobot Web Server on http://127.0.0.1:8000")
     try:
-        uvicorn.run("autobot.web.app:app", host="127.0.0.1", port=8000, reload=True)
+        # Disable reload for stability (prevents double-process ghosts on Windows)
+        uvicorn.run("autobot.web.app:app", host="127.0.0.1", port=8000, reload=False)
     except Exception as e:
         print(f"Failed to start server: {e}")
         sys.exit(1)

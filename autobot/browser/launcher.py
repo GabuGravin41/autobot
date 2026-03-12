@@ -64,7 +64,7 @@ class AsyncBrowserLauncher:
         return cls(
             debug_port=int(os.getenv("AUTOBOT_CDP_PORT", "9222")),
             chrome_path=os.getenv("AUTOBOT_CHROME_EXECUTABLE") or _detect_chrome(),
-            user_data_dir=os.getenv("AUTOBOT_CHROME_USER_DATA_DIR") or _real_chrome_user_data_dir(),
+            user_data_dir=os.getenv("AUTOBOT_CHROME_USER_DATA_DIR") or _default_user_data_dir(),
             profile_dir=os.getenv("AUTOBOT_CHROME_PROFILE_DIR", "Default"),
         )
 
@@ -75,6 +75,13 @@ class AsyncBrowserLauncher:
         Returns:
             Playwright Page object with full DOM access.
         """
+        # Step 0: Smart Connect - check if already running with CDP enabled
+        cdp_res = await self._is_cdp_available(detailed=True)
+        if isinstance(cdp_res, dict) and cdp_res.get("available"):
+            logger.info(f"Smart Connect: Attaching to existing Chrome on port {self.debug_port}")
+            await self._connect_playwright()
+            return self._page
+
         # Step 1: Launch Chrome with debugging port
         await self._launch_chrome()
 
@@ -96,10 +103,24 @@ class AsyncBrowserLauncher:
                 "Set AUTOBOT_CHROME_EXECUTABLE in .env or install Chrome."
             )
 
-        # Check if Chrome is already running with CDP on this port
-        if await self._is_cdp_available():
-            logger.info(f"Chrome already running with CDP on port {self.debug_port}")
-            return
+        # Fail fast: if profile is locked by a non-CDP Chrome process, we CANNOT hijack it.
+        # This prevents the 25-second delay where Chrome "hangs" trying to delegate to the existing process.
+        lock_file = Path(self.user_data_dir) / "lockfile"
+        singleton_lock = Path(self.user_data_dir) / "SingletonLock"
+        
+        for lfile in [lock_file, singleton_lock]:
+            if lfile.exists():
+                try:
+                    if os.name == "nt":
+                        # On Windows, renaming a locked file raises PermissionError
+                        lfile.rename(lfile)
+                except PermissionError:
+                    raise RuntimeError(
+                        f"\n[!] CHROME PROFILE IN USE\n"
+                        f"Your Chrome profile is currently OPEN. Autobot cannot connect unless you either:\n"
+                        f"  1. Close all Chrome windows (including background apps in your system tray), OR\n"
+                        f"  2. Relaunch your own Chrome WITH remote debugging enabled on port {self.debug_port}.\n"
+                    )
 
         args = [
             self.chrome_path,
@@ -108,6 +129,7 @@ class AsyncBrowserLauncher:
             f"--profile-directory={self.profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--remote-allow-origins=*",
         ]
 
         if self.headless:
@@ -125,15 +147,44 @@ class AsyncBrowserLauncher:
             raise RuntimeError(f"Failed to launch Chrome: {e}")
 
         # Wait for Chrome to start and CDP to become available
-        for attempt in range(15):
-            if await self._is_cdp_available():
+        startup_msg_shown = False
+        for attempt in range(25):
+            # 1. Check if process is still alive
+            if self._chrome_process:
+                ret = self._chrome_process.poll()
+                if ret is not None:
+                    # Chrome closed immediately. Most common cause: Profile in use / Lock file
+                    error_msg = f"Chrome process exited immediately with code {ret}."
+                    
+                    # Try to detect if it's a profile lock issue
+                    lock_file = Path(self.user_data_dir) / "SingletonLock"
+                    if lock_file.exists():
+                        error_msg += (
+                            f"\n[!] A profile lock was detected at: {lock_file}\n"
+                            "This usually means another Chrome window is using this profile. "
+                            "Please CLOSE ALL Chrome windows and try again, or use a dedicated profile."
+                        )
+                    raise RuntimeError(error_msg)
+
+            # 2. Check CDP availability
+            cdp_res = await self._is_cdp_available(detailed=True)
+            if isinstance(cdp_res, dict) and cdp_res.get("available"):
                 logger.info(f"Chrome CDP available after {attempt + 1} attempts")
                 return
+            
+            cdp_info = cdp_res if isinstance(cdp_res, dict) else {"available": False}
+            
+            if not startup_msg_shown and attempt > 5:
+                logger.info(f"Waiting for Chrome CDP on port {self.debug_port} (Attempt {attempt+1}/25)...")
+                startup_msg_shown = True
+
             await _async_sleep(1.0)
 
         raise RuntimeError(
-            f"Chrome launched but CDP not available on port {self.debug_port} after 15s. "
-            "Is another Chrome instance using this profile? Close it first."
+            f"Chrome launched (PID {self._chrome_process.pid if self._chrome_process else '?'}) "
+            f"but CDP not available on port {self.debug_port} after 25s.\n"
+            f"Diagnostic: {cdp_info.get('error', 'Unknown error')}\n"
+            "Try restarting your computer if this persists, as the port might be ghosting."
         )
 
     async def _connect_playwright(self) -> None:
@@ -158,23 +209,44 @@ class AsyncBrowserLauncher:
             self._context = contexts[0]
             pages = self._context.pages
             if pages:
-                self._page = pages[0]
+                # Prefer the last page (most likely the one the user is looking at or was just opened)
+                # But check if it's closed/empty first
+                self._page = pages[-1]
+                logger.debug(f"Connecting to existing page: {self._page.url}")
             else:
                 self._page = await self._context.new_page()
+                logger.debug("Created new page in existing context")
         else:
             self._context = await self._browser.new_context()
             self._page = await self._context.new_page()
+            logger.debug("Created new context and page")
 
-    async def _is_cdp_available(self) -> bool:
-        """Check if CDP endpoint is available."""
+    async def _is_cdp_available(self, detailed: bool = False) -> bool | dict[str, Any]:
+        """
+        Check if CDP endpoint is available.
+        
+        Args:
+            detailed: If True, returns a dict with diagnostic info.
+        """
         import httpx
+        # On some systems 127.0.0.1 works, on others localhost (IPv6) does
+        urls = [
+            f"http://127.0.0.1:{self.debug_port}/json/version",
+            f"http://localhost:{self.debug_port}/json/version"
+        ]
 
-        try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(f"http://127.0.0.1:{self.debug_port}/json/version")
-                return resp.status_code == 200
-        except Exception:
-            return False
+        errors = []
+        for url in urls:
+            try:
+                async with httpx.AsyncClient(timeout=1.0) as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        return {"available": True} if detailed else True
+                    errors.append(f"HTTP {resp.status_code} at {url}")
+            except Exception as e:
+                errors.append(f"{type(e).__name__} at {url}")
+        
+        return {"available": False, "error": " | ".join(errors)} if detailed else False
 
     @property
     def page(self) -> Any:
