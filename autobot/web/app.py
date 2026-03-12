@@ -107,17 +107,13 @@ app.add_middleware(
 
 
 # ── Static Files (Frontend) ──────────────────────────────────────────────────
+# NOTE: The actual mount() call is placed at the BOTTOM of this file, AFTER all
+# API and WebSocket routes are declared.  Mounting at "/" here would shadow every
+# /api/* endpoint and cause StaticFiles to intercept WebSocket upgrade requests
+# (resulting in: AssertionError: assert scope["type"] == "http").
 _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if not _frontend_path.exists():
     _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "build"
-
-# We mount this once.
-if _frontend_path.exists():
-    app.mount("/", StaticFiles(directory=str(_frontend_path), html=True), name="static")
-else:
-    @app.get("/")
-    async def root_fallback():
-        return {"status": "backend running", "frontend": "not built (use npm run build)"}
 
 
 # ── Pydantic Request Models ───────────────────────────────────────────────────
@@ -501,4 +497,12 @@ def chat(req: ChatRequest):
     }
 
 
-# Static mounting moved to top for consistency
+# ── Static Files mount — MUST be last so it doesn't shadow API/WS routes ─────
+# Mounting at "/" is a catch-all; it must come after every @app route and
+# @app.websocket declaration to avoid intercepting /api/* and /ws/* traffic.
+if _frontend_path.exists():
+    app.mount("/", StaticFiles(directory=str(_frontend_path), html=True), name="static")
+else:
+    @app.get("/")
+    async def root_fallback():
+        return {"status": "backend running", "frontend": "not built (use npm run build)"}

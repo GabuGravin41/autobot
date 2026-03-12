@@ -1,16 +1,17 @@
 """
-Async Browser — Launches Chrome with CDP and connects Playwright for DOM access.
+Async Browser — Connects to Chrome via CDP for DOM access.
 
-This is the critical bridge between the user's real Chrome profile and the new
-agent loop. It solves the core problem: human_profile mode previously had NO DOM
-access (BrowserController.start() was a no-op).
+Architecture (connect-first):
+    1. Try to connect to an already-running Chrome on the CDP debug port
+    2. If Chrome is running with CDP → attach via connect_over_cdp() → done
+    3. If Chrome is NOT running at all → launch it with --remote-debugging-port
+    4. NEVER try to launch a second Chrome when one is already running
 
-How it works:
-    1. Launch Chrome with --remote-debugging-port=9222 using the user's real profile
-    2. Connect Playwright via connect_over_cdp()
-    3. Return a real Page object that works with dom/extraction.py
-
-This is exactly what Browser Use does for their CDP connection.
+Prerequisites:
+    Chrome must be started with --remote-debugging-port=9222.
+    The recommended way is to modify the Chrome desktop launcher:
+        ~/.local/share/applications/google-chrome.desktop
+    Change the Exec line to include --remote-debugging-port=9222
 
 Usage:
     launcher = AsyncBrowserLauncher()
@@ -32,10 +33,10 @@ logger = logging.getLogger(__name__)
 
 class AsyncBrowserLauncher:
     """
-    Launches Chrome with CDP debugging and connects Playwright for DOM access.
+    Connects Playwright to an existing Chrome session via CDP.
 
-    Keeps the user's real profile (cookies, sessions, passwords) while giving
-    Playwright full DOM access for the agent loop.
+    Primary mode: connect to already-running Chrome (user's real profile).
+    Fallback mode: launch Chrome only if nothing is running.
     """
 
     def __init__(
@@ -60,7 +61,7 @@ class AsyncBrowserLauncher:
 
     @classmethod
     def from_env(cls) -> "AsyncBrowserLauncher":
-        """Create launcher from environment variables (same vars as old BrowserController)."""
+        """Create launcher from environment variables."""
         return cls(
             debug_port=int(os.getenv("AUTOBOT_CDP_PORT", "9222")),
             chrome_path=os.getenv("AUTOBOT_CHROME_EXECUTABLE") or _detect_chrome(),
@@ -70,57 +71,96 @@ class AsyncBrowserLauncher:
 
     async def start(self) -> Any:
         """
-        Launch Chrome with CDP and connect Playwright.
+        Connect to Chrome via CDP and return a Playwright Page.
+
+        Strategy:
+            1. Check if CDP is available (Chrome running with --remote-debugging-port)
+            2. If yes → connect directly (ideal case)
+            3. If no, and Chrome is NOT running → launch Chrome with CDP
+            4. If Chrome IS running but WITHOUT CDP → clear error with instructions
 
         Returns:
             Playwright Page object with full DOM access.
         """
-        # Step 0: Smart Connect - check if already running with CDP enabled
-        cdp_res = await self._is_cdp_available(detailed=True)
-        if isinstance(cdp_res, dict) and cdp_res.get("available"):
-            logger.info(f"Smart Connect: Attaching to existing Chrome on port {self.debug_port}")
+        # Step 1: Try to connect to existing Chrome with CDP
+        cdp_available = await self._is_cdp_available()
+        if cdp_available:
+            logger.info(f"CDP available on port {self.debug_port} — attaching to existing Chrome")
             await self._connect_playwright()
+            logger.info(
+                f"✅ Connected to Chrome via CDP (port {self.debug_port}). "
+                f"Page: {self._page.url if self._page else 'none'}"
+            )
             return self._page
 
-        # Step 1: Launch Chrome with debugging port
-        await self._launch_chrome()
+        # Step 2: CDP not available — is Chrome running at all?
+        chrome_running = self._is_chrome_running()
 
-        # Step 2: Connect Playwright via CDP
+        if chrome_running:
+            # Chrome is running but WITHOUT CDP — we cannot attach
+            raise RuntimeError(
+                f"\n"
+                f"╔══════════════════════════════════════════════════════════════╗\n"
+                f"║  Chrome is running but CDP (remote debugging) is NOT on.   ║\n"
+                f"╚══════════════════════════════════════════════════════════════╝\n"
+                f"\n"
+                f"Autobot needs Chrome to be started with --remote-debugging-port={self.debug_port}\n"
+                f"\n"
+                f"Fix (one-time setup):\n"
+                f"  1. Close ALL Chrome windows\n"
+                f"  2. Run this in your terminal:\n"
+                f"     google-chrome --remote-debugging-port={self.debug_port}\n"
+                f"  3. Then retry your task in Autobot\n"
+                f"\n"
+                f"Or make it permanent by editing your Chrome launcher:\n"
+                f"  cp /usr/share/applications/google-chrome.desktop ~/.local/share/applications/\n"
+                f"  # Edit the Exec line to add --remote-debugging-port={self.debug_port}\n"
+                f"\n"
+                f"Verify CDP is working by visiting: http://localhost:{self.debug_port}/json\n"
+            )
+
+        # Step 3: Chrome is NOT running at all — launch it with CDP
+        logger.info("No Chrome instance detected — launching Chrome with CDP enabled")
+        await self._launch_chrome_fresh()
         await self._connect_playwright()
-
         logger.info(
-            f"✅ Browser connected via CDP (port {self.debug_port}). "
+            f"✅ Launched and connected to Chrome via CDP (port {self.debug_port}). "
             f"Page: {self._page.url if self._page else 'none'}"
         )
-
         return self._page
 
-    async def _launch_chrome(self) -> None:
-        """Launch Chrome with --remote-debugging-port."""
+    def _is_chrome_running(self) -> bool:
+        """Check if any Chrome process is currently running."""
+        # Method 1: Check profile lock (most reliable)
+        singleton_lock = Path(self.user_data_dir) / "SingletonLock"
+        if singleton_lock.is_symlink() or singleton_lock.exists():
+            return True
+
+        lock_file = Path(self.user_data_dir) / "lockfile"
+        if lock_file.exists():
+            return True
+
+        # Method 2: Check via pgrep (fallback)
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "chrome"],
+                capture_output=True,
+                timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        return False
+
+    async def _launch_chrome_fresh(self) -> None:
+        """Launch a new Chrome process with --remote-debugging-port (only when no Chrome is running)."""
         if not self.chrome_path or not Path(self.chrome_path).exists():
             raise RuntimeError(
                 f"Chrome not found at '{self.chrome_path}'. "
                 "Set AUTOBOT_CHROME_EXECUTABLE in .env or install Chrome."
             )
-
-        # Fail fast: if profile is locked by a non-CDP Chrome process, we CANNOT hijack it.
-        # This prevents the 25-second delay where Chrome "hangs" trying to delegate to the existing process.
-        lock_file = Path(self.user_data_dir) / "lockfile"
-        singleton_lock = Path(self.user_data_dir) / "SingletonLock"
-        
-        for lfile in [lock_file, singleton_lock]:
-            if lfile.exists():
-                try:
-                    if os.name == "nt":
-                        # On Windows, renaming a locked file raises PermissionError
-                        lfile.rename(lfile)
-                except PermissionError:
-                    raise RuntimeError(
-                        f"\n[!] CHROME PROFILE IN USE\n"
-                        f"Your Chrome profile is currently OPEN. Autobot cannot connect unless you either:\n"
-                        f"  1. Close all Chrome windows (including background apps in your system tray), OR\n"
-                        f"  2. Relaunch your own Chrome WITH remote debugging enabled on port {self.debug_port}.\n"
-                    )
 
         args = [
             self.chrome_path,
@@ -141,50 +181,38 @@ class AsyncBrowserLauncher:
             self._chrome_process = subprocess.Popen(
                 args,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
         except Exception as e:
             raise RuntimeError(f"Failed to launch Chrome: {e}")
 
-        # Wait for Chrome to start and CDP to become available
-        startup_msg_shown = False
+        # Wait for CDP to become available
         for attempt in range(25):
-            # 1. Check if process is still alive
             if self._chrome_process:
                 ret = self._chrome_process.poll()
                 if ret is not None:
-                    # Chrome closed immediately. Most common cause: Profile in use / Lock file
-                    error_msg = f"Chrome process exited immediately with code {ret}."
-                    
-                    # Try to detect if it's a profile lock issue
-                    lock_file = Path(self.user_data_dir) / "SingletonLock"
-                    if lock_file.exists():
-                        error_msg += (
-                            f"\n[!] A profile lock was detected at: {lock_file}\n"
-                            "This usually means another Chrome window is using this profile. "
-                            "Please CLOSE ALL Chrome windows and try again, or use a dedicated profile."
-                        )
-                    raise RuntimeError(error_msg)
+                    stderr_output = ""
+                    try:
+                        stderr_output = self._chrome_process.stderr.read().decode("utf-8", errors="replace")[:500]
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"Chrome exited with code {ret}.\n"
+                        f"{stderr_output}"
+                    )
 
-            # 2. Check CDP availability
-            cdp_res = await self._is_cdp_available(detailed=True)
-            if isinstance(cdp_res, dict) and cdp_res.get("available"):
-                logger.info(f"Chrome CDP available after {attempt + 1} attempts")
+            if await self._is_cdp_available():
+                logger.info(f"Chrome CDP ready after {attempt + 1}s")
                 return
-            
-            cdp_info = cdp_res if isinstance(cdp_res, dict) else {"available": False}
-            
-            if not startup_msg_shown and attempt > 5:
-                logger.info(f"Waiting for Chrome CDP on port {self.debug_port} (Attempt {attempt+1}/25)...")
-                startup_msg_shown = True
+
+            if attempt > 5:
+                logger.info(f"Waiting for CDP on port {self.debug_port} ({attempt + 1}/25)...")
 
             await _async_sleep(1.0)
 
         raise RuntimeError(
-            f"Chrome launched (PID {self._chrome_process.pid if self._chrome_process else '?'}) "
-            f"but CDP not available on port {self.debug_port} after 25s.\n"
-            f"Diagnostic: {cdp_info.get('error', 'Unknown error')}\n"
-            "Try restarting your computer if this persists, as the port might be ghosting."
+            f"Chrome launched but CDP not available on port {self.debug_port} after 25s.\n"
+            "Try restarting your computer if this persists."
         )
 
     async def _connect_playwright(self) -> None:
@@ -203,16 +231,15 @@ class AsyncBrowserLauncher:
                 f"Failed to connect Playwright via CDP on port {self.debug_port}: {e}"
             )
 
-        # Get existing context and page, or create new ones
+        # Use existing context and pages (user's real session)
         contexts = self._browser.contexts
         if contexts:
             self._context = contexts[0]
             pages = self._context.pages
             if pages:
-                # Prefer the last page (most likely the one the user is looking at or was just opened)
-                # But check if it's closed/empty first
+                # Use last page (most recent tab)
                 self._page = pages[-1]
-                logger.debug(f"Connecting to existing page: {self._page.url}")
+                logger.debug(f"Attached to existing page: {self._page.url}")
             else:
                 self._page = await self._context.new_page()
                 logger.debug("Created new page in existing context")
@@ -222,30 +249,25 @@ class AsyncBrowserLauncher:
             logger.debug("Created new context and page")
 
     async def _is_cdp_available(self, detailed: bool = False) -> bool | dict[str, Any]:
-        """
-        Check if CDP endpoint is available.
-        
-        Args:
-            detailed: If True, returns a dict with diagnostic info.
-        """
+        """Check if CDP endpoint is responding on the debug port."""
         import httpx
-        # On some systems 127.0.0.1 works, on others localhost (IPv6) does
+
         urls = [
             f"http://127.0.0.1:{self.debug_port}/json/version",
-            f"http://localhost:{self.debug_port}/json/version"
+            f"http://localhost:{self.debug_port}/json/version",
         ]
 
         errors = []
         for url in urls:
             try:
-                async with httpx.AsyncClient(timeout=1.0) as client:
+                async with httpx.AsyncClient(timeout=2.0) as client:
                     resp = await client.get(url)
                     if resp.status_code == 200:
                         return {"available": True} if detailed else True
                     errors.append(f"HTTP {resp.status_code} at {url}")
             except Exception as e:
                 errors.append(f"{type(e).__name__} at {url}")
-        
+
         return {"available": False, "error": " | ".join(errors)} if detailed else False
 
     @property
@@ -257,7 +279,7 @@ class AsyncBrowserLauncher:
 
     @page.setter
     def page(self, new_page: Any) -> None:
-        """Allow agent loop to switch the active page (e.g. after new_tab)."""
+        """Allow agent loop to switch the active page."""
         self._page = new_page
 
     async def get_all_pages(self) -> list[Any]:
@@ -267,10 +289,9 @@ class AsyncBrowserLauncher:
         return []
 
     async def stop(self) -> None:
-        """Disconnect Playwright and optionally close Chrome."""
+        """Disconnect Playwright (Chrome stays running)."""
         if self._browser:
             try:
-                # Disconnect without closing the browser (user's Chrome stays open)
                 await self._browser.close()
             except Exception:
                 pass
@@ -285,8 +306,6 @@ class AsyncBrowserLauncher:
 
         self._page = None
         self._context = None
-
-        # Note: We do NOT kill the Chrome process — user's Chrome stays running
         logger.info("Playwright disconnected from Chrome")
 
     async def ensure_page(self) -> Any:
@@ -294,7 +313,6 @@ class AsyncBrowserLauncher:
         if self._page and not self._page.is_closed():
             return self._page
 
-        # Page was closed, try to get another one
         if self._context:
             pages = self._context.pages
             if pages:
@@ -310,11 +328,12 @@ def _detect_chrome() -> str | None:
     """Detect Chrome executable path."""
     paths = [
         os.getenv("CHROME_EXECUTABLE"),
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium-browser",
     ]
     for p in paths:
         if p and Path(p).exists():
@@ -323,28 +342,15 @@ def _detect_chrome() -> str | None:
 
 
 def _default_user_data_dir() -> str:
-    """Default user data dir for Autobot's Chrome profile."""
-    local_app_data = os.getenv("LOCALAPPDATA", "")
-    if local_app_data:
-        return str(Path(local_app_data) / "Autobot" / "ChromeAutomationProfile")
-    return str(Path.home() / ".autobot" / "chrome_profile")
-
-
-def _real_chrome_user_data_dir() -> str | None:
-    """Get the user's real Chrome user data directory."""
-    local_app_data = os.getenv("LOCALAPPDATA", "")
-    if local_app_data:
-        path = Path(local_app_data) / "Google" / "Chrome" / "User Data"
-        if path.exists():
-            return str(path)
-    home = Path.home()
-    mac_path = home / "Library" / "Application Support" / "Google" / "Chrome"
-    if mac_path.exists():
-        return str(mac_path)
-    linux_path = home / ".config" / "google-chrome"
+    """Default user data dir for Chrome profile."""
+    # On Linux, use the real Chrome profile by default
+    linux_path = Path.home() / ".config" / "google-chrome"
     if linux_path.exists():
         return str(linux_path)
-    return None
+    local_app_data = os.getenv("LOCALAPPDATA", "")
+    if local_app_data:
+        return str(Path(local_app_data) / "Google" / "Chrome" / "User Data")
+    return str(Path.home() / ".autobot" / "chrome_profile")
 
 
 async def _async_sleep(seconds: float) -> None:
