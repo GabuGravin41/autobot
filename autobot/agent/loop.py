@@ -18,6 +18,7 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -29,6 +30,7 @@ from autobot.agent.models import (
     AgentOutput,
     AgentStepInfo,
     ClickAction,
+    ComputerCallAction,
     DoneAction,
     InputTextAction,
     NavigateAction,
@@ -37,8 +39,11 @@ from autobot.agent.models import (
     StepHistoryEntry,
 )
 from autobot.computer.computer import Computer
-from autobot.dom.extraction import DOMExtractionService
-from autobot.dom.models import BrowserState, DOMSerializedState
+from autobot.dom.models import (
+    BrowserState,
+    DOMSerializedState,
+    SelectorMap,
+)
 from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 
 logger = logging.getLogger(__name__)
@@ -142,13 +147,26 @@ class AgentLoop:
         """
         step_start = time.time()
 
-        # ─── 1. OBSERVE ───
-        logger.debug(f"Step {self.step_number + 1}: Observing...")
-        dom_service = DOMExtractionService(
-            self.page,
-            previous_state=self.previous_dom_state,
+        # ─── 1. OBSERVE (Vision-Only) ───
+        logger.debug(f"Step {self.step_number + 1}: Capturing vision observation...")
+        
+        import base64
+        screenshot_bytes = await self.page.screenshot()
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+        
+        browser_state = BrowserState(
+            url=self.page.url,
+            title="Human Mode (Real Profile)",
+            tabs=[],  
+            screenshot_b64=screenshot_b64,
+            element_tree=None,
+            selector_map=SelectorMap(),
+            num_links=0,
+            num_interactive=0,
+            total_elements=0,
+            page_info=None
         )
-        browser_state = await dom_service.extract_state()
+        
         url_before = browser_state.url
 
         # Save screenshot for live-view (Mini-Peek)
@@ -179,17 +197,54 @@ class AgentLoop:
 
         # ─── 2. THINK ───
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
-        agent_output = await self._call_llm(browser_state, native_ui)
+        
+        # Build the step prompt
+        step_builder = StepPromptBuilder(
+            browser_state=browser_state,
+            task=self.goal,
+            step_number=self.step_number,
+            max_steps=self.max_steps,
+            agent_history=self._build_history_text(),
+            native_ui=native_ui,
+        )
+
+        user_messages = step_builder.build_messages(use_vision=self.use_vision)
+
+        # Construct full message list
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            *user_messages,
+        ]
+
+        agent_output = await self._call_llm(messages)
 
         if agent_output is None:
-            logger.error("LLM returned no output")
+            # LLM failed or refused. 
+            # Stability: Wait before retrying (prevents spinning)
+            logger.error(f"Step {self.step_number + 1}: LLM returned no output or invalid JSON. Waiting 3s...")
+            await asyncio.sleep(3.0) 
+            
+            # Record a "Failed" entry in history so the user sees it
+            fallback_output = AgentOutput(
+                thinking="LLM call failed (possibly due to API limits or model error). Retrying...",
+                next_goal="Retry current step",
+                action=[]
+            )
+            entry = StepHistoryEntry(
+                step_number=self.step_number,
+                agent_output=fallback_output,
+                action_results=[ActionResult(action_name="llm_call", success=False, error="API returned no valid response")],
+                url_before=url_before,
+                url_after=self.page.url,
+            )
+            self.history.append(entry)
             return None
 
-        logger.info(
-            f"Step {self.step_number + 1}: "
-            f"Goal: {agent_output.next_goal} | "
-            f"Actions: {len(agent_output.action)}"
-        )
+        # logger.info(
+        #     f"Step {self.step_number + 1}: "
+        #     f"Goal: {agent_output.next_goal} | "
+        #     f"Actions: {len(agent_output.action)}"
+        # )
 
         # ─── 3. ACT ───
         logger.debug(f"Step {self.step_number + 1}: Acting...")
@@ -219,75 +274,89 @@ class AgentLoop:
 
         return None
 
-    async def _call_llm(self, browser_state: BrowserState, native_ui: str | None = None) -> AgentOutput | None:
+    async def _call_llm(self, messages: list[dict]) -> AgentOutput | None:
         """
         Call the LLM with the current state and parse the structured output.
         """
-        # Build agent history text from previous steps
-        history_text = self._build_history_text()
-
-        # Build the step prompt
-        step_builder = StepPromptBuilder(
-            browser_state=browser_state,
-            task=self.goal,
-            step_number=self.step_number,
-            max_steps=self.max_steps,
-            agent_history=history_text,
-            native_ui=native_ui,
-        )
-
-        user_messages = step_builder.build_messages(use_vision=self.use_vision)
-
-        # Construct full message list
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            *user_messages,
-        ]
-
         try:
             response = await self._make_llm_call(messages)
+            if not response:
+                logger.error("LLM call succeeded but returned empty response.")
+                return None
             return self._parse_agent_output(response)
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            logger.exception(f"CRITICAL LLM CALL FAILURE: {str(e)}")
             return None
-
     async def _make_llm_call(self, messages: list[dict]) -> str:
         """Make the actual LLM API call. Supports both sync and async clients."""
+        
+        args = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"}
+        }
+
+        async def _internal_call(current_args: dict) -> str:
+            try:
+                # Try async first
+                resp = await self.llm_client.chat.completions.create(**current_args)
+                return str(resp.choices[0].message.content)
+            except TypeError:
+                # Fall back to sync client
+                import asyncio
+                resp = await asyncio.to_thread(
+                    self.llm_client.chat.completions.create,
+                    **current_args
+                )
+                return str(resp.choices[0].message.content)
+
         try:
-            # Try async first
-            response = await self.llm_client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            return response.choices[0].message.content
-        except TypeError:
-            # Fall back to sync client
-            import asyncio
-            response = await asyncio.to_thread(
-                self.llm_client.chat.completions.create,
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            return response.choices[0].message.content
+            return await _internal_call(args)
+        except Exception as e:
+            error_msg = str(e).lower()
+            # If the error is a 400 (parameter not supported), retry without JSON mode
+            if "400" in error_msg or "response_format" in error_msg or "json_object" in error_msg:
+                logger.warning(f"Model {self.model} failed with JSON mode. Retrying without JSON mode...")
+                args.pop("response_format", None)
+                return await _internal_call(args)
+            raise e
 
     def _parse_agent_output(self, raw: str) -> AgentOutput | None:
         """Parse the LLM's JSON response into an AgentOutput model."""
         try:
-            # Handle markdown-wrapped JSON
             text = raw.strip()
-            if text.startswith("```"):
-                # Remove ```json ... ``` wrapper
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+            
+            # 1. Try direct parsing
+            try:
+                data = json.loads(text)
+                return AgentOutput(**data)
+            except json.JSONDecodeError:
+                pass
 
-            data = json.loads(text)
-            return AgentOutput(**data)
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Failed to parse LLM output: {e}\nRaw: {raw[:500]}")
+            # 2. Try extracting from markdown block
+            import re
+            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(1))
+                    return AgentOutput(**data)
+                except json.JSONDecodeError:
+                    pass
+
+            # 3. Last ditch: try finding any { ... } block
+            json_match = re.search(r"(\{.*?\})", text, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(1))
+                    return AgentOutput(**data)
+                except json.JSONDecodeError:
+                    pass
+
+            logger.error(f"Failed to parse LLM output. Raw content: {raw[:500]}...")
+            return None
+        except Exception as e:
+            logger.error(f"Error during agent output parsing: {e}")
             return None
 
     async def _execute_actions(
@@ -315,7 +384,7 @@ class AgentLoop:
 
             # Execute the action
             url_before = self.page.url
-            result = await self._execute_single_action(action, browser_state)
+            result = await self._execute_action(action, browser_state)
             results.append(result)
 
             # Page change detection (adapted from Browser Use)
@@ -335,7 +404,7 @@ class AgentLoop:
 
         return results
 
-    async def _execute_single_action(
+    async def _execute_action(
         self,
         action: ActionModel,
         browser_state: BrowserState,
@@ -346,18 +415,25 @@ class AgentLoop:
         Key innovation from Browser Use: click/input use DOM INDEX, not selectors.
         """
         action_name = action.action_name
-        action_data = action.action_data
 
         try:
             if action.navigate is not None:
-                await self.page.goto(action.navigate.url, wait_until="domcontentloaded")
+                await self.page.goto(action.navigate.url)
                 return ActionResult(action_name="navigate", success=True, page_changed=True)
 
             elif action.click is not None:
-                return await self._execute_click(action.click, browser_state)
+                return ActionResult(
+                    action_name="click", 
+                    success=False, 
+                    error="DOM Click not available. Use computer.mouse.click(x, y) instead based on visual coordinates in the screenshot."
+                )
 
             elif action.input_text is not None:
-                return await self._execute_input(action.input_text, browser_state)
+                return ActionResult(
+                    action_name="input_text", 
+                    success=False, 
+                    error="DOM Input not available. Use computer.mouse.click() to focus then computer.keyboard.type() instead."
+                )
 
             elif action.scroll_down is not None:
                 await self.page.evaluate(
@@ -577,6 +653,9 @@ class AgentLoop:
                 )
             else:
                 result = await asyncio.to_thread(target_obj)
+
+            # Stability: Wait for the UI to react to the OS action
+            await asyncio.sleep(1.0)
 
             return ActionResult(
                 action_name="computer_call",

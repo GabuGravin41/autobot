@@ -91,9 +91,9 @@ class AgentRunner:
 
         try:
             # 1. Launch browser
-            self.log("🌐 Launching Chrome with CDP...")
+            self.log("Initializing Human Mode (Vision-Only)...")
             page = await self.browser_launcher.start()
-            self.log(f"✅ Browser connected. Current page: {page.url}")
+            self.log("✅ Human Mode active. Operating in your real Chrome profile.")
 
             # 2. Create LLM client if not provided
             if self.llm_client is None:

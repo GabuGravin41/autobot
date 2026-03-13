@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -37,33 +38,59 @@ class JudgeAgent:
         )
 
         try:
-            # support both sync and async clients
+            args = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"}
+            }
+
+            async def _internal_call(current_args: dict) -> str:
+                try:
+                    # async
+                    resp = await self.llm_client.chat.completions.create(**current_args)
+                    return str(resp.choices[0].message.content)
+                except TypeError:
+                    # sync fallback
+                    import asyncio
+                    resp = await asyncio.to_thread(
+                        self.llm_client.chat.completions.create,
+                        **current_args
+                    )
+                    return str(resp.choices[0].message.content)
+
             try:
-                # async
-                response = await self.llm_client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    response_format={"type": "json_object"},
-                )
-                text = response.choices[0].message.content
-            except TypeError:
-                import asyncio
-                response = await asyncio.to_thread(
-                    self.llm_client.chat.completions.create,
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    response_format={"type": "json_object"},
-                )
-                text = response.choices[0].message.content
+                text = await _internal_call(args)
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "400" in error_msg or "response_format" in error_msg or "json_object" in error_msg:
+                    logger.warning(f"Judge model {self.model} failed with JSON mode. Retrying without JSON mode...")
+                    args.pop("response_format", None)
+                    text = await _internal_call(args)
+                else:
+                    raise e
 
             text = text.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+            
+            # Extract JSON using robust fallback strategy
+            data = None
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                import re
+                json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+                if not json_match:
+                    json_match = re.search(r"(\{.*?\})", text, re.DOTALL)
+                
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+            
+            if data is None:
+                raise ValueError("Could not parse JSON from Judge output")
 
-            data = json.loads(text)
             return JudgeOutput(
                 success=bool(data.get("success", False)),
                 reasoning=str(data.get("reasoning", "No reasoning provided.")),
