@@ -229,12 +229,37 @@ export function connectLogStream(
         setTimeout(tryConnect, delay);
     }
 
+    // Track highest sequence number seen to deduplicate messages from multiple WS connections
+    let highestSeq = -1;
+
     function tryConnect() {
         if (closed) return;
         const ws = new WebSocket(wsUrl);
 
         ws.onmessage = (e) => {
-            if (e.data !== '__ping__') onMessage(e.data);
+            if (e.data === '__ping__') return;
+            const raw: string = e.data;
+            // Messages are formatted as "seq|content" or "hN|content" (historical)
+            const pipeIdx = raw.indexOf('|');
+            if (pipeIdx > 0) {
+                const prefix = raw.substring(0, pipeIdx);
+                const content = raw.substring(pipeIdx + 1);
+                if (prefix.startsWith('h')) {
+                    // Historical replay — always accept (only sent once per connection)
+                    onMessage(content);
+                } else {
+                    const seq = parseInt(prefix, 10);
+                    if (!isNaN(seq)) {
+                        if (seq <= highestSeq) return; // Duplicate — skip
+                        highestSeq = seq;
+                        onMessage(content);
+                    } else {
+                        onMessage(raw); // Unknown format — pass through
+                    }
+                }
+            } else {
+                onMessage(raw); // No prefix — pass through
+            }
         };
 
         ws.onerror = () => {

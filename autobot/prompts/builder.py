@@ -90,6 +90,15 @@ class StepPromptBuilder:
         self.agent_history = agent_history
         self.native_ui = native_ui
 
+    def _get_screen_size(self) -> tuple[int, int]:
+        """Read screen resolution from the page title set by AgentLoop."""
+        # AgentLoop encodes it as: "Human Mode | Screen: 1920×1080"
+        import re
+        m = re.search(r"Screen:\s*(\d+)×(\d+)", self.browser_state.title or "")
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return 1920, 1080
+
     def build_text(self) -> str:
         """
         Build the text portion of the user message.
@@ -128,7 +137,20 @@ class StepPromptBuilder:
         browser_state_text = self._build_browser_state()
         parts.append(f"<browser_state>\n{browser_state_text}\n</browser_state>")
 
-        # 4. Native OS state
+        # 4. Screen resolution (critical for coordinate estimation in Human Mode)
+        screen_w, screen_h = self._get_screen_size()
+        parts.append(
+            f"<screen_info>\n"
+            f"Resolution: {screen_w}×{screen_h} pixels\n"
+            f"The screenshot is at FULL resolution — coordinates you see in the image match "
+            f"the real screen pixels exactly. No scaling needed.\n"
+            f"Chrome's content area is roughly: x=0–{screen_w}, y=80–{screen_h} "
+            f"(top ~80px is the browser chrome/tab bar).\n"
+            f"Center of screen: x={screen_w//2}, y={screen_h//2}\n"
+            f"</screen_info>"
+        )
+
+        # 5. Native OS state
         if self.native_ui:
             parts.append(f"<native_os_state>\n{self.native_ui}\n</native_os_state>")
 
@@ -208,7 +230,7 @@ class StepPromptBuilder:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/png;base64,{self.browser_state.screenshot_b64}",
+                        "url": f"data:image/jpeg;base64,{self.browser_state.screenshot_b64}",
                         "detail": "auto",
                     },
                 },

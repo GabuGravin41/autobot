@@ -49,15 +49,16 @@ class Mouse:
         pyautogui.moveTo(x=x, y=y, duration=duration)
         logger.debug(f"Mouse move to ({x}, {y})")
 
-    def scroll(self, clicks: int = 3) -> None:
-        """Scroll the mouse wheel.
+    def scroll(self, x_offset: int = 0, y_offset: int = 3) -> None:
+        """Scroll the mouse wheel. Accepts (x_offset, y_offset) for compatibility with system prompt.
 
         Args:
-            clicks: Positive = scroll up, Negative = scroll down.
+            x_offset: Horizontal scroll (ignored on most systems).
+            y_offset: Vertical scroll. Positive = scroll up, Negative = scroll down.
         """
         import pyautogui
-        pyautogui.scroll(clicks)
-        logger.debug(f"Mouse scroll {clicks}")
+        pyautogui.scroll(y_offset)
+        logger.debug(f"Mouse scroll y={y_offset}")
 
     def drag(self, start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> None:
         """Drag from one position to another.

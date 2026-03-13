@@ -237,52 +237,45 @@ export default function DashboardPage({
                             View All
                         </button>
                     </div>
-                    <div className="space-y-4">
-                        {liveRuns.map(run => (
-                            <div
-                                key={run.id}
-                                onClick={() => onSelectRun(run as any)}
-                                className="glass-panel p-6 rounded-3xl border-[var(--base-border)] hover:border-brand-500/30 transition-all group cursor-pointer"
-                            >
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                                    <div className="flex items-center gap-4">
-                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${run.status === 'running' ? 'bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] animate-pulse'
+                    <div className="max-h-[400px] overflow-y-auto custom-scrollbar pr-1">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {liveRuns.map(run => (
+                                <div
+                                    key={run.id}
+                                    onClick={() => onSelectRun(run as any)}
+                                    className="glass-panel p-4 rounded-2xl border-[var(--base-border)] hover:border-brand-500/30 transition-all group cursor-pointer"
+                                >
+                                    <div className="flex items-center gap-3 mb-3">
+                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${run.status === 'running' ? 'bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] animate-pulse'
                                             : run.status === 'success' ? 'bg-emerald-500/10 text-emerald-400'
                                                 : 'bg-red-500/10 text-red-400'
                                             }`}>
-                                            {run.status === 'running' ? <Play size={20} />
-                                                : run.status === 'success' ? <CheckCircle2 size={20} />
-                                                    : <AlertCircle size={20} />}
+                                            {run.status === 'running' ? <Play size={16} />
+                                                : run.status === 'success' ? <CheckCircle2 size={16} />
+                                                    : <AlertCircle size={16} />}
                                         </div>
-                                        <div>
-                                            <div className="font-bold group-hover:text-[var(--brand-primary)] transition-colors">{run.planName}</div>
-                                            <div className="text-[10px] text-[var(--base-text-muted)] uppercase tracking-widest flex items-center gap-2 mt-1">
-                                                <span>{run.id}</span>
-                                                <span className="w-1 h-1 rounded-full bg-[var(--base-border)]" />
-                                                <span>{run.timestamp}</span>
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-sm truncate group-hover:text-[var(--brand-primary)] transition-colors">{run.planName}</div>
+                                            <div className="text-[9px] text-[var(--base-text-muted)] uppercase tracking-widest truncate mt-0.5">
+                                                {run.timestamp}
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-6">
-                                        <div className="text-right hidden xs:block">
-                                            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-1">Progress</div>
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-24 h-1.5 bg-[var(--base-border)] rounded-full overflow-hidden">
-                                                    <div className="h-full bg-[var(--brand-primary)] transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
-                                                </div>
-                                                <span className="text-xs font-mono">{run.progress ?? 0}%</span>
-                                            </div>
+                                    <div className="flex items-center gap-3">
+                                        <div className="flex-1 h-1.5 bg-[var(--base-border)] rounded-full overflow-hidden">
+                                            <div className="h-full bg-[var(--brand-primary)] transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
                                         </div>
-                                        <ChevronRight size={16} className="text-[var(--base-text-muted)] group-hover:text-[var(--brand-primary)] transition-colors" />
+                                        <span className="text-[10px] font-mono text-[var(--base-text-muted)]">{run.progress ?? 0}%</span>
+                                        <ChevronRight size={14} className="text-[var(--base-text-muted)] group-hover:text-[var(--brand-primary)] transition-colors shrink-0" />
                                     </div>
                                 </div>
-                            </div>
-                        ))}
-                        {liveRuns.length === 0 && !activeRun && (
-                            <div className="glass-panel p-10 rounded-3xl border-dashed border-[var(--base-border)] text-center text-[var(--base-text-muted)] text-sm">
-                                No runs yet — start a workflow from the AI Planner or Workflows tab.
-                            </div>
-                        )}
+                            ))}
+                            {liveRuns.length === 0 && !activeRun && (
+                                <div className="col-span-full glass-panel p-10 rounded-3xl border-dashed border-[var(--base-border)] text-center text-[var(--base-text-muted)] text-sm">
+                                    No runs yet — start a workflow from the AI Planner or Workflows tab.
+                                </div>
+                            )}
+                        </div>
                     </div>
 
                     {/* Task Queue section */}

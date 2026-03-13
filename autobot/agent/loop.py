@@ -49,6 +49,21 @@ from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 logger = logging.getLogger(__name__)
 
 
+def _strip_images_from_messages(messages: list[dict]) -> list[dict]:
+    """Remove base64 image parts from messages for a text-only fallback retry."""
+    result = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            text_parts = [p for p in content if p.get("type") != "image_url"]
+            if not text_parts:
+                text_parts = [{"type": "text", "text": "[Screenshot unavailable — act based on goal and history]"}]
+            result.append({**msg, "content": text_parts})
+        else:
+            result.append(msg)
+    return result
+
+
 class AgentLoop:
     """
     The core agent loop: observe → think → act → verify.
@@ -152,13 +167,32 @@ class AgentLoop:
         
         import base64
         screenshot_bytes = await self.page.screenshot()
-        screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-        
+
+        # Get screen resolution for coordinate guidance in prompt
+        try:
+            screen_w, screen_h = self.computer.display.size()
+        except Exception:
+            screen_w, screen_h = 1920, 1080
+
+        # Save full-res screenshot for dashboard live-view BEFORE downscaling
+        try:
+            from pathlib import Path
+            screenshot_dir = Path("screenshots")
+            screenshot_dir.mkdir(exist_ok=True)
+            screenshot_path = screenshot_dir / "latest.png"
+            screenshot_path.write_bytes(screenshot_bytes)
+            self.last_screenshot_path = str(screenshot_path.absolute())
+        except Exception as e:
+            logger.warning(f"Failed to save agent screenshot: {e}")
+
+        # Compress screenshot PNG → JPEG to save tokens/money (no resolution change!)
+        llm_screenshot_b64 = self._compress_screenshot(screenshot_bytes)
+
         browser_state = BrowserState(
             url=self.page.url,
-            title="Human Mode (Real Profile)",
-            tabs=[],  
-            screenshot_b64=screenshot_b64,
+            title=f"Human Mode | Screen: {screen_w}×{screen_h}",
+            tabs=[],
+            screenshot_b64=llm_screenshot_b64,
             element_tree=None,
             selector_map=SelectorMap(),
             num_links=0,
@@ -166,28 +200,16 @@ class AgentLoop:
             total_elements=0,
             page_info=None
         )
-        
+
         url_before = browser_state.url
 
-        # Save screenshot for live-view (Mini-Peek)
-        if browser_state.screenshot_b64:
-            try:
-                import base64
-                from pathlib import Path
-                screenshot_dir = Path("screenshots")
-                screenshot_dir.mkdir(exist_ok=True)
-                screenshot_path = screenshot_dir / f"latest.png"
-                screenshot_path.write_bytes(base64.b64decode(browser_state.screenshot_b64))
-                self.last_screenshot_path = str(screenshot_path.absolute())
-            except Exception as e:
-                logger.warning(f"Failed to save agent screenshot: {e}")
-
-        # Extract native UI if applicable (e.g. if browser not in focus or as additional context)
+        # Extract native UI (Windows-only; silently skipped on Linux/Mac)
         native_ui = None
-        try:
-            native_ui = self.computer.window.extract_ui()
-        except Exception as e:
-            logger.debug(f"Failed to extract native UI: {e}")
+        if hasattr(self.computer, "window"):
+            try:
+                native_ui = self.computer.window.extract_ui()
+            except Exception as e:
+                logger.debug(f"Native UI extraction skipped: {e}")
 
         # Update previous state for new-element detection
         self.previous_dom_state = DOMSerializedState(
@@ -277,56 +299,101 @@ class AgentLoop:
     async def _call_llm(self, messages: list[dict]) -> AgentOutput | None:
         """
         Call the LLM with the current state and parse the structured output.
+        _make_llm_call handles format/vision fallbacks internally.
+        This layer adds one outer retry for transient network errors.
         """
-        try:
-            response = await self._make_llm_call(messages)
-            if not response:
-                logger.error("LLM call succeeded but returned empty response.")
-                return None
-            return self._parse_agent_output(response)
-        except Exception as e:
-            logger.exception(f"CRITICAL LLM CALL FAILURE: {str(e)}")
-            return None
+        for attempt in range(1, 3):
+            try:
+                response = await self._make_llm_call(messages)
+                if not response:
+                    logger.warning(f"LLM outer attempt {attempt}: empty string returned")
+                    await asyncio.sleep(5)
+                    continue
+                result = self._parse_agent_output(response)
+                if result is not None:
+                    return result
+                logger.warning(f"LLM outer attempt {attempt}: could not parse JSON. Raw: {response[:300]}")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"LLM outer attempt {attempt} failed: {type(e).__name__}: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(10)
+
+        logger.error(f"All LLM attempts failed for model '{self.model}'. "
+                     f"Check OPENROUTER_API_KEY and model availability.")
+        return None
+
     async def _make_llm_call(self, messages: list[dict]) -> str:
-        """Make the actual LLM API call. Supports both sync and async clients."""
-        
+        """
+        Make the actual LLM API call using the async client.
+
+        Attempt order:
+          1. Full request — vision + JSON mode (best quality)
+          2. No JSON mode — for models that don't support response_format
+          3. Text-only — strip screenshots for models that reject large image payloads
+
+        Free OpenRouter models frequently return empty responses when sent large
+        base64 images, so the text-only fallback is critical for reliability.
+        """
         args = {
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
-            "response_format": {"type": "json_object"}
+            "max_tokens": 2048,   # Cap output — agent JSON fits in 2K; prevents 402 on low-credit accounts
+            "response_format": {"type": "json_object"},
         }
 
-        async def _internal_call(current_args: dict) -> str:
-            try:
-                # Try async first
-                resp = await self.llm_client.chat.completions.create(**current_args)
-                return str(resp.choices[0].message.content)
-            except TypeError:
-                # Fall back to sync client
-                import asyncio
-                resp = await asyncio.to_thread(
-                    self.llm_client.chat.completions.create,
-                    **current_args
-                )
-                return str(resp.choices[0].message.content)
+        async def _do_call(current_args: dict) -> str:
+            resp = await self.llm_client.chat.completions.create(**current_args)
+            if not resp.choices:
+                raise ValueError(f"No choices returned by {self.model}")
+            content = resp.choices[0].message.content
+            if not content or not content.strip():
+                finish = getattr(resp.choices[0], "finish_reason", "unknown")
+                raise ValueError(f"Empty content from {self.model} (finish_reason={finish})")
+            return str(content)
 
+        last_error: Exception | None = None
+
+        # Attempt 1: vision + JSON mode
         try:
-            return await _internal_call(args)
+            return await _do_call(args)
         except Exception as e:
-            error_msg = str(e).lower()
-            # If the error is a 400 (parameter not supported), retry without JSON mode
-            if "400" in error_msg or "response_format" in error_msg or "json_object" in error_msg:
-                logger.warning(f"Model {self.model} failed with JSON mode. Retrying without JSON mode...")
-                args.pop("response_format", None)
-                return await _internal_call(args)
-            raise e
+            last_error = e
+            logger.warning(f"LLM attempt 1 ({self.model}): {e}")
+
+        # Attempt 2: drop response_format (model may not support JSON mode)
+        err_lower = str(last_error).lower()
+        if any(kw in err_lower for kw in ("400", "response_format", "json_object", "json mode",
+                                           "unsupported", "empty content", "no choices")):
+            try:
+                no_format = {**args}
+                no_format.pop("response_format", None)
+                logger.info(f"Retrying {self.model} without JSON mode...")
+                return await _do_call(no_format)
+            except Exception as e2:
+                last_error = e2
+                logger.warning(f"LLM attempt 2 (no JSON mode): {e2}")
+
+        # Attempt 3: strip images — model rejected large payload or doesn't support vision
+        text_only = _strip_images_from_messages(messages)
+        if text_only != messages:
+            try:
+                no_vision = {**args, "messages": text_only}
+                no_vision.pop("response_format", None)
+                logger.info(f"Retrying {self.model} without images (text-only fallback)...")
+                return await _do_call(no_vision)
+            except Exception as e3:
+                last_error = e3
+                logger.warning(f"LLM attempt 3 (text-only): {e3}")
+
+        raise last_error
 
     def _parse_agent_output(self, raw: str) -> AgentOutput | None:
         """Parse the LLM's JSON response into an AgentOutput model."""
         try:
             text = raw.strip()
-            
+
             # 1. Try direct parsing
             try:
                 data = json.loads(text)
@@ -334,9 +401,9 @@ class AgentLoop:
             except json.JSONDecodeError:
                 pass
 
-            # 2. Try extracting from markdown block
+            # 2. Try extracting from markdown code block
             import re
-            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+            json_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
             if json_match:
                 try:
                     data = json.loads(json_match.group(1))
@@ -344,11 +411,11 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     pass
 
-            # 3. Last ditch: try finding any { ... } block
-            json_match = re.search(r"(\{.*?\})", text, re.DOTALL)
-            if json_match:
+            # 3. Bracket-matching: find the outermost { ... } with proper nesting
+            json_str = self._extract_outermost_json(text)
+            if json_str:
                 try:
-                    data = json.loads(json_match.group(1))
+                    data = json.loads(json_str)
                     return AgentOutput(**data)
                 except json.JSONDecodeError:
                     pass
@@ -358,6 +425,36 @@ class AgentLoop:
         except Exception as e:
             logger.error(f"Error during agent output parsing: {e}")
             return None
+
+    @staticmethod
+    def _extract_outermost_json(text: str) -> str | None:
+        """Extract the outermost JSON object from text using bracket matching."""
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\":
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None
 
     async def _execute_actions(
         self,
@@ -482,8 +579,12 @@ class AgentLoop:
                 return ActionResult(action_name="close_tab", success=True, page_changed=True)
 
             elif action.wait is not None:
-                import asyncio
-                await asyncio.sleep(action.wait.seconds)
+                secs = action.wait.seconds
+                if secs >= 8:
+                    # Smart wait: watch for screen stability (AI done generating)
+                    await self._wait_for_stable(max_seconds=secs)
+                else:
+                    await asyncio.sleep(secs)
                 return ActionResult(action_name="wait", success=True)
 
             elif action.screenshot is not None:
@@ -608,96 +709,216 @@ class AgentLoop:
                 error=f"Input to [{index}] failed: {e}",
             )
 
+    @staticmethod
+    def _compress_screenshot(png_bytes: bytes) -> str:
+        """
+        Compress a screenshot from PNG to JPEG to reduce token usage.
+
+        IMPORTANT: No resolution change! The LLM sees the image at the SAME
+        resolution as the real screen, so coordinates match 1:1. This avoids
+        the problem where the LLM estimates coordinates for a downscaled image
+        but the mouse clicks at real-screen coordinates.
+
+        JPEG at quality 80 is ~75% smaller than PNG for typical screenshots.
+        """
+        import base64
+        try:
+            from PIL import Image
+            from io import BytesIO
+
+            img = Image.open(BytesIO(png_bytes))
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=80, optimize=True)
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            logger.debug(f"Screenshot compressed: {len(png_bytes)//1024}KB PNG → "
+                         f"{len(buf.getvalue())//1024}KB JPEG ({img.size[0]}x{img.size[1]})")
+            return b64
+        except ImportError:
+            logger.debug("Pillow not installed — sending full-size PNG to LLM")
+            return base64.b64encode(png_bytes).decode("utf-8")
+        except Exception as e:
+            logger.warning(f"Screenshot compress failed: {e} — using original PNG")
+            return base64.b64encode(png_bytes).decode("utf-8")
+
+    async def _wait_for_stable(
+        self,
+        max_seconds: int = 45,
+        check_interval: float = 2.5,
+        stable_needed: int = 2,
+    ) -> None:
+        """
+        Wait until the screen stops changing — signals that an AI model (Grok,
+        Claude, ChatGPT …) has finished generating its response.
+
+        Algorithm:
+          - Take a screenshot every `check_interval` seconds
+          - Compare consecutive screenshots by MD5 hash
+          - When the hash is identical for `stable_needed` consecutive checks → done
+          - Abort after `max_seconds` regardless
+
+        This replaces fixed-time waits and prevents the agent from interrupting
+        an AI mid-response.
+        """
+        import hashlib
+
+        prev_hash: str | None = None
+        stable_count = 0
+        start = time.time()
+        elapsed = 0.0
+
+        logger.info(f"⏳ Smart wait: watching for screen stability (up to {max_seconds}s)...")
+
+        while elapsed < max_seconds:
+            await asyncio.sleep(check_interval)
+            elapsed = time.time() - start
+
+            try:
+                shot = await self.page.screenshot()
+                curr_hash = hashlib.md5(shot).hexdigest()
+            except Exception:
+                break
+
+            if curr_hash == prev_hash:
+                stable_count += 1
+                logger.info(f"   Screen stable ×{stable_count} ({elapsed:.0f}s elapsed)")
+                if stable_count >= stable_needed:
+                    logger.info("✅ Screen stable — response complete")
+                    return
+            else:
+                if stable_count > 0:
+                    logger.info(f"   Screen changed again — resetting stable counter")
+                stable_count = 0
+
+            prev_hash = curr_hash
+
+        logger.info(f"⏳ Wait timeout ({max_seconds}s) — proceeding regardless")
+
     async def _execute_computer_call(self, call_action: ComputerCallAction) -> ActionResult:
         """
-        Execute an OS-level computer tool call.
-        Example: "computer.mouse.click(x=10, y=10)"
+        Execute an OS-level computer tool call safely via AST parsing.
+        Example: "computer.mouse.click(x=640, y=480)"
         """
         call_str = call_action.call
         logger.info(f"💻 Computer call: {call_str}")
 
         try:
-            # We use a restricted eval-like approach by accessing the computer object
-            # Matches strings like "computer.mouse.click(...)"
-            if not call_str.startswith("computer."):
-                return ActionResult(
-                    action_name="computer_call",
-                    success=False,
-                    error=f"Invalid computer call: {call_str}. Must start with 'computer.'"
-                )
-
-            # Resolve the method
-            parts = call_str.split("(", 1)[0].split(".")
-            target_obj = self.computer
-            for part in parts[1:]:
-                target_obj = getattr(target_obj, part)
-
-            # Parse arguments (basic implementation, similar to Open Interpreter)
-            args_str = call_str.split("(", 1)[1].rstrip(")")
-            # Using a safer way to evaluate arguments if possible, or just passing them
-            # For now, we'll use a very simple parser or just use eval in a controlled way
-            # since the LLM is expected to provide valid Python-like calls.
-            
-            def safe_eval_call(target, args_text):
-                # This is a bit risky but we are in a sovereign agent context
-                # and the LLM is controlled.
-                import ast
-                # We could use a proper parser but for speed/simplicity:
-                return target(*eval(f"({args_text})", {"__builtins__": {}}, {}))
-
-            if args_str.strip():
-                # We wrap the call in a lambda to handle *args and **kwargs via eval
-                # This is a placeholder for a more robust parser
-                result = await asyncio.to_thread(
-                    lambda: eval(call_str, {"computer": self.computer, "self": self}, {})
-                )
-            else:
-                result = await asyncio.to_thread(target_obj)
-
-            # Stability: Wait for the UI to react to the OS action
-            await asyncio.sleep(1.0)
-
+            result = await asyncio.to_thread(self._dispatch_computer_call, call_str)
+            await asyncio.sleep(0.8)
             return ActionResult(
                 action_name="computer_call",
                 success=True,
-                extracted_content=str(result) if result is not None else None
+                extracted_content=str(result) if result is not None else None,
             )
-
         except Exception as e:
-            logger.error(f"Computer call failed: {e}")
+            logger.error(f"Computer call failed [{call_str}]: {e}")
             return ActionResult(
                 action_name="computer_call",
                 success=False,
-                error=f"Computer tool failed: {e}. Fallback: If this API/tool is unavailable, navigate to the website in the browser and complete the task manually using the Human Profile."
+                error=f"{e}. Check the call format: computer.<module>.<method>(<args>)",
             )
+
+    def _dispatch_computer_call(self, call_str: str) -> Any:
+        """
+        Safely parse and dispatch a computer.* method call without eval().
+
+        Supported format:  computer.<module>.<method>(<args>)
+        Examples:
+          computer.mouse.click(x=640, y=480)
+          computer.keyboard.type('hello world')
+          computer.mouse.scroll(0, -5)
+          computer.clipboard.set('some text')
+        """
+        import ast
+        import re
+
+        call_str = call_str.strip()
+        if not call_str.startswith("computer."):
+            raise ValueError(f"Call must start with 'computer.': {call_str}")
+
+        # Match: computer.<module>.<method>(<args>)
+        pattern = r"^computer\.(\w+)\.(\w+)\(([^)]*)\)$"
+        match = re.match(pattern, call_str)
+        if not match:
+            # Try with multi-char args that may contain parens (e.g. strings with parens)
+            pattern2 = r"^computer\.(\w+)\.(\w+)\((.*)\)$"
+            match = re.match(pattern2, call_str, re.DOTALL)
+        if not match:
+            raise ValueError(f"Cannot parse call: '{call_str}'. "
+                             f"Expected: computer.<module>.<method>(<args>)")
+
+        module_name, method_name, args_str = match.groups()
+
+        module = getattr(self.computer, module_name, None)
+        if module is None:
+            raise ValueError(f"Unknown computer module '{module_name}'. "
+                             f"Available: mouse, keyboard, clipboard, display")
+
+        method = getattr(module, method_name, None)
+        if method is None:
+            raise ValueError(f"Unknown method 'computer.{module_name}.{method_name}'")
+
+        # Parse arguments using AST (safe, no eval)
+        args: list = []
+        kwargs: dict = {}
+        if args_str.strip():
+            try:
+                tree = ast.parse(f"_f({args_str})", mode="eval")
+                call_node = tree.body
+                for arg_node in call_node.args:
+                    args.append(ast.literal_eval(arg_node))
+                for kw_node in call_node.keywords:
+                    kwargs[kw_node.arg] = ast.literal_eval(kw_node.value)
+            except Exception as parse_err:
+                raise ValueError(f"Cannot parse args '{args_str}': {parse_err}")
+
+        return method(*args, **kwargs)
 
     def _build_history_text(self) -> str:
         """Build a text summary of all previous steps for the agent_history section."""
         if not self.history:
             return ""
-            
+
         lines = []
         for entry in self.history[-5:]:  # Last 5 steps to keep context manageable
-            lines.append(entry.to_history_text())
-            
-        # --- Stall / Loop Detection ---
+            text = entry.to_history_text()
+            # Include the agent's memory to help track conversation state
+            if entry.agent_output.memory:
+                text += f"\n  Memory: {entry.agent_output.memory}"
+            lines.append(text)
+
+        # --- Stall / Loop Detection (two strategies) ---
         if len(self.history) >= 3:
             last_3 = self.history[-3:]
-            # Only compare the list of actions (dumping to JSON to easily match dicts)
+
+            # Strategy 1: Exact same actions repeated
             acts_0 = [a.model_dump() for a in last_3[0].agent_output.action]
             acts_1 = [a.model_dump() for a in last_3[1].agent_output.action]
             acts_2 = [a.model_dump() for a in last_3[2].agent_output.action]
-            
-            if acts_0 == acts_1 == acts_2:
-                logger.warning(f"🔄 Loop detected: Agent repeated the exact same actions for 3 steps.")
+            exact_loop = (acts_0 == acts_1 == acts_2)
+
+            # Strategy 2: Same goal repeated (even if coordinates differ slightly)
+            goals = [e.agent_output.next_goal.strip().lower() for e in last_3]
+            goal_loop = (goals[0] == goals[1] == goals[2])
+
+            # Strategy 3: Similar goals (fuzzy — first 40 chars match)
+            goal_prefixes = [g[:40] for g in goals]
+            fuzzy_loop = (goal_prefixes[0] == goal_prefixes[1] == goal_prefixes[2])
+
+            if exact_loop or goal_loop or fuzzy_loop:
+                loop_type = "exact same actions" if exact_loop else "same goal/intent"
+                logger.warning(f"🔄 Loop detected ({loop_type}): Agent stuck for 3 steps.")
                 lines.append(
                     "\n> [!CRITICAL WARNING]\n"
                     "> ⚠️ STALL DETECTED ⚠️\n"
-                    "> You have executed the EXACT SAME actions for the last 3 steps and made no progress.\n"
-                    "> Do NOT repeat these actions. You MUST try a completely different strategy,\n"
-                    "> interact with different elements, scroll to find new elements, or use the `done` tool."
+                    f"> You have been repeating the same thing ({loop_type}) for the last 3 steps.\n"
+                    "> STOP doing what you're doing. You MUST:\n"
+                    "> 1. READ the screenshot carefully — what does it actually show right now?\n"
+                    "> 2. Check your memory — what questions have you already asked?\n"
+                    "> 3. Ask a COMPLETELY DIFFERENT question, or try a different approach entirely.\n"
+                    "> 4. If you've completed enough of the task, call `done` with your findings.\n"
+                    "> DO NOT repeat the same goal or ask the same question again."
                 )
-                
+
         return "\n".join(lines)
 
     def _summarize_history(self) -> str:

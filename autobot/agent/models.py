@@ -255,6 +255,14 @@ class StepHistoryEntry(BaseModel):
                     action_desc = f"navigate(url='{data.url[:50]}')"
                 elif isinstance(data, DoneAction):
                     action_desc = f"done(success={data.success})"
+                elif isinstance(data, ComputerCallAction):
+                    action_desc = f"computer_call({data.call[:60]})"
+                elif isinstance(data, WaitAction):
+                    action_desc = f"wait({data.seconds}s)"
+                elif isinstance(data, PressKeyAction):
+                    action_desc = f"press_key('{data.key}')"
+                elif isinstance(data, ScrollAction):
+                    action_desc = f"scroll({data.amount})"
                 elif isinstance(data, ClickNativeAction):
                     action_desc = f"click_native(index={data.index})"
                 elif isinstance(data, InputTextNativeAction):

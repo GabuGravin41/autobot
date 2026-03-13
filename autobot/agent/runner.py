@@ -90,19 +90,27 @@ class AgentRunner:
         self.log(f"📋 Max steps: {steps} | Model: {self.model}")
 
         try:
-            # 1. Launch browser
-            self.log("Initializing Human Mode (Vision-Only)...")
-            page = await self.browser_launcher.start()
-            self.log("✅ Human Mode active. Operating in your real Chrome profile.")
-
-            # 2. Create LLM client if not provided
+            # 1. Create LLM client and run pre-flight check
             if self.llm_client is None:
                 self.llm_client = _create_llm_client()
                 if self.llm_client is None:
+                    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter")
+                    key_hint = "OPENROUTER_API_KEY" if provider == "openrouter" else "OPENAI_API_KEY"
                     raise RuntimeError(
-                        "No LLM API key configured. Please create a '.env' file in the autobot root directory "
-                        "and set either OPENROUTER_API_KEY=... or OPENAI_API_KEY=..."
+                        f"No LLM API key found. Set {key_hint} in your .env file. "
+                        f"Current provider: {provider}"
                     )
+
+            self.log(f"🔍 Pre-flight: testing {self.model} ...")
+            ok = await self._preflight_check()
+            if not ok:
+                self.log(f"⚠️  Pre-flight failed — model '{self.model}' may be unavailable or rate-limited. "
+                         f"The agent will still attempt to run with fallback strategies.")
+
+            # 2. Launch browser
+            self.log("Initializing Human Mode (Vision-Only)...")
+            page = await self.browser_launcher.start()
+            self.log("✅ Human Mode active. Operating in your real Chrome profile.")
 
             # 3. Create and run agent loop
             self.status = "running"
@@ -129,15 +137,29 @@ class AgentRunner:
                     
                 result = await original_execute_step()
 
-                # Log the agent's thinking
+                # Log the agent's thinking and actions in detail
                 if self._agent_loop.history:
                     last = self._agent_loop.history[-1]
-                    self.log(f"  💭 {last.agent_output.next_goal}")
-                    for ar in last.action_results:
+                    ao = last.agent_output
+                    self.log(f"  🧠 Thinking: {ao.thinking[:120]}...")
+                    self.log(f"  💭 Goal: {ao.next_goal}")
+                    if ao.memory:
+                        self.log(f"  📝 Memory: {ao.memory[:100]}")
+                    for action, ar in zip(ao.action, last.action_results):
                         icon = "✅" if ar.success else "❌"
-                        self.log(f"  {icon} {ar.action_name}")
+                        # Show the actual action details
+                        detail = ar.action_name
+                        if action.computer_call:
+                            detail = action.computer_call.call
+                        elif action.navigate:
+                            detail = f"navigate → {action.navigate.url[:60]}"
+                        elif action.wait:
+                            detail = f"wait({action.wait.seconds}s)"
+                        elif action.done:
+                            detail = f"done(success={action.done.success})"
+                        self.log(f"  {icon} {detail}")
                         if ar.error:
-                            self.log(f"     Error: {ar.error}")
+                            self.log(f"     ⚠️ {ar.error[:100]}")
 
                 return result
 
@@ -184,6 +206,27 @@ class AgentRunner:
             except Exception:
                 pass
 
+    async def _preflight_check(self) -> bool:
+        """
+        Send a minimal test message to verify the LLM is reachable and responding.
+        Returns True if the model replies, False on any error.
+        """
+        try:
+            resp = await self.llm_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Reply with the single word: OK"}],
+                max_tokens=16,   # Match real call cap; a failed pre-flight here means real calls will also fail
+                temperature=0,
+            )
+            if resp.choices and resp.choices[0].message.content:
+                self.log(f"✅ LLM pre-flight OK ({self.model})")
+                return True
+            self.log(f"⚠️  LLM pre-flight: empty response from {self.model}")
+            return False
+        except Exception as e:
+            self.log(f"⚠️  LLM pre-flight FAILED: {e}")
+            return False
+
     def cancel(self) -> None:
         """Cancel the running task."""
         self.status = "cancelled"
@@ -220,22 +263,35 @@ class AgentRunner:
 
 def _create_llm_client() -> Any | None:
     """
-    Create an OpenAI-compatible client from environment variables.
+    Create an async OpenAI-compatible client from environment variables.
 
     Supports:
-    - OpenRouter (OPENROUTER_API_KEY) — default
-    - OpenAI (OPENAI_API_KEY)
-    - Any OpenAI-compatible API
+    - google       → Google Gemini via OpenAI-compatible endpoint (GOOGLE_API_KEY)
+    - openrouter   → OpenRouter (OPENROUTER_API_KEY)
+    - openai       → OpenAI directly (OPENAI_API_KEY)
+    - xai          → Grok via x.ai (XAI_API_KEY)
+    - auto         → tries google → openrouter → openai in order
     """
-    from openai import OpenAI
+    from openai import AsyncOpenAI
 
     provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter").lower()
 
-    if provider == "openrouter":
+    if provider == "google":
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            logger.error("GOOGLE_API_KEY not set. Add it to your .env file.")
+            return None
+        # Google exposes an OpenAI-compatible endpoint for Gemini models
+        return AsyncOpenAI(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=api_key,
+        )
+
+    elif provider == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             return None
-        return OpenAI(
+        return AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
         )
@@ -244,17 +300,28 @@ def _create_llm_client() -> Any | None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             return None
-        return OpenAI(api_key=api_key)
+        return AsyncOpenAI(api_key=api_key)
+
+    elif provider == "xai":
+        api_key = os.getenv("XAI_API_KEY")
+        if not api_key:
+            return None
+        return AsyncOpenAI(
+            base_url="https://api.x.ai/v1",
+            api_key=api_key,
+        )
 
     else:
-        # Try OpenRouter first, then OpenAI
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if api_key:
-            return OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=api_key,
-            )
+        # Auto-detect: try in order google → openrouter → openai
+        for env_key, base_url in [
+            ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+            ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+            ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+        ]:
+            api_key = os.getenv(env_key)
+            if api_key:
+                return AsyncOpenAI(base_url=base_url, api_key=api_key)
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
-            return OpenAI(api_key=api_key)
+            return AsyncOpenAI(api_key=api_key)
         return None

@@ -46,20 +46,27 @@ logger = logging.getLogger(__name__)
 _agent_runner: AgentRunner | None = None
 _agent_status: str = "idle"  # idle | running | done | failed | cancelled
 _active_run_id: str | None = None
-_run_log: list[str] = []
+_run_log: list[str] = []          # timestamped lines, cleared per run
 _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
 _agent_lock = threading.Lock()
+_log_seq: int = 0                 # monotonic counter for dedup by frontend
 
 
 # ── Logging + WebSocket broadcast ────────────────────────────────────────────
 
 def _log(msg: str) -> None:
+    global _log_seq
     ts = datetime.now().strftime("%H:%M:%S")
+    # Prefix with a unique sequence number so the frontend can deduplicate
+    # when multiple WebSocket connections are open (e.g. React StrictMode).
+    _log_seq += 1
     line = f"[{ts}] {msg}"
     _run_log.append(line)
+    # Send seq|line so clients can drop duplicates by tracking the highest seq seen
+    payload = f"{_log_seq}|{line}"
     if _event_loop and not _event_loop.is_closed():
-        asyncio.run_coroutine_threadsafe(_broadcast(line), _event_loop)
+        asyncio.run_coroutine_threadsafe(_broadcast(payload), _event_loop)
 
 
 async def _broadcast(msg: str) -> None:
@@ -133,6 +140,7 @@ class SettingsUpdate(BaseModel):
     llm_model: str | None = None
     openrouter_api_key: str | None = None
     openai_api_key: str | None = None
+    google_api_key: str | None = None
     browser_mode: str | None = None
 
 
@@ -268,9 +276,10 @@ def get_settings():
     return {
         "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter"),
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", ""),
-        "browser_mode": "cdp",  # Enforced now
+        "browser_mode": "human",
         "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
+        "has_google_key": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
         "llm_enabled": True,
     }
 
@@ -289,6 +298,10 @@ def update_settings(req: SettingsUpdate):
             updates["AUTOBOT_LLM_PROVIDER"] = "openrouter"
     if req.openai_api_key:
         updates["OPENAI_API_KEY"] = req.openai_api_key
+    if req.google_api_key:
+        updates["GOOGLE_API_KEY"] = req.google_api_key
+        if not req.llm_provider:
+            updates["AUTOBOT_LLM_PROVIDER"] = "google"
 
     if updates:
         for key, val in updates.items():
@@ -400,9 +413,11 @@ def get_run(run_id: str):
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
     _ws_clients.add(websocket)
-    for line in list(_run_log):
+    # Replay existing log; use negative seq IDs so frontend ignores them
+    # as "historical" and doesn't duplicate with live broadcasts
+    for i, line in enumerate(list(_run_log)):
         try:
-            await websocket.send_text(line)
+            await websocket.send_text(f"h{i}|{line}")
         except Exception:
             break
     try:
