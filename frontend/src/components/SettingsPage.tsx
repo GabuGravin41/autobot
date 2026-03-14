@@ -1,12 +1,61 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
-    Shield, Zap, Palette, Sparkles, PlusCircle, CheckCircle2, Key, MousePointer2
+    Shield, Zap, Palette, Sparkles, PlusCircle, CheckCircle2, Key, MousePointer2,
+    Trash2, Save, Eye, EyeOff, Server, Globe, AlertCircle,
 } from 'lucide-react';
 import { BrowserMode, AdapterPolicy, LLMModel } from '../types';
-import { updateSettings, toggleAntiSleep, getStatus } from '../services/apiService';
+import { updateSettings, toggleAntiSleep, getStatus, getSettings, startTunnel, stopTunnel, getTunnelStatus } from '../services/apiService';
 
 type Theme = 'light' | 'dark';
+
+interface ProviderConfig {
+    id: string;
+    name: string;
+    description: string;
+    envKey: string;
+    baseUrl: string;
+    models: { id: string; name: string }[];
+}
+
+const PROVIDERS: ProviderConfig[] = [
+    {
+        id: 'google', name: 'Google Gemini', description: 'Free tier available. Best for vision + reasoning.',
+        envKey: 'GOOGLE_API_KEY', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+        models: [
+            { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash Preview' },
+            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
+            { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite (Free)' },
+            { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+        ],
+    },
+    {
+        id: 'openrouter', name: 'OpenRouter', description: 'Access 200+ models from one API key.',
+        envKey: 'OPENROUTER_API_KEY', baseUrl: 'https://openrouter.ai/api/v1',
+        models: [
+            { id: 'google/gemini-2.5-flash-preview', name: 'Gemini 2.5 Flash (via OR)' },
+            { id: 'deepseek/deepseek-chat-v3-0324', name: 'DeepSeek V3' },
+            { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
+            { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
+        ],
+    },
+    {
+        id: 'openai', name: 'OpenAI', description: 'GPT-4o and newer models.',
+        envKey: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1',
+        models: [
+            { id: 'gpt-4o', name: 'GPT-4o' },
+            { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+        ],
+    },
+    {
+        id: 'xai', name: 'xAI (Grok)', description: 'Grok models via x.ai API.',
+        envKey: 'XAI_API_KEY', baseUrl: 'https://api.x.ai/v1',
+        models: [
+            { id: 'grok-2-vision-1212', name: 'Grok 2 Vision' },
+            { id: 'grok-beta', name: 'Grok Beta' },
+        ],
+    },
+];
 
 interface SettingsPageProps {
     browserMode: BrowserMode;
@@ -25,17 +74,40 @@ export default function SettingsPage({
     browserMode, setBrowserMode, policy, setPolicy, theme, setTheme,
     models, setModels, selectedModelId, setSelectedModelId,
 }: SettingsPageProps) {
-    const [apiKey, setApiKey] = useState('');
-    const [isApiKeySaved, setIsApiKeySaved] = useState(false);
     const [antiSleepEnabled, setAntiSleepEnabled] = useState(false);
+    const [selectedProvider, setSelectedProvider] = useState('google');
+    const [modelInput, setModelInput] = useState('');
+    const [apiKeyInput, setApiKeyInput] = useState('');
+    const [showApiKey, setShowApiKey] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [saveSuccess, setSaveSuccess] = useState(false);
+    const [currentConfig, setCurrentConfig] = useState({ provider: '', model: '', hasKey: false });
+    const [customModels, setCustomModels] = useState<{ id: string; name: string }[]>([]);
+    const [tunnelActive, setTunnelActive] = useState(false);
+    const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
+    const [tunnelLoading, setTunnelLoading] = useState(false);
 
+    // Load current config from backend
     useEffect(() => {
-        getStatus().then(status => {
-            if (status.anti_sleep_enabled !== undefined) {
-                setAntiSleepEnabled(status.anti_sleep_enabled);
-            }
-        });
+        getTunnelStatus().then(t => {
+            setTunnelActive(t.active);
+            setTunnelUrl(t.url);
+        }).catch(() => {});
+        Promise.all([getStatus(), getSettings()]).then(([status, settings]) => {
+            if (status.anti_sleep_enabled !== undefined) setAntiSleepEnabled(status.anti_sleep_enabled);
+            setCurrentConfig({
+                provider: settings.llm_provider || 'google',
+                model: settings.llm_model || '',
+                hasKey: settings.has_google_key || settings.has_openrouter_key || settings.has_openai_key,
+            });
+            // Set initial provider from saved config
+            if (settings.llm_provider) setSelectedProvider(settings.llm_provider);
+            if (settings.llm_model) setModelInput(settings.llm_model);
+        }).catch(() => {});
     }, []);
+
+    const provider = PROVIDERS.find(p => p.id === selectedProvider) || PROVIDERS[0];
+    const allModels = [...provider.models, ...customModels];
 
     const handleToggleAntiSleep = async () => {
         try {
@@ -47,32 +119,40 @@ export default function SettingsPage({
         }
     };
 
-    const handleSaveApiKey = async () => {
-        if (!apiKey.trim()) return;
+    const handleSave = async () => {
+        if (!modelInput.trim()) {
+            alert('Please select or enter a model name.');
+            return;
+        }
+        setSaving(true);
+        setSaveSuccess(false);
         try {
-            const provider = selectedModelId.includes('gemini') ? 'gemini'
-                : selectedModelId.includes('deepseek') ? 'openrouter' : 'openai';
-            const updates: any = { llm_provider: provider, llm_model: selectedModelId };
-            if (provider === 'openrouter') updates.openrouter_api_key = apiKey;
-            if (provider === 'openai') updates.openai_api_key = apiKey;
+            const updates: Record<string, string> = {
+                llm_provider: selectedProvider,
+                llm_model: modelInput.trim(),
+            };
+            if (apiKeyInput.trim()) {
+                if (selectedProvider === 'google') updates.google_api_key = apiKeyInput.trim();
+                else if (selectedProvider === 'openrouter') updates.openrouter_api_key = apiKeyInput.trim();
+                else if (selectedProvider === 'openai') updates.openai_api_key = apiKeyInput.trim();
+            }
             await updateSettings(updates);
-            setIsApiKeySaved(true);
-            setApiKey('');
-            alert('Settings saved and LLM Brain updated.');
+            setSaveSuccess(true);
+            setApiKeyInput('');
+            setCurrentConfig({ provider: selectedProvider, model: modelInput, hasKey: true });
+            setTimeout(() => setSaveSuccess(false), 3000);
         } catch (e) {
-            alert('Failed to save settings: ' + (e instanceof Error ? e.message : 'Unknown error'));
+            alert('Failed to save: ' + (e instanceof Error ? e.message : 'Unknown'));
+        } finally {
+            setSaving(false);
         }
     };
 
-    const handleAddModel = () => {
-        const name = prompt('Enter model name:');
-        if (name) {
-            setModels(prev => [...prev, {
-                id: name.toLowerCase().replace(/\s+/g, '-'),
-                name,
-                provider: 'Custom',
-                isCustom: true,
-            }]);
+    const handleAddCustomModel = () => {
+        const name = prompt('Enter custom model ID (e.g., meta-llama/llama-3-70b):');
+        if (name?.trim()) {
+            setCustomModels(prev => [...prev, { id: name.trim(), name: name.trim() }]);
+            setModelInput(name.trim());
         }
     };
 
@@ -86,11 +166,157 @@ export default function SettingsPage({
         >
             <header>
                 <h2 className="text-4xl font-bold tracking-tight mb-2">System Settings</h2>
-                <p className="text-[var(--base-text-muted)]">Configure your Autobot instance and security preferences.</p>
+                <p className="text-[var(--base-text-muted)]">Configure your Autobot instance — LLM provider, API keys, and preferences.</p>
             </header>
 
+            {/* Current config banner */}
+            {currentConfig.model && (
+                <div className="glass-panel p-4 rounded-2xl border border-[var(--brand-primary)]/20 flex items-center gap-4">
+                    <div className="w-10 h-10 rounded-xl bg-[var(--brand-primary)]/20 flex items-center justify-center">
+                        <Server size={18} className="text-[var(--brand-primary)]" />
+                    </div>
+                    <div className="flex-1">
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">Active Configuration</div>
+                        <div className="text-sm font-bold">
+                            {currentConfig.provider.toUpperCase()} / {currentConfig.model}
+                            {currentConfig.hasKey && <span className="ml-2 text-emerald-400 text-[10px]">Key configured</span>}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Browser Mode */}
+                {/* LLM Provider & Model — Full width */}
+                <section className="glass-panel p-8 rounded-3xl space-y-6 md:col-span-2">
+                    <div className="flex items-center justify-between">
+                        <h3 className="text-xl font-bold flex items-center gap-2">
+                            <Sparkles size={20} className="text-[var(--brand-primary)]" /> AI Model Configuration
+                        </h3>
+                        {saveSuccess && (
+                            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
+                                <CheckCircle2 size={14} /> Saved
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        {/* Column 1: Provider selection */}
+                        <div className="space-y-3">
+                            <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">Provider</label>
+                            <div className="space-y-2">
+                                {PROVIDERS.map(p => (
+                                    <button
+                                        key={p.id}
+                                        onClick={() => {
+                                            setSelectedProvider(p.id);
+                                            setModelInput(p.models[0]?.id || '');
+                                        }}
+                                        className={`w-full p-3 rounded-xl border text-left transition-all ${selectedProvider === p.id
+                                            ? 'bg-[var(--brand-primary)]/10 border-[var(--brand-primary)]/50 text-[var(--brand-primary)]'
+                                            : 'bg-[var(--base-border)] border-[var(--base-border)] text-[var(--base-text-muted)] hover:border-[var(--base-text-muted)]/30'
+                                        }`}
+                                    >
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-sm font-bold">{p.name}</span>
+                                            {selectedProvider === p.id && <CheckCircle2 size={14} />}
+                                        </div>
+                                        <p className="text-[9px] opacity-60 mt-0.5">{p.description}</p>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Column 2: Model selection */}
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">Model</label>
+                                <button
+                                    onClick={handleAddCustomModel}
+                                    className="text-[9px] font-bold text-[var(--brand-primary)] uppercase tracking-widest hover:underline flex items-center gap-1"
+                                >
+                                    <PlusCircle size={10} /> Custom
+                                </button>
+                            </div>
+                            <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
+                                {allModels.map(m => (
+                                    <button
+                                        key={m.id}
+                                        onClick={() => setModelInput(m.id)}
+                                        className={`w-full p-3 rounded-xl border text-left transition-all ${modelInput === m.id
+                                            ? 'bg-[var(--brand-primary)]/10 border-[var(--brand-primary)]/50 text-[var(--brand-primary)]'
+                                            : 'bg-[var(--base-border)] border-[var(--base-border)] text-[var(--base-text-muted)] hover:border-[var(--base-text-muted)]/30'
+                                        }`}
+                                    >
+                                        <div className="text-sm font-bold">{m.name}</div>
+                                        <div className="text-[9px] opacity-50 font-mono">{m.id}</div>
+                                    </button>
+                                ))}
+                            </div>
+                            {/* Custom model ID input */}
+                            <div>
+                                <label className="text-[9px] font-bold text-[var(--base-text-muted)] uppercase tracking-widest mb-1 block">Or enter model ID directly</label>
+                                <input
+                                    type="text"
+                                    value={modelInput}
+                                    onChange={e => setModelInput(e.target.value)}
+                                    placeholder="e.g. gemini-2.5-flash-preview-05-20"
+                                    className="w-full bg-[var(--base-border)] border border-[var(--base-border)] rounded-xl py-2.5 px-4 text-sm font-mono focus:outline-none focus:border-brand-500/50"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Column 3: API Key + Save */}
+                        <div className="space-y-4">
+                            <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">API Key</label>
+                            <div className="p-5 rounded-2xl bg-[var(--base-border)] border border-[var(--base-border)] space-y-4">
+                                <div className="flex items-center gap-2 text-[var(--brand-primary)]">
+                                    <Key size={16} />
+                                    <span className="text-xs font-bold">{provider.name} API Key</span>
+                                </div>
+                                <p className="text-[9px] text-[var(--base-text-muted)] leading-relaxed">
+                                    Enter your API key for {provider.name}. It will be saved to the backend .env file.
+                                    {provider.id === 'google' && ' Get a free key at ai.google.dev.'}
+                                    {provider.id === 'openrouter' && ' Get a key at openrouter.ai.'}
+                                </p>
+                                <div className="relative">
+                                    <input
+                                        type={showApiKey ? 'text' : 'password'}
+                                        placeholder="Enter API key (leave blank to keep current)..."
+                                        value={apiKeyInput}
+                                        onChange={e => setApiKeyInput(e.target.value)}
+                                        className="w-full bg-[var(--base-bg)] border border-[var(--base-border)] rounded-xl py-2.5 pl-4 pr-10 text-sm font-mono focus:outline-none focus:border-brand-500/50"
+                                    />
+                                    <button
+                                        onClick={() => setShowApiKey(!showApiKey)}
+                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--base-text-muted)] hover:text-[var(--base-text)]"
+                                    >
+                                        {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                                    </button>
+                                </div>
+                                <div className="flex items-center gap-2 p-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                                    <AlertCircle size={12} className="text-amber-400 shrink-0" />
+                                    <span className="text-[9px] text-amber-400">Key is stored in .env on disk — not encrypted. Keep your machine secure.</span>
+                                </div>
+                            </div>
+
+                            <button
+                                onClick={handleSave}
+                                disabled={saving || !modelInput.trim()}
+                                className="w-full py-3 rounded-xl bg-[var(--brand-primary)] text-white text-xs font-bold uppercase tracking-widest hover:brightness-110 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                            >
+                                {saving ? (
+                                    <><span className="animate-spin">...</span> Saving</>
+                                ) : saveSuccess ? (
+                                    <><CheckCircle2 size={14} /> Saved!</>
+                                ) : (
+                                    <><Save size={14} /> Save Configuration</>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                {/* Security & Browser Mode */}
                 <section className="glass-panel p-8 rounded-3xl space-y-6">
                     <h3 className="text-xl font-bold flex items-center gap-2">
                         <Shield size={20} className="text-[var(--brand-primary)]" /> Security &amp; Policy
@@ -113,15 +339,8 @@ export default function SettingsPage({
                             <p className="text-[10px] leading-relaxed opacity-60">Uses your existing Chrome profile with real cookies and history.</p>
                         </button>
                     </div>
-                </section>
-
-                {/* Adapter Policy */}
-                <section className="glass-panel p-8 rounded-3xl space-y-6">
-                    <h3 className="text-xl font-bold flex items-center gap-2">
-                        <Shield size={20} className="text-[var(--brand-primary)]" /> Adapter Policy
-                    </h3>
                     <div>
-                        <label className="block text-xs font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-3">Policy Level</label>
+                        <label className="block text-xs font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-3">Adapter Policy</label>
                         <div className="grid grid-cols-3 gap-2">
                             {[AdapterPolicy.STRICT, AdapterPolicy.BALANCED, AdapterPolicy.TRUSTED].map(p => (
                                 <button
@@ -133,18 +352,10 @@ export default function SettingsPage({
                                 >{p}</button>
                             ))}
                         </div>
-                        <div className="mt-4 p-4 rounded-xl bg-[var(--brand-primary)]/20 border border-brand-500/10">
-                            <div className="flex items-center gap-2 mb-2"><Zap size={14} className="text-[var(--brand-primary)]" /><span className="text-xs font-bold text-[var(--brand-primary)]">Policy Impact</span></div>
-                            <p className="text-[10px] text-[var(--base-text-muted)] leading-relaxed">
-                                {policy === AdapterPolicy.STRICT && "All sensitive actions require manual confirmation."}
-                                {policy === AdapterPolicy.BALANCED && "Sensitive actions are allowed if they match the current plan context."}
-                                {policy === AdapterPolicy.TRUSTED && "No restrictions. Autobot will execute all actions autonomously."}
-                            </p>
-                        </div>
                     </div>
                 </section>
 
-                {/* Anti-Sleep Mode */}
+                {/* System Utilities + Remote Access */}
                 <section className="glass-panel p-8 rounded-3xl space-y-6">
                     <h3 className="text-xl font-bold flex items-center gap-2">
                         <MousePointer2 size={20} className="text-[var(--brand-primary)]" /> System Utilities
@@ -165,97 +376,76 @@ export default function SettingsPage({
                             />
                         </button>
                     </div>
-                </section>
 
-                {/* Theming */}
-                <section className="glass-panel p-8 rounded-3xl space-y-6 md:col-span-2">
-                    <h3 className="text-xl font-bold flex items-center gap-2">
-                        <Palette size={20} className="text-[var(--brand-primary)]" /> Appearance
-                    </h3>
-                    <div className="space-y-4">
-                        <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">Theme Mode</label>
+                    {/* Remote Access / Ngrok */}
+                    <div className="space-y-3">
+                        <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest flex items-center gap-2">
+                            <Globe size={12} /> Remote Monitoring
+                        </label>
+                        <div className="p-4 rounded-2xl bg-[var(--base-border)] border border-[var(--base-border)] space-y-3">
+                            <p className="text-[9px] text-[var(--base-text-muted)] leading-relaxed">
+                                Start an ngrok tunnel to monitor Autobot from your phone or any device over the internet.
+                            </p>
+                            {tunnelActive && tunnelUrl && (
+                                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                                    <div className="text-[9px] font-bold text-emerald-400 uppercase tracking-widest mb-1">Tunnel Active</div>
+                                    <a
+                                        href={tunnelUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-sm font-mono text-emerald-400 hover:underline break-all"
+                                    >
+                                        {tunnelUrl}
+                                    </a>
+                                </div>
+                            )}
+                            <button
+                                onClick={async () => {
+                                    setTunnelLoading(true);
+                                    try {
+                                        if (tunnelActive) {
+                                            await stopTunnel();
+                                            setTunnelActive(false);
+                                            setTunnelUrl(null);
+                                        } else {
+                                            const res = await startTunnel();
+                                            setTunnelActive(true);
+                                            setTunnelUrl(res.url);
+                                        }
+                                    } catch (e) {
+                                        alert((e instanceof Error ? e.message : 'Failed'));
+                                    } finally {
+                                        setTunnelLoading(false);
+                                    }
+                                }}
+                                disabled={tunnelLoading}
+                                className={`w-full py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${
+                                    tunnelActive
+                                        ? 'bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20'
+                                        : 'bg-[var(--brand-primary)]/10 border border-[var(--brand-primary)]/20 text-[var(--brand-primary)] hover:bg-[var(--brand-primary)]/20'
+                                }`}
+                            >
+                                {tunnelLoading ? '...' : tunnelActive ? 'Stop Tunnel' : 'Start Tunnel'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Appearance */}
+                    <div className="space-y-3">
+                        <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">Theme</label>
                         <div className="flex items-center gap-3">
                             {(['light', 'dark'] as Theme[]).map(t => (
                                 <button
                                     key={t}
                                     onClick={() => setTheme(t)}
-                                    className={`px-4 py-2 rounded-xl border transition-all flex items-center gap-2 group ${theme === t
+                                    className={`px-4 py-2 rounded-xl border transition-all flex items-center gap-2 ${theme === t
                                         ? 'bg-[var(--brand-primary)]/10 border-[var(--brand-primary)] text-[var(--brand-primary)]'
                                         : 'bg-[var(--base-border)] border-[var(--base-border)] hover:bg-[var(--base-border)] text-[var(--base-text-muted)]'}`}
                                 >
                                     <div className={`w-3 h-3 rounded-full border border-black/20 ${t === 'light' ? 'bg-white' : 'bg-[#0a0a0c]'}`} />
-                                    <span className="text-xs font-bold uppercase tracking-widest capitalize transition-colors">{t}</span>
+                                    <span className="text-xs font-bold uppercase tracking-widest capitalize">{t}</span>
                                 </button>
                             ))}
-                        </div>
-                    </div>
-                </section>
-
-                {/* AI Configuration */}
-                <section className="glass-panel p-8 rounded-3xl space-y-6 md:col-span-2">
-                    <div className="flex items-center justify-between">
-                        <h3 className="text-xl font-bold flex items-center gap-2">
-                            <Sparkles size={20} className="text-[var(--brand-primary)]" /> AI Configuration
-                        </h3>
-                        <button onClick={handleAddModel} className="btn-secondary py-2 px-4 text-[10px] uppercase tracking-widest flex items-center gap-2">
-                            <PlusCircle size={14} /> Add Model
-                        </button>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                        <div className="space-y-4">
-                            <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">Selected Model</label>
-                            <div className="space-y-2">
-                                {models.map(model => (
-                                    <button
-                                        key={model.id}
-                                        onClick={() => setSelectedModelId(model.id)}
-                                        className={`w-full p-4 rounded-2xl border text-left transition-all flex items-center justify-between ${selectedModelId === model.id
-                                            ? 'bg-[var(--brand-primary)]/20 border-brand-500 text-[var(--brand-primary)]'
-                                            : 'bg-[var(--base-border)] border-[var(--base-border)] hover:bg-[var(--base-border)]'}`}
-                                    >
-                                        <div>
-                                            <div className="text-sm font-bold">{model.name}</div>
-                                            <div className="text-[10px] opacity-60 uppercase tracking-widest">{model.provider}</div>
-                                        </div>
-                                        {selectedModelId === model.id && <CheckCircle2 size={16} />}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                        <div className="space-y-4">
-                            <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">API Authentication</label>
-                            <div className="glass-card p-6 rounded-2xl space-y-4">
-                                <div className="flex items-center gap-3 text-[var(--brand-primary)] mb-2">
-                                    <Key size={18} /><span className="text-sm font-bold">Secure Token Vault</span>
-                                </div>
-                                <p className="text-[10px] text-[var(--base-text-muted)] leading-relaxed">
-                                    Tokens are encrypted and stored in the secure backend vault.
-                                </p>
-                                <div className="relative">
-                                    <input
-                                        type="password"
-                                        placeholder={isApiKeySaved ? "••••••••••••••••" : "Enter API Token..."}
-                                        value={apiKey}
-                                        onChange={e => setApiKey(e.target.value)}
-                                        disabled={isApiKeySaved}
-                                        className="input-field pr-12"
-                                    />
-                                    {isApiKeySaved ? (
-                                        <div className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500"><CheckCircle2 size={18} /></div>
-                                    ) : (
-                                        <button
-                                            onClick={handleSaveApiKey}
-                                            disabled={!apiKey.trim()}
-                                            className="absolute right-2 top-1/2 -translate-y-1/2 btn-primary py-1.5 px-3 text-[10px] uppercase tracking-widest"
-                                        >Save</button>
-                                    )}
-                                </div>
-                                {isApiKeySaved && (
-                                    <button onClick={() => setIsApiKeySaved(false)} className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] hover:text-red-400 transition-colors">
-                                        Reset Token
-                                    </button>
-                                )}
-                            </div>
                         </div>
                     </div>
                 </section>

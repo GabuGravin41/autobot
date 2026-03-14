@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
     Terminal, Play, CheckCircle2, AlertCircle, Activity, Zap, Monitor,
     Download, PlusCircle, Search, ChevronRight, FileText, Mail,
+    Maximize2, Minimize2, X, Move,
 } from 'lucide-react';
 import { RunHistory } from '../types';
 import { BackendStatus, BackendAdapter, getBrowserScreenshotUrl } from '../services/apiService';
@@ -30,6 +31,23 @@ export default function DashboardPage({
     onSelectRun, onSelectArtifact, scheduledTasks, onCancelTask,
 }: DashboardPageProps) {
     const navigate = useNavigate();
+    const [isScreenPopout, setIsScreenPopout] = useState(false);
+    const [popoutPos, setPopoutPos] = useState({ x: 100, y: 100 });
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+    const [popoutSize, setPopoutSize] = useState<'medium' | 'large'>('medium');
+
+    const handleDragStart = (e: React.MouseEvent) => {
+        setIsDragging(true);
+        setDragOffset({ x: e.clientX - popoutPos.x, y: e.clientY - popoutPos.y });
+    };
+
+    const handleDrag = (e: React.MouseEvent) => {
+        if (!isDragging) return;
+        setPopoutPos({ x: e.clientX - dragOffset.x, y: e.clientY - dragOffset.y });
+    };
+
+    const handleDragEnd = () => setIsDragging(false);
 
     const runArtifacts = activeRun?.artifacts ? Object.entries(activeRun.artifacts).map(([k, v]) => ({
         id: k,
@@ -47,6 +65,32 @@ export default function DashboardPage({
             exit={{ opacity: 0, y: -20 }}
             className="space-y-8"
         >
+            {/* Auth notification banner */}
+            {backendStatus?.auth_notification && (
+                <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="glass-panel p-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 flex items-center gap-4"
+                >
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center shrink-0">
+                        <span className="text-xl">🔐</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <div className="text-xs font-bold uppercase tracking-widest text-amber-400 mb-0.5">Login Detected</div>
+                        <p className="text-sm text-[var(--base-text-muted)] truncate">{backendStatus.auth_notification.message}</p>
+                        <p className="text-[10px] text-amber-400/60 font-mono mt-1">{backendStatus.auth_notification.url}</p>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                        <button
+                            onClick={onRefreshScreenshot}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-400 text-[10px] font-bold uppercase tracking-widest hover:bg-amber-500/30 transition-colors"
+                        >
+                            View Screen
+                        </button>
+                    </div>
+                </motion.div>
+            )}
+
             {/* Active run card */}
             {activeRun && (
                 <motion.div
@@ -136,7 +180,11 @@ export default function DashboardPage({
                                             </button>
                                         </div>
                                         {screenshotUrl ? (
-                                            <div className="relative aspect-video rounded-2xl overflow-hidden border border-[var(--base-border)]">
+                                            <div
+                                                className="relative aspect-video rounded-2xl overflow-hidden border border-[var(--base-border)] cursor-pointer group/screen"
+                                                onClick={() => setIsScreenPopout(true)}
+                                                title="Click to pop out"
+                                            >
                                                 <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
                                                     onError={(e) => (e.currentTarget.style.display = 'none')} />
                                                 {backendStatus?.browser?.active && (
@@ -145,6 +193,9 @@ export default function DashboardPage({
                                                         <span className="text-[8px] font-bold text-[var(--base-text)] tracking-widest uppercase">Live</span>
                                                     </div>
                                                 )}
+                                                <div className="absolute inset-0 bg-black/0 group-hover/screen:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover/screen:opacity-100">
+                                                    <Maximize2 size={24} className="text-white drop-shadow-lg" />
+                                                </div>
                                             </div>
                                         ) : (
                                             <div className="aspect-video rounded-2xl border border-dashed border-[var(--base-border)] flex items-center justify-center text-[var(--base-text-muted)] text-sm">
@@ -327,13 +378,25 @@ export default function DashboardPage({
                         <div className="glass-panel p-4 rounded-3xl border-[var(--base-border)]">
                             <div className="flex items-center justify-between gap-2 mb-3">
                                 <h3 className="text-sm font-bold tracking-tight flex items-center gap-2"><Monitor size={14} /> Screen</h3>
-                                <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-[var(--brand-primary)]/20 hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors">
-                                    Refresh
-                                </button>
+                                <div className="flex items-center gap-2">
+                                    <button onClick={() => setIsScreenPopout(true)} className="px-2 py-1 rounded-lg bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors" title="Pop out">
+                                        <Maximize2 size={12} />
+                                    </button>
+                                    <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-[var(--brand-primary)]/20 hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors">
+                                        Refresh
+                                    </button>
+                                </div>
                             </div>
-                            <div className="relative aspect-video rounded-xl overflow-hidden border border-[var(--base-border)]">
+                            <div
+                                className="relative aspect-video rounded-xl overflow-hidden border border-[var(--base-border)] cursor-pointer group/sidebar-screen"
+                                onClick={() => setIsScreenPopout(true)}
+                                title="Click to pop out"
+                            >
                                 <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
                                     onError={(e) => (e.currentTarget.style.display = 'none')} />
+                                <div className="absolute inset-0 bg-black/0 group-hover/sidebar-screen:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover/sidebar-screen:opacity-100">
+                                    <Maximize2 size={20} className="text-white drop-shadow-lg" />
+                                </div>
                             </div>
                         </div>
                     )}
@@ -363,6 +426,76 @@ export default function DashboardPage({
                     </div>
                 </div>
             </div>
+            {/* Floating pop-out screen viewer */}
+            <AnimatePresence>
+                {isScreenPopout && screenshotUrl && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        className="fixed z-[200] shadow-2xl shadow-black/50 rounded-2xl overflow-hidden border border-[var(--base-border)] bg-[var(--base-bg)]"
+                        style={{
+                            left: popoutPos.x,
+                            top: popoutPos.y,
+                            width: popoutSize === 'large' ? '80vw' : '50vw',
+                            maxWidth: popoutSize === 'large' ? '1200px' : '800px',
+                        }}
+                        onMouseMove={handleDrag}
+                        onMouseUp={handleDragEnd}
+                        onMouseLeave={handleDragEnd}
+                    >
+                        {/* Title bar — draggable */}
+                        <div
+                            className="flex items-center justify-between px-4 py-2 bg-[var(--base-border)] cursor-move select-none"
+                            onMouseDown={handleDragStart}
+                        >
+                            <div className="flex items-center gap-2">
+                                <Move size={14} className="text-[var(--base-text-muted)]" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
+                                    Live Screen Preview
+                                </span>
+                                {backendStatus?.browser?.active && (
+                                    <div className="flex items-center gap-1.5 ml-2">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                                        <span className="text-[8px] font-bold text-red-400 tracking-widest uppercase">Live</span>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={onRefreshScreenshot}
+                                    className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[9px] font-bold uppercase tracking-wider transition-colors"
+                                >
+                                    Refresh
+                                </button>
+                                <button
+                                    onClick={() => setPopoutSize(s => s === 'medium' ? 'large' : 'medium')}
+                                    className="p-1.5 rounded hover:bg-[var(--brand-primary)]/20 transition-colors"
+                                    title={popoutSize === 'medium' ? 'Enlarge' : 'Shrink'}
+                                >
+                                    {popoutSize === 'medium' ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+                                </button>
+                                <button
+                                    onClick={() => setIsScreenPopout(false)}
+                                    className="p-1.5 rounded hover:bg-red-500/20 text-red-400 transition-colors"
+                                    title="Close"
+                                >
+                                    <X size={14} />
+                                </button>
+                            </div>
+                        </div>
+                        {/* Screenshot */}
+                        <div className="relative">
+                            <img
+                                src={screenshotUrl}
+                                alt="Live screen"
+                                className="w-full h-auto"
+                                onError={(e) => (e.currentTarget.style.display = 'none')}
+                            />
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </motion.div>
     );
 }

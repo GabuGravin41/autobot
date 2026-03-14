@@ -13,26 +13,36 @@ Usage:
 from __future__ import annotations
 
 import logging
+import platform
 import time
 from typing import Any, Dict, List, Optional
 
-import uiautomation as auto
-
 logger = logging.getLogger(__name__)
 
-# Elements we consider "interactive" in the native OS
-INTERACTIVE_CONTROL_TYPES = {
-    auto.ControlType.ButtonControl,
-    auto.ControlType.EditControl,
-    auto.ControlType.ListItemControl,
-    auto.ControlType.MenuItemControl,
-    auto.ControlType.CheckBoxControl,
-    auto.ControlType.RadioButtonControl,
-    auto.ControlType.ComboBoxControl,
-    auto.ControlType.HyperlinkControl,
-    auto.ControlType.TabItemControl,
-    auto.ControlType.TreeItemControl,
-}
+# uiautomation is Windows-only (COM/UIA). Guard the import so Linux doesn't crash.
+_IS_WINDOWS = platform.system() == "Windows"
+auto = None  # type: ignore
+INTERACTIVE_CONTROL_TYPES: set = set()
+
+if _IS_WINDOWS:
+    try:
+        import uiautomation as auto  # type: ignore
+        INTERACTIVE_CONTROL_TYPES = {
+            auto.ControlType.ButtonControl,
+            auto.ControlType.EditControl,
+            auto.ControlType.ListItemControl,
+            auto.ControlType.MenuItemControl,
+            auto.ControlType.CheckBoxControl,
+            auto.ControlType.RadioButtonControl,
+            auto.ControlType.ComboBoxControl,
+            auto.ControlType.HyperlinkControl,
+            auto.ControlType.TabItemControl,
+            auto.ControlType.TreeItemControl,
+        }
+    except ImportError:
+        logger.warning("uiautomation not available — native extraction disabled")
+else:
+    logger.debug("Native extraction (UIA) is Windows-only — skipped on %s", platform.system())
 
 class NativeElementNode:
     def __init__(
@@ -69,9 +79,9 @@ class NativeExtractionService:
 
     def __init__(self):
         self._index_counter = 1
-        self._selector_map: Dict[int, auto.Control] = {}
-        # Set uiautomation defaults
-        auto.uiautomation.SetGlobalSearchTimeout(1.0)
+        self._selector_map: Dict[int, Any] = {}
+        if _IS_WINDOWS and auto is not None:
+            auto.uiautomation.SetGlobalSearchTimeout(1.0)
 
     def extract_active_window(self) -> str:
         """
@@ -80,6 +90,9 @@ class NativeExtractionService:
         """
         self._index_counter = 1
         self._selector_map = {}
+
+        if not _IS_WINDOWS or auto is None:
+            return "Native extraction is only available on Windows."
 
         try:
             window = auto.GetForegroundWindow()

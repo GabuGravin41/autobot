@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from autobot.agent.loop import AgentLoop
+from autobot.agent.mission_agent import MissionAgent
 from autobot.browser.launcher import AsyncBrowserLauncher
 
 logger = logging.getLogger(__name__)
@@ -37,7 +40,7 @@ class AgentRunner:
         browser_launcher: AsyncBrowserLauncher | None = None,
         llm_client: Any | None = None,
         model: str = "gpt-4o",
-        max_steps: int = 25,
+        max_steps: int = 100,
         use_vision: bool = True,
         log_callback: Callable[[str], None] | None = None,
     ):
@@ -55,6 +58,7 @@ class AgentRunner:
         self.current_goal: str = ""
         self.result: str = ""
         self._agent_loop: AgentLoop | None = None
+        self._mission_agent: MissionAgent | None = None
         self._max_steps_override: int | None = None
 
     @classmethod
@@ -112,7 +116,16 @@ class AgentRunner:
             page = await self.browser_launcher.start()
             self.log("✅ Human Mode active. Operating in your real Chrome profile.")
 
-            # 3. Create and run agent loop
+            # 3. Create run directory for checkpoints and artifacts
+            runs_dir = Path("runs")
+            runs_dir.mkdir(exist_ok=True)
+            run_dir = runs_dir / f"plan_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+            run_dir.mkdir(exist_ok=True)
+            (run_dir / "screenshots").mkdir(exist_ok=True)
+            # Save task description
+            (run_dir / "about.txt").write_text(f"Goal: {goal}\nModel: {self.model}\nMax Steps: {steps}\n")
+
+            # 4. Create and run agent loop
             self.status = "running"
             self.current_step = 1
             self._agent_loop = AgentLoop(
@@ -123,6 +136,7 @@ class AgentRunner:
                 max_steps=steps,
                 use_vision=self.use_vision,
             )
+            self._agent_loop._run_dir = run_dir  # Enable checkpointing
 
             # Hook into the agent loop to track progress
             original_execute_step = self._agent_loop._execute_step
@@ -141,13 +155,18 @@ class AgentRunner:
                 if self._agent_loop.history:
                     last = self._agent_loop.history[-1]
                     ao = last.agent_output
+                    confidence = getattr(ao, 'confidence', 'high')
+                    conf_icon = "🟢" if confidence == "high" else "🟡" if confidence == "medium" else "🔴"
                     self.log(f"  🧠 Thinking: {ao.thinking[:120]}...")
                     self.log(f"  💭 Goal: {ao.next_goal}")
+                    self.log(f"  {conf_icon} Confidence: {confidence}")
                     if ao.memory:
                         self.log(f"  📝 Memory: {ao.memory[:100]}")
+                    # Show retry tracking
+                    if self._agent_loop._consecutive_failures >= 2:
+                        self.log(f"  🔄 Retry alert: {self._agent_loop._consecutive_failures} consecutive failures")
                     for action, ar in zip(ao.action, last.action_results):
                         icon = "✅" if ar.success else "❌"
-                        # Show the actual action details
                         detail = ar.action_name
                         if action.computer_call:
                             detail = action.computer_call.call
@@ -227,17 +246,87 @@ class AgentRunner:
             self.log(f"⚠️  LLM pre-flight FAILED: {e}")
             return False
 
+    async def run_mission(self, goal: str) -> str:
+        """
+        Run a complex multi-objective mission.
+
+        Uses MissionAgent to break the goal into objectives and execute each one.
+        Best for tasks like: Kaggle competitions, research workflows, multi-app coding.
+        """
+        self.status = "starting"
+        self.current_goal = goal
+        self.current_step = 0
+
+        self.log(f"🚀 Starting Mission: {goal}")
+
+        try:
+            if self.llm_client is None:
+                self.llm_client = _create_llm_client()
+                if self.llm_client is None:
+                    raise RuntimeError("No LLM API key found.")
+
+            # Launch browser
+            self.log("Initializing Human Mode (Vision-Only)...")
+            page = await self.browser_launcher.start()
+            self.log("✅ Human Mode active.")
+
+            # Create run directory
+            runs_dir = Path("runs")
+            runs_dir.mkdir(exist_ok=True)
+            run_dir = runs_dir / f"mission_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+            run_dir.mkdir(exist_ok=True)
+            (run_dir / "about.txt").write_text(f"Mission: {goal}\nModel: {self.model}\n")
+
+            self.status = "running"
+            self._mission_agent = MissionAgent(
+                page=page,
+                llm_client=self.llm_client,
+                mission_goal=goal,
+                model=self.model,
+                log_callback=self.log,
+            )
+            self._mission_agent._run_dir = run_dir
+
+            result = await self._mission_agent.run()
+
+            # Track the current agent loop for screenshots
+            if self._mission_agent.current_agent_loop:
+                self._agent_loop = self._mission_agent.current_agent_loop
+
+            self.status = "done"
+            self.result = result
+            self.log(f"🏁 Mission finished: {result[:200]}")
+            return result
+
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.status = "failed"
+            self.result = f"Error: {e}\n\n{tb}"
+            self.log(f"❌ Mission failed: {e}")
+            raise
+        finally:
+            try:
+                await self.browser_launcher.stop()
+            except Exception:
+                pass
+
     def cancel(self) -> None:
         """Cancel the running task."""
         self.status = "cancelled"
         if self._agent_loop:
-            # Set max_steps to 0 to stop the loop
             self._agent_loop.max_steps = 0
+        # Also cancel mission agent's current loop
+        if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
+            self._mission_agent.current_agent_loop.max_steps = 0
         self.log("⚠️ Task cancelled")
 
     @property
     def last_screenshot_path(self) -> str | None:
         """Get the last screenshot path from the current agent loop."""
+        # Check mission agent's current loop first
+        if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
+            return self._mission_agent.current_agent_loop.last_screenshot_path
         if self._agent_loop:
             return self._agent_loop.last_screenshot_path
         return getattr(self, "_last_screenshot_path_fallback", None)
@@ -248,7 +337,12 @@ class AgentRunner:
 
     def get_status(self) -> dict[str, Any]:
         """Get current runner status for the dashboard API."""
-        return {
+        # Determine the active agent loop (could be from mission agent)
+        active_loop = self._agent_loop
+        if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
+            active_loop = self._mission_agent.current_agent_loop
+
+        status = {
             "status": self.status,
             "goal": self.current_goal,
             "current_step": self.current_step,
@@ -256,9 +350,16 @@ class AgentRunner:
             "result": self.result[:500] if self.result else "",
             "history": [
                 entry.to_history_text()
-                for entry in (self._agent_loop.history if self._agent_loop else [])
-            ][-5:],  # Last 5 steps
+                for entry in (active_loop.history if active_loop else [])
+            ][-10:],  # Last 10 steps
         }
+        # Include auth notification if agent detected a login page
+        if active_loop and active_loop.pending_auth:
+            status["auth_notification"] = active_loop.pending_auth
+        # Include mission status if running a mission
+        if hasattr(self, '_mission_agent') and self._mission_agent:
+            status["mission"] = self._mission_agent.get_status()
+        return status
 
 
 def _create_llm_client() -> Any | None:

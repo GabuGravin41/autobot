@@ -167,14 +167,19 @@ export default function App() {
     if (!chatInput.trim() || isGenerating) return;
     const userMsg = chatInput.trim();
     setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    const updatedMessages = [...chatMessages, { role: 'user' as const, content: userMsg }];
+    setChatMessages(updatedMessages);
     setIsGenerating(true);
     try {
+      // Build history from previous messages (skip the initial bot greeting)
+      const history = updatedMessages
+        .filter((m, i) => !(i === 0 && m.role === 'bot'))
+        .map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.content }));
 
       const { reply, plan } = await sendChat(userMsg, {
         browser_mode: backendStatus?.browser?.mode,
         llm_enabled: backendStatus?.llm_enabled,
-      });
+      }, history);
       setChatMessages(prev => [...prev, { role: 'bot', content: reply, plan: plan ? { id: plan.id, name: plan.name, description: plan.description, steps: plan.steps } : undefined }]);
     } catch (error) {
       setChatMessages(prev => [...prev, { role: 'bot', content: `Sorry, I couldn't reach the Autobot backend. Error: ${error instanceof Error ? error.message : 'Unknown'}` }]);
@@ -281,6 +286,10 @@ export default function App() {
                   isGenerating={isGenerating} onSend={handleSendMessage}
                   onExecutePlan={executePlan}
                   showReasoning={showReasoning} setShowReasoning={setShowReasoning}
+                  onClearChat={() => {
+                    setChatMessages([{ role: 'bot', content: 'Hello! I am Autobot. Tell me what you\'d like to automate and I\'ll help you plan it. I may ask a few questions to make sure I understand exactly what you need.' }]);
+                    setChatInput('');
+                  }}
                 />
               } />
               <Route path="/workflows" element={

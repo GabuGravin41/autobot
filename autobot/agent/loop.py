@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 from autobot.agent.models import (
@@ -82,7 +84,7 @@ class AgentLoop:
         llm_client: Any,  # OpenAI-compatible client
         goal: str,
         model: str = "gpt-4o",
-        max_steps: int = 25,
+        max_steps: int = 100,
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         custom_instructions: str | None = None,
@@ -91,7 +93,8 @@ class AgentLoop:
         self.llm_client = llm_client
         self.goal = goal
         self.model = model
-        self.max_steps = max_steps
+        # Allow env override: AUTOBOT_MAX_STEPS=200 for very long tasks
+        self.max_steps = int(os.getenv("AUTOBOT_MAX_STEPS", str(max_steps)))
         self.max_actions_per_step = max_actions_per_step
         self.use_vision = use_vision
         self.custom_instructions = custom_instructions
@@ -100,6 +103,21 @@ class AgentLoop:
         self.step_number = 0
         self.history: list[StepHistoryEntry] = []
         self.previous_dom_state: DOMSerializedState | None = None
+
+        # Scratchpad: persistent notes that accumulate across the entire run
+        # The agent writes findings, phase progress, and key info here
+        self.scratchpad: list[str] = []
+
+        # Retry tracking: counts consecutive failures on the same goal
+        self._consecutive_failures = 0
+        self._last_goal = ""
+
+        # Authentication tracking: detected login pages
+        self.pending_auth: dict | None = None  # {url, type, message}
+
+        # Checkpointing: save progress periodically so runs survive crashes
+        self._checkpoint_interval = int(os.getenv("AUTOBOT_CHECKPOINT_INTERVAL", "5"))
+        self._run_dir: Path | None = None  # Set by runner if available
 
         # Computer API for OS-level tools
         self.computer = Computer()
@@ -124,6 +142,33 @@ class AgentLoop:
             "last_screenshot_path": self.last_screenshot_path,
         }
 
+    def _save_checkpoint(self):
+        """Save current progress to disk so the run survives crashes."""
+        if not self._run_dir:
+            return
+        try:
+            checkpoint = {
+                "step_number": self.step_number,
+                "goal": self.goal,
+                "scratchpad": self.scratchpad,
+                "consecutive_failures": self._consecutive_failures,
+                "last_goal": self._last_goal,
+                "history_count": len(self.history),
+                "history_summary": [
+                    {
+                        "step": e.step_number,
+                        "goal": e.agent_output.next_goal,
+                        "actions": [a.model_dump() for a in e.agent_output.action],
+                        "results": [r.extracted_content or "" for r in e.action_results],
+                    }
+                    for e in self.history[-20:]  # Last 20 steps
+                ],
+            }
+            checkpoint_path = self._run_dir / "checkpoint.json"
+            checkpoint_path.write_text(json.dumps(checkpoint, indent=2, default=str))
+        except Exception as e:
+            logger.debug(f"Checkpoint save failed (non-fatal): {e}")
+
     async def run(self) -> str:
         """
         Run the agent loop until completion or max_steps.
@@ -140,9 +185,14 @@ class AgentLoop:
                 if result is not None:
                     # Agent called "done" — task is complete
                     logger.info(f"✅ Agent finished at step {self.step_number + 1}: {result}")
+                    self._save_checkpoint()  # Final checkpoint
                     return result
 
                 self.step_number += 1
+
+                # Periodic checkpoint every N steps
+                if self.step_number % self._checkpoint_interval == 0:
+                    self._save_checkpoint()
 
             except Exception as e:
                 logger.error(f"❌ Step {self.step_number + 1} failed: {e}")
@@ -151,6 +201,7 @@ class AgentLoop:
 
         # Hit max steps without completing
         logger.warning(f"⚠️ Agent hit max steps ({self.max_steps}) without completing")
+        self._save_checkpoint()  # Save what we have
         return self._summarize_history()
 
     async def _execute_step(self) -> str | None:
@@ -275,7 +326,7 @@ class AgentLoop:
             browser_state,
         )
 
-        # ─── 4. RECORD ───
+        # ─── 4. RECORD + REACTIVE TRACKING ───
         url_after = self.page.url
         entry = StepHistoryEntry(
             step_number=self.step_number,
@@ -285,6 +336,41 @@ class AgentLoop:
             url_after=url_after,
         )
         self.history.append(entry)
+
+        # Track consecutive failures for adaptive retry
+        any_failed = any(not r.success for r in action_results)
+        current_goal = agent_output.next_goal.strip().lower()[:50]
+
+        if any_failed and current_goal == self._last_goal:
+            self._consecutive_failures += 1
+            logger.warning(f"Consecutive failure #{self._consecutive_failures} on goal: {current_goal}")
+        elif any_failed:
+            self._consecutive_failures = 1
+        else:
+            self._consecutive_failures = 0
+        self._last_goal = current_goal
+
+        # Accumulate scratchpad from agent's memory (capture key findings)
+        if agent_output.memory and len(agent_output.memory) > 20:
+            # Only save substantive memory entries (not just "retry" notes)
+            if not any(kw in agent_output.memory.lower() for kw in ("retry", "attempt", "trying again")):
+                self.scratchpad.append(f"[Step {self.step_number + 1}] {agent_output.memory}")
+                # Keep scratchpad manageable
+                if len(self.scratchpad) > 20:
+                    self.scratchpad = self.scratchpad[-15:]
+
+        # Detect login/auth situations from agent's output
+        thinking_lower = agent_output.thinking.lower()
+        confidence = getattr(agent_output, 'confidence', 'high')
+        auth_keywords = ("login", "log in", "sign in", "signin", "authentication", "password", "credentials")
+        if any(kw in thinking_lower for kw in auth_keywords) and confidence in ("low", "medium"):
+            self.pending_auth = {
+                "url": url_after,
+                "type": "login_detected",
+                "message": f"Login page detected at {url_after}. Agent confidence: {confidence}. "
+                           f"Agent says: {agent_output.thinking[:200]}",
+            }
+            logger.info(f"🔐 Authentication detected at {url_after}")
 
         step_time = time.time() - step_start
         logger.debug(f"Step {self.step_number + 1} completed in {step_time:.1f}s")
@@ -339,7 +425,7 @@ class AgentLoop:
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
-            "max_tokens": 2048,   # Cap output — agent JSON fits in 2K; prevents 402 on low-credit accounts
+            "max_tokens": 4096,   # Agent needs room for detailed thinking + coordinate reasoning
             "response_format": {"type": "json_object"},
         }
 
@@ -851,7 +937,7 @@ class AgentLoop:
         module = getattr(self.computer, module_name, None)
         if module is None:
             raise ValueError(f"Unknown computer module '{module_name}'. "
-                             f"Available: mouse, keyboard, clipboard, display")
+                             f"Available: mouse, keyboard, clipboard, display, kaggle, anti_sleep")
 
         method = getattr(module, method_name, None)
         if method is None:
@@ -879,11 +965,32 @@ class AgentLoop:
             return ""
 
         lines = []
-        for entry in self.history[-5:]:  # Last 5 steps to keep context manageable
+
+        # Include accumulated scratchpad (persistent context across the run)
+        if self.scratchpad:
+            lines.append("=== SCRATCHPAD (accumulated findings) ===")
+            for note in self.scratchpad[-15:]:  # Last 15 entries
+                lines.append(f"  {note}")
+            lines.append("=== END SCRATCHPAD ===\n")
+
+        # Include failure tracking context
+        if self._consecutive_failures >= 2:
+            lines.append(
+                f"\n> [!RETRY ALERT] You have FAILED {self._consecutive_failures} times "
+                f"on the same goal. You MUST try a DIFFERENT approach now.\n"
+                f"> Strategies to try: different coordinates, keyboard shortcut instead of "
+                f"click, scroll to reveal element, navigate to a different page, or skip "
+                f"this sub-task and move on.\n"
+            )
+
+        for entry in self.history[-15:]:  # Last 15 steps for complex multi-phase tasks
             text = entry.to_history_text()
             # Include the agent's memory to help track conversation state
             if entry.agent_output.memory:
                 text += f"\n  Memory: {entry.agent_output.memory}"
+            # Include confidence to track agent's self-assessment
+            if hasattr(entry.agent_output, 'confidence') and entry.agent_output.confidence != "high":
+                text += f"\n  Confidence: {entry.agent_output.confidence}"
             lines.append(text)
 
         # --- Stall / Loop Detection (two strategies) ---

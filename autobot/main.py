@@ -2,14 +2,24 @@ import os
 import sys
 from pathlib import Path
 
-# Load .env from project root so AUTOBOT_* and XAI_API_KEY etc. are set before UI/engine start
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-if _env_path.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_env_path)
-    except ImportError:
-        print("Warning: python-dotenv not found. Environment variables from .env might not be loaded.")
+# Support PyInstaller bundled app: sys._MEIPASS points to the temp extraction dir
+_bundle_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent.parent))
+
+# Load .env: check CWD first (user's custom .env), then bundle default
+_env_candidates = [
+    Path.cwd() / ".env",                       # User's working directory
+    Path(__file__).resolve().parent.parent / ".env",  # Development layout
+    _bundle_dir / ".env_default" / ".env",      # PyInstaller bundle
+]
+for _env_path in _env_candidates:
+    if _env_path.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(_env_path)
+            break
+        except ImportError:
+            print("Warning: python-dotenv not found. Environment variables from .env might not be loaded.")
+            break
 
 try:
     import uvicorn
@@ -23,10 +33,13 @@ def main() -> None:
     # from .ui import launch_ui
     # launch_ui()
     
-    print("Starting Autobot Web Server on http://127.0.0.1:8000")
+    host = os.getenv("AUTOBOT_HOST", "0.0.0.0")
+    port = int(os.getenv("AUTOBOT_PORT", "8000"))
+    print(f"Starting Autobot Web Server on http://{host}:{port}")
+    print(f"  Local:   http://127.0.0.1:{port}")
+    print(f"  Network: http://0.0.0.0:{port} (accessible from other devices on same network)")
     try:
-        # Disable reload for stability (prevents double-process ghosts on Windows)
-        uvicorn.run("autobot.web.app:app", host="127.0.0.1", port=8000, reload=False)
+        uvicorn.run("autobot.web.app:app", host=host, port=port, reload=False)
     except Exception as e:
         print(f"Failed to start server: {e}")
         sys.exit(1)

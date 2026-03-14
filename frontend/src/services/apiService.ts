@@ -32,6 +32,12 @@ export interface HumanInputPending {
     key: string;
 }
 
+export interface AuthNotification {
+    url: string;
+    type: string;
+    message: string;
+}
+
 export interface BackendStatus {
     status: string;
     run_status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -43,6 +49,7 @@ export interface BackendStatus {
     llm_model: string;
     human_input_pending?: HumanInputPending | null;
     anti_sleep_enabled?: boolean;
+    auth_notification?: AuthNotification | null;
 }
 
 export const getStatus = (): Promise<BackendStatus> =>
@@ -140,6 +147,14 @@ export const getAutonomousStatus = (): Promise<AutonomousStatus> =>
 export const cancelAutonomous = (): Promise<{ status: string }> =>
     apiFetch('/api/agent/cancel', { method: 'POST' });
 
+// ── Mission Mode (Multi-Objective Tasks) ─────────────────────────────────────
+/** Start a multi-objective mission. Best for complex tasks like Kaggle competitions, research, multi-app coding. */
+export const runMission = (goal: string): Promise<{ run_id: string; status: string; goal: string; mode: string }> =>
+    apiFetch('/api/mission/run', {
+        method: 'POST',
+        body: JSON.stringify({ goal }),
+    });
+
 // ── AI Chat ─────────────────────────────────────────────────────────────────
 export interface ChatResponse {
     reply: string;
@@ -148,13 +163,16 @@ export interface ChatResponse {
 
 /**
  * Send a chat message to the Autobot AI planner.
- * The backend routes this through LLMBrain (DeepSeek/OpenRouter) or 
- * falls back to text-based planning.
+ * Supports multi-turn conversation by passing message history.
  */
-export const sendChat = (message: string, state?: Record<string, any>): Promise<ChatResponse> =>
+export const sendChat = (
+    message: string,
+    state?: Record<string, any>,
+    history?: Array<{ role: string; content: string }>,
+): Promise<ChatResponse> =>
     apiFetch('/api/chat', {
         method: 'POST',
-        body: JSON.stringify({ message, state: state || {} }),
+        body: JSON.stringify({ message, state: state || {}, history: history || [] }),
     });
 
 // Alias for compatibility with any code that imported generatePlan
@@ -319,6 +337,16 @@ export const addTask = (goal: string): Promise<{ status: string; task_id: string
 
 export const cancelTask = (taskId: string): Promise<{ status: string; task_id: string }> =>
     apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+
+// ── Tunnel ──────────────────────────────────────────────────────────────────
+export const startTunnel = (): Promise<{ status: string; url: string }> =>
+    apiFetch('/api/tunnel/start', { method: 'POST' });
+
+export const stopTunnel = (): Promise<{ status: string }> =>
+    apiFetch('/api/tunnel/stop', { method: 'POST' });
+
+export const getTunnelStatus = (): Promise<{ active: boolean; url: string | null }> =>
+    apiFetch('/api/tunnel/status');
 
 // ── Browser Utils ──────────────────────────────────────────────────────────
 export const getBrowserScreenshotUrl = (): string =>

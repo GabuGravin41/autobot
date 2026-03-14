@@ -174,18 +174,25 @@ class AgentOutput(BaseModel):
     Forces the LLM to think, evaluate, remember, plan, then act.
     """
     thinking: str = Field(
-        description="Step-by-step reasoning about current state and what to do."
+        description="Step-by-step reasoning about current state and what to do. "
+                    "If something failed, explain WHY and what you'll try differently."
     )
     evaluation_previous_goal: str = Field(
         default="",
-        description="One sentence: did the last action succeed or fail?"
+        description="One sentence: did the last action succeed or fail? What did you observe?"
     )
     memory: str = Field(
         default="",
-        description="1-3 sentences of key facts to remember for future steps."
+        description="Key facts to remember. Track sub-task phases: 'Phase 1 (DONE) → Phase 2 (IN PROGRESS)'. "
+                    "Track retry counts: 'Attempt 2/3 for clicking New Project button'."
     )
     next_goal: str = Field(
         description="One clear sentence: what you will do next and why."
+    )
+    confidence: str = Field(
+        default="high",
+        description="How confident are you this action will succeed? 'high', 'medium', or 'low'. "
+                    "Set to 'low' when unsure which element to target or after repeated failures."
     )
     action: list[ActionModel] = Field(
         description="List of actions to execute sequentially."

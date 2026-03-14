@@ -97,11 +97,12 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
 
-# Allow Vite dev server
+# Allow Vite dev server + remote monitoring (Vercel, phone, etc.)
 _extra_origins = [o.strip() for o in os.getenv("AUTOBOT_CORS_ORIGINS", "").split(",") if o.strip()]
+_allow_all_origins = os.getenv("AUTOBOT_CORS_ALLOW_ALL", "").lower() in ("1", "true", "yes")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
+    allow_origins=["*"] if _allow_all_origins else [
         "http://localhost:3000", "http://127.0.0.1:3000",
         "http://localhost:5173", "http://127.0.0.1:5173",
         "http://localhost:8000", "http://127.0.0.1:8000",
@@ -190,6 +191,52 @@ def start_agent_run(req: AgentRunRequest):
     return {"run_id": run_id, "status": "started", "goal": req.goal}
 
 
+class MissionRunRequest(BaseModel):
+    goal: str
+
+
+@app.post("/api/mission/run")
+def start_mission_run(req: MissionRunRequest):
+    """
+    Start a multi-objective mission. The MissionAgent plans objectives and executes each one.
+    Best for complex tasks: Kaggle competitions, research workflows, multi-app coding.
+    """
+    global _agent_runner, _agent_status, _active_run_id, _run_log
+
+    run_id = f"mission_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+
+    with _agent_lock:
+        if _agent_status == "running":
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+        _active_run_id = run_id
+        _agent_status = "running"
+        _run_log.clear()
+        _agent_runner = AgentRunner.from_env(log_callback=_log)
+
+    def _run_mission_in_thread():
+        global _agent_status
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(_agent_runner.run_mission(goal=req.goal))
+            with _agent_lock:
+                _agent_status = "done"
+            _save_run_history(run_id, req.goal, True, result)
+        except Exception as ex:
+            with _agent_lock:
+                _agent_status = "failed"
+            _save_run_history(run_id, req.goal, False, str(ex))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_mission_in_thread, daemon=True, name=f"mission-{run_id}").start()
+    return {"run_id": run_id, "status": "started", "goal": req.goal, "mode": "mission"}
+
+
 @app.get("/api/agent/status")
 @app.get("/api/status")  # Backwards compat for old dashboard
 def get_agent_status():
@@ -213,7 +260,8 @@ def get_agent_status():
             "mode": "cdp",
         },
         "anti_sleep_enabled": anti_sleep.enabled,
-        **runner_status,
+        "auth_notification": runner_status.get("auth_notification"),
+        **{k: v for k, v in runner_status.items() if k != "auth_notification"},
     }
 
 @app.get("/api/browser/screenshot")
@@ -273,14 +321,17 @@ def _save_run_history(run_id: str, goal: str, success: bool, result: str):
 
 @app.get("/api/settings")
 def get_settings():
+    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter")
     return {
-        "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter"),
+        "llm_provider": provider,
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", ""),
         "browser_mode": "human",
         "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
         "has_google_key": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
+        "has_xai_key": bool(os.getenv("XAI_API_KEY")),
         "llm_enabled": True,
+        "cors_allow_all": os.getenv("AUTOBOT_CORS_ALLOW_ALL", "").lower() in ("1", "true", "yes"),
     }
 
 
@@ -479,9 +530,95 @@ async def cancel_task(task_id: str):
 
 # ── Server configuration ──────────────────────────────────────────────────────
 
-# Stub routes for old React components that crash if 404
+# ── Built-in Workflow Templates ───────────────────────────────────────────────
+
+_BUILTIN_WORKFLOWS = [
+    {
+        "id": "web_research",
+        "name": "Web Research",
+        "description": "Research a topic using AI chatbots (Grok, ChatGPT, etc.) and compile findings.",
+        "topic_label": "Research topic",
+    },
+    {
+        "id": "latex_paper",
+        "name": "LaTeX Paper Generator",
+        "description": "Research a topic, generate a LaTeX paper, open Overleaf, create a blank project, and paste the paper.",
+        "topic_label": "Paper topic",
+    },
+    {
+        "id": "email_summary",
+        "name": "Email Summary",
+        "description": "Open Gmail, scan recent emails, and compile a summary of important items.",
+        "topic_label": "",
+    },
+    {
+        "id": "social_post",
+        "name": "Social Media Post",
+        "description": "Create and post content to social media platforms.",
+        "topic_label": "Post content/topic",
+    },
+    {
+        "id": "code_review",
+        "name": "Code Review Helper",
+        "description": "Open GitHub, review pull requests, and summarize changes and issues.",
+        "topic_label": "Repository URL or name",
+    },
+]
+
 @app.get("/api/workflows")
-def stub_workflows(): return {"workflows": []}
+def get_workflows():
+    return {"workflows": _BUILTIN_WORKFLOWS}
+
+
+@app.post("/api/workflows/run")
+def run_workflow_endpoint(req: dict):
+    """Run a built-in workflow by converting it to an agent goal."""
+    global _agent_runner, _agent_status, _active_run_id, _run_log
+
+    wf_id = req.get("workflow_id", "")
+    topic = req.get("topic", "")
+
+    wf = next((w for w in _BUILTIN_WORKFLOWS if w["id"] == wf_id), None)
+    if not wf:
+        raise HTTPException(status_code=404, detail=f"Workflow '{wf_id}' not found")
+
+    # Build a natural language goal from the workflow + topic
+    goal = wf["description"]
+    if topic:
+        goal = f"{wf['description']} Topic/subject: {topic}"
+
+    run_id = f"wf_{wf_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+
+    with _agent_lock:
+        if _agent_status == "running":
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+        _active_run_id = run_id
+        _agent_status = "running"
+        _run_log.clear()
+        _agent_runner = AgentRunner.from_env(log_callback=_log)
+
+    def _run_in_thread():
+        global _agent_status
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(_agent_runner.run(goal=goal, max_steps=30))
+            with _agent_lock:
+                _agent_status = "done"
+            _save_run_history(run_id, goal, True, result)
+        except Exception as ex:
+            with _agent_lock:
+                _agent_status = "failed"
+            _save_run_history(run_id, goal, False, str(ex))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_in_thread, daemon=True, name=f"wf-{run_id}").start()
+    return {"run_id": run_id, "status": "started", "plan_name": wf["name"]}
 
 @app.get("/api/adapters")
 def stub_adapters(): return {"adapters": []}
@@ -497,19 +634,228 @@ def get_logs(limit: int = 500):
 class ChatRequest(BaseModel):
     message: str
     state: dict = {}
+    history: list[dict] = []  # previous messages for multi-turn
+
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    plan = {
-        "id": f"plan_{int(time.time())}",
-        "name": "Auto Task",
-        "description": req.message,
-        "steps": [{"action": "auto_execute", "args": {}, "description": f"Autonomously execute: {req.message}"}]
-    }
-    return {
-        "reply": "I have created a direct automation plan for your task. Click Execute to begin.",
-        "plan": plan
-    }
+    """
+    Multi-turn AI Planner chat. The LLM converses with the user to understand
+    their task, asks clarifying questions, and only proposes a plan when ready.
+    """
+    try:
+        return _chat_with_llm(req)
+    except Exception as e:
+        logger.warning(f"LLM chat failed ({e}), falling back to direct plan")
+        plan = {
+            "id": f"plan_{int(time.time())}",
+            "name": "Auto Task",
+            "description": req.message,
+            "steps": [{"action": "auto_execute", "args": {}, "description": f"Autonomously execute: {req.message}"}]
+        }
+        return {
+            "reply": "I have created a direct automation plan for your task. Click Execute to begin.",
+            "plan": plan
+        }
+
+
+def _chat_with_llm(req: ChatRequest) -> dict:
+    """Use the configured LLM to have a real planning conversation."""
+    import asyncio
+
+    llm_client = _create_llm_client_for_chat()
+    if not llm_client:
+        raise RuntimeError("No LLM client available")
+
+    model = os.getenv("AUTOBOT_LLM_MODEL", "gpt-4o")
+
+    system_prompt = """You are the Autobot AI Planner — a helpful assistant that plans computer automation tasks.
+
+Your job is to understand what the user wants to accomplish on their computer, ask clarifying questions if needed, and then create a clear execution plan.
+
+## How to respond:
+
+1. **If the user's request is UNCLEAR or AMBIGUOUS**: Ask 1-2 specific clarifying questions. Keep your response conversational and brief.
+
+2. **If you have ENOUGH INFORMATION to create a plan**: Respond with a helpful message AND include a JSON plan block at the end of your response, wrapped in ```plan``` markers.
+
+## Plan format (only include when ready):
+
+```plan
+{
+  "name": "Short plan name",
+  "description": "Full description of what Autobot will do",
+  "steps": [
+    {"description": "Step 1 description"},
+    {"description": "Step 2 description"}
+  ]
+}
+```
+
+## Guidelines:
+- Be conversational and friendly, but concise
+- Ask questions like: "Which browser tab?", "What specific content?", "Where should I save it?"
+- When the task is clear enough (even if simple), go ahead and propose a plan
+- For simple, unambiguous tasks (e.g., "go to google.com"), propose the plan immediately
+- The plan description is what the agent will receive as its goal — make it detailed and actionable
+- Include step-by-step breakdown so the user can review before executing
+- Never include code or technical implementation details — just describe what will happen"""
+
+    # Build conversation history
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    for msg in req.history:
+        messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+    messages.append({"role": "user", "content": req.message})
+
+    # Call LLM synchronously (we're in a sync endpoint)
+    loop = asyncio.new_event_loop()
+    try:
+        resp = loop.run_until_complete(
+            llm_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=1024,
+                temperature=0.7,
+            )
+        )
+    finally:
+        loop.close()
+
+    reply_text = resp.choices[0].message.content if resp.choices else ""
+    if not reply_text:
+        raise RuntimeError("Empty LLM response")
+
+    # Check if the reply contains a plan block
+    plan = None
+    import re
+    plan_match = re.search(r'```plan\s*\n(.*?)\n```', reply_text, re.DOTALL)
+    if plan_match:
+        try:
+            plan_data = json.loads(plan_match.group(1))
+            plan = {
+                "id": f"plan_{int(time.time())}",
+                "name": plan_data.get("name", "Auto Task"),
+                "description": plan_data.get("description", req.message),
+                "steps": [
+                    {"action": "auto_execute", "args": {}, "description": s.get("description", str(s))}
+                    for s in plan_data.get("steps", [])
+                ],
+            }
+        except json.JSONDecodeError:
+            pass  # Plan JSON was malformed — just return the text
+
+        # Strip the plan block from the visible reply
+        reply_text = reply_text[:plan_match.start()].strip()
+        if not reply_text:
+            reply_text = "Here's the plan I've prepared for you:"
+
+    return {"reply": reply_text, "plan": plan}
+
+
+def _create_llm_client_for_chat():
+    """Create LLM client for the chat endpoint (reuses same logic as agent)."""
+    from openai import AsyncOpenAI
+    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter").lower()
+
+    if provider == "google":
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if api_key:
+            return AsyncOpenAI(
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                api_key=api_key,
+            )
+    elif provider == "openrouter":
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if api_key:
+            return AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    elif provider == "openai":
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            return AsyncOpenAI(api_key=api_key)
+    elif provider == "xai":
+        api_key = os.getenv("XAI_API_KEY")
+        if api_key:
+            return AsyncOpenAI(base_url="https://api.x.ai/v1", api_key=api_key)
+
+    # Auto-detect
+    for env_key, base_url in [
+        ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+    ]:
+        api_key = os.getenv(env_key)
+        if api_key:
+            return AsyncOpenAI(base_url=base_url, api_key=api_key)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        return AsyncOpenAI(api_key=api_key)
+    return None
+
+
+# ── Ngrok Tunnel ─────────────────────────────────────────────────────────────
+
+_ngrok_process: Any = None
+_ngrok_url: str | None = None
+
+
+@app.post("/api/tunnel/start")
+def start_tunnel():
+    """Start an ngrok tunnel to expose the backend for remote monitoring."""
+    global _ngrok_process, _ngrok_url
+    import subprocess
+    import shutil
+
+    if _ngrok_url:
+        return {"status": "already_running", "url": _ngrok_url}
+
+    if not shutil.which("ngrok"):
+        raise HTTPException(status_code=400, detail="ngrok not found. Install it: https://ngrok.com/download")
+
+    try:
+        _ngrok_process = subprocess.Popen(
+            ["ngrok", "http", "8000", "--log=stdout"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        # Give ngrok a moment to start, then query the local API for the URL
+        import time
+        time.sleep(2)
+        try:
+            import urllib.request
+            resp = urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=3)
+            data = json.loads(resp.read())
+            for tunnel in data.get("tunnels", []):
+                if tunnel.get("proto") == "https":
+                    _ngrok_url = tunnel["public_url"]
+                    break
+            if not _ngrok_url and data.get("tunnels"):
+                _ngrok_url = data["tunnels"][0].get("public_url")
+        except Exception as e:
+            logger.warning(f"Could not query ngrok API: {e}")
+            _ngrok_url = "starting... check http://127.0.0.1:4040"
+
+        _log(f"🌐 Ngrok tunnel started: {_ngrok_url}")
+        return {"status": "started", "url": _ngrok_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start ngrok: {e}")
+
+
+@app.post("/api/tunnel/stop")
+def stop_tunnel():
+    """Stop the ngrok tunnel."""
+    global _ngrok_process, _ngrok_url
+    if _ngrok_process:
+        _ngrok_process.terminate()
+        _ngrok_process = None
+    _ngrok_url = None
+    _log("🌐 Ngrok tunnel stopped.")
+    return {"status": "stopped"}
+
+
+@app.get("/api/tunnel/status")
+def tunnel_status():
+    """Get the current tunnel status."""
+    return {"active": _ngrok_url is not None, "url": _ngrok_url}
 
 
 # ── Static Files mount — MUST be last so it doesn't shadow API/WS routes ─────
