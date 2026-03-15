@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from autobot.agent.loop import AgentLoop
 from autobot.agent.mission_agent import MissionAgent
+from autobot.agent.planner import ComplexityEstimator
 from autobot.browser.launcher import AsyncBrowserLauncher
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class AgentRunner:
         max_steps: int = 100,
         use_vision: bool = True,
         log_callback: Callable[[str], None] | None = None,
+        task_id: str | None = None,
     ):
         self.browser_launcher = browser_launcher or AsyncBrowserLauncher.from_env()
         self.llm_client = llm_client
@@ -50,6 +52,7 @@ class AgentRunner:
         self.max_steps = max_steps
         self.use_vision = use_vision
         self.log = log_callback or (lambda msg: logger.info(msg))
+        self.task_id = task_id          # forwarded to AgentLoop → ScreenLock
         self._last_screenshot_path_fallback: str | None = None
 
         # State tracking for dashboard
@@ -62,7 +65,11 @@ class AgentRunner:
         self._max_steps_override: int | None = None
 
     @classmethod
-    def from_env(cls, log_callback: Callable[[str], None] | None = None) -> "AgentRunner":
+    def from_env(
+        cls,
+        log_callback: Callable[[str], None] | None = None,
+        task_id: str | None = None,
+    ) -> "AgentRunner":
         """Create runner from environment variables."""
         llm_client = _create_llm_client()
         model = os.getenv("AUTOBOT_LLM_MODEL", "gpt-4o")
@@ -71,6 +78,7 @@ class AgentRunner:
             llm_client=llm_client,
             model=model,
             log_callback=log_callback,
+            task_id=task_id,
         )
 
     async def run(self, goal: str, max_steps: int | None = None) -> str:
@@ -91,7 +99,6 @@ class AgentRunner:
         steps = self._max_steps_override
 
         self.log(f"🤖 Starting task: {goal}")
-        self.log(f"📋 Max steps: {steps} | Model: {self.model}")
 
         try:
             # 1. Create LLM client and run pre-flight check
@@ -105,27 +112,43 @@ class AgentRunner:
                         f"Current provider: {provider}"
                     )
 
+            # 2. Estimate task complexity — sets step budget and stop condition
+            self.log("🧠 Estimating task complexity...")
+            estimator = ComplexityEstimator(llm_client=self.llm_client, model=self.model)
+            estimate = await estimator.estimate(goal)
+            # Allow explicit max_steps override from caller
+            if max_steps is not None:
+                from autobot.agent.stop_condition import after_steps
+                estimate.stop_condition = after_steps(max_steps)
+                estimate.step_budget = max_steps
+            self._max_steps_override = estimate.step_budget
+            steps = estimate.step_budget
+            self.log(f"📋 Mode: {estimate.mode} | Budget: {'∞' if not steps else steps} steps | {estimate.stop_condition.description}")
+            self.log(f"   Reasoning: {estimate.reasoning}")
+
             self.log(f"🔍 Pre-flight: testing {self.model} ...")
             ok = await self._preflight_check()
             if not ok:
                 self.log(f"⚠️  Pre-flight failed — model '{self.model}' may be unavailable or rate-limited. "
                          f"The agent will still attempt to run with fallback strategies.")
 
-            # 2. Launch browser
+            # 3. Launch browser
             self.log("Initializing Human Mode (Vision-Only)...")
             page = await self.browser_launcher.start()
             self.log("✅ Human Mode active. Operating in your real Chrome profile.")
 
-            # 3. Create run directory for checkpoints and artifacts
+            # 4. Create run directory for checkpoints and artifacts
             runs_dir = Path("runs")
             runs_dir.mkdir(exist_ok=True)
             run_dir = runs_dir / f"plan_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
             run_dir.mkdir(exist_ok=True)
             (run_dir / "screenshots").mkdir(exist_ok=True)
-            # Save task description
-            (run_dir / "about.txt").write_text(f"Goal: {goal}\nModel: {self.model}\nMax Steps: {steps}\n")
+            (run_dir / "about.txt").write_text(
+                f"Goal: {goal}\nModel: {self.model}\nMode: {estimate.mode}\n"
+                f"Budget: {steps or 'perpetual'} steps\nStop: {estimate.stop_condition.description}\n"
+            )
 
-            # 4. Create and run agent loop
+            # 5. Create and run agent loop with dynamic stop condition
             self.status = "running"
             self.current_step = 1
             self._agent_loop = AgentLoop(
@@ -135,6 +158,8 @@ class AgentRunner:
                 model=self.model,
                 max_steps=steps,
                 use_vision=self.use_vision,
+                stop_condition=estimate.stop_condition,
+                task_id=self.task_id,
             )
             self._agent_loop._run_dir = run_dir  # Enable checkpointing
 
@@ -342,21 +367,30 @@ class AgentRunner:
         if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
             active_loop = self._mission_agent.current_agent_loop
 
+        # Pull live state from active loop
+        loop_status = active_loop.get_status() if active_loop else {}
+
         status = {
             "status": self.status,
             "goal": self.current_goal,
             "current_step": self.current_step,
-            "max_steps": self._max_steps_override or self.max_steps,
+            "max_steps": loop_status.get("max_steps") or self._max_steps_override or self.max_steps,
             "result": self.result[:500] if self.result else "",
+            # Evaluation + stop condition progress
+            "eval_signal": loop_status.get("eval_signal", "continue"),
+            "stop_condition": loop_status.get("stop_condition"),
+            "stop_progress": loop_status.get("stop_progress", ""),
+            "metrics": loop_status.get("metrics", {}),
+            "elapsed_seconds": loop_status.get("elapsed_seconds", 0),
             "history": [
                 entry.to_history_text()
                 for entry in (active_loop.history if active_loop else [])
-            ][-10:],  # Last 10 steps
+            ][-10:],
         }
-        # Include auth notification if agent detected a login page
+        # Auth / escalation notification
         if active_loop and active_loop.pending_auth:
             status["auth_notification"] = active_loop.pending_auth
-        # Include mission status if running a mission
+        # Mission status if running a mission
         if hasattr(self, '_mission_agent') and self._mission_agent:
             status["mission"] = self._mission_agent.get_status()
         return status

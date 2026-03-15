@@ -40,6 +40,10 @@ from autobot.agent.models import (
     ScrollAction,
     StepHistoryEntry,
 )
+from autobot.agent.approval import ApprovalGuard
+from autobot.agent.evaluator import EvalSignal, EvaluationAgent
+from autobot.agent.resource_manager import screen_lock
+from autobot.agent.stop_condition import StopCondition, after_steps
 from autobot.computer.computer import Computer
 from autobot.dom.models import (
     BrowserState,
@@ -84,40 +88,76 @@ class AgentLoop:
         llm_client: Any,  # OpenAI-compatible client
         goal: str,
         model: str = "gpt-4o",
-        max_steps: int = 100,
+        max_steps: int | None = 100,   # None = perpetual
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         custom_instructions: str | None = None,
+        stop_condition: StopCondition | None = None,
+        task_id: str | None = None,    # For ScreenLock identification
     ):
         self.page = page
         self.llm_client = llm_client
         self.goal = goal
         self.model = model
-        # Allow env override: AUTOBOT_MAX_STEPS=200 for very long tasks
-        self.max_steps = int(os.getenv("AUTOBOT_MAX_STEPS", str(max_steps)))
         self.max_actions_per_step = max_actions_per_step
         self.use_vision = use_vision
         self.custom_instructions = custom_instructions
+
+        # Stop condition — governs when the run should halt.
+        # Env override: AUTOBOT_MAX_STEPS=0 means perpetual.
+        env_steps = os.getenv("AUTOBOT_MAX_STEPS")
+        if stop_condition is not None:
+            self.stop_condition = stop_condition
+            # Derive max_steps from stop_condition for backwards compat
+            self.max_steps: int | None = stop_condition.max_steps if stop_condition.type == "steps" else None
+        elif env_steps is not None:
+            n = int(env_steps)
+            self.max_steps = n if n > 0 else None
+            self.stop_condition = after_steps(n) if n > 0 else StopCondition(type="none", description="Perpetual (env)")
+        else:
+            self.max_steps = max_steps  # may be None for perpetual
+            self.stop_condition = after_steps(max_steps) if max_steps else StopCondition(type="none", description="Perpetual")
 
         # State
         self.step_number = 0
         self.history: list[StepHistoryEntry] = []
         self.previous_dom_state: DOMSerializedState | None = None
+        self._run_start_time = time.time()
 
         # Scratchpad: persistent notes that accumulate across the entire run
-        # The agent writes findings, phase progress, and key info here
         self.scratchpad: list[str] = []
 
-        # Retry tracking: counts consecutive failures on the same goal
+        # Tracked metrics — EvaluationAgent checks these against stop_condition
+        self.metrics: dict[str, float] = {}
+
+        # Retry / failure tracking
         self._consecutive_failures = 0
+        self._consecutive_step_errors = 0   # raw exception count
         self._last_goal = ""
 
-        # Authentication tracking: detected login pages
-        self.pending_auth: dict | None = None  # {url, type, message}
+        # Watchdog: track last time the screen changed (action had effect)
+        self._last_progress_time = time.time()
+        self._watchdog_seconds = int(os.getenv("AUTOBOT_WATCHDOG_SECONDS", "600"))  # 10 min
 
-        # Checkpointing: save progress periodically so runs survive crashes
+        # Authentication tracking
+        self.pending_auth: dict | None = None
+
+        # Evaluation: call EvaluationAgent every N steps
+        self._eval_interval = int(os.getenv("AUTOBOT_EVAL_INTERVAL", "10"))
+        self._last_eval_signal: str = "continue"
+        self._evaluator: EvaluationAgent | None = (
+            EvaluationAgent(llm_client=llm_client, model=model) if llm_client else None
+        )
+
+        # Checkpointing
         self._checkpoint_interval = int(os.getenv("AUTOBOT_CHECKPOINT_INTERVAL", "5"))
         self._run_dir: Path | None = None  # Set by runner if available
+
+        # ScreenLock identity — used to identify this task in the resource manager
+        self._task_id = task_id or f"loop-{id(self)}"
+
+        # Approval guard — gates risky actions based on AUTOBOT_APPROVAL_MODE
+        self._approval_guard = ApprovalGuard()
 
         # Computer API for OS-level tools
         self.computer = Computer()
@@ -135,11 +175,21 @@ class AgentLoop:
 
     def get_status(self) -> dict[str, Any]:
         """Returns the current status metadata for the dashboard."""
+        elapsed = time.time() - self._run_start_time
         return {
             "current_step": self.step_number,
             "max_steps": self.max_steps,
             "goal": self.goal,
             "last_screenshot_path": self.last_screenshot_path,
+            "stop_condition": self.stop_condition.model_dump(),
+            "stop_progress": self.stop_condition.progress_text({
+                "step_number": self.step_number,
+                "metrics": self.metrics,
+                "elapsed_seconds": elapsed,
+            }),
+            "eval_signal": self._last_eval_signal,
+            "metrics": self.metrics,
+            "elapsed_seconds": int(elapsed),
         }
 
     def _save_checkpoint(self):
@@ -151,8 +201,13 @@ class AgentLoop:
                 "step_number": self.step_number,
                 "goal": self.goal,
                 "scratchpad": self.scratchpad,
+                "metrics": self.metrics,
                 "consecutive_failures": self._consecutive_failures,
                 "last_goal": self._last_goal,
+                "eval_signal": self._last_eval_signal,
+                "elapsed_seconds": int(time.time() - self._run_start_time),
+                "stop_condition": self.stop_condition.model_dump(),
+                "max_steps": self.max_steps,
                 "history_count": len(self.history),
                 "history_summary": [
                     {
@@ -161,7 +216,7 @@ class AgentLoop:
                         "actions": [a.model_dump() for a in e.agent_output.action],
                         "results": [r.extracted_content or "" for r in e.action_results],
                     }
-                    for e in self.history[-20:]  # Last 20 steps
+                    for e in self.history[-20:]
                 ],
             }
             checkpoint_path = self._run_dir / "checkpoint.json"
@@ -169,40 +224,158 @@ class AgentLoop:
         except Exception as e:
             logger.debug(f"Checkpoint save failed (non-fatal): {e}")
 
+    def _build_sc_context(self) -> dict[str, Any]:
+        """Build the context dict used by StopCondition.is_met()."""
+        return {
+            "step_number": self.step_number,
+            "metrics": self.metrics,
+            "elapsed_seconds": time.time() - self._run_start_time,
+        }
+
+    async def _run_evaluation(self) -> EvalSignal:
+        """
+        Call EvaluationAgent to assess progress and get a signal.
+        Returns CONTINUE on any failure.
+        """
+        if self._evaluator is None:
+            return EvalSignal.CONTINUE
+        try:
+            result = await self._evaluator.evaluate(
+                goal=self.goal,
+                stop_condition=self.stop_condition,
+                history_entries=self.history,
+                scratchpad=self.scratchpad,
+                step_number=self.step_number,
+                consecutive_failures=self._consecutive_failures,
+                metrics=self.metrics,
+                elapsed_seconds=time.time() - self._run_start_time,
+            )
+            self._last_eval_signal = result.signal.value
+            logger.info(f"📊 EvaluationAgent: {result.signal.value.upper()} — {result.reasoning}")
+
+            if result.signal == EvalSignal.REPLAN and result.new_plan:
+                # Inject new plan into scratchpad so agent sees it next step
+                self.scratchpad.append(f"[REPLAN] {result.new_plan}")
+                logger.info(f"🔄 New plan injected: {result.new_plan}")
+
+            if result.signal in (EvalSignal.PAUSE, EvalSignal.ESCALATE):
+                # Surface to frontend
+                self.pending_auth = {
+                    "url": getattr(self.page, "url", ""),
+                    "type": result.signal.value,
+                    "message": result.alert_message or result.reasoning,
+                }
+
+            return result.signal
+        except Exception as e:
+            logger.warning(f"EvaluationAgent call failed: {e}")
+            return EvalSignal.CONTINUE
+
     async def run(self) -> str:
         """
-        Run the agent loop until completion or max_steps.
+        Run the agent loop.
+
+        Supports three modes:
+          - Bounded (max_steps set): runs up to max_steps, then evaluates
+          - Perpetual (max_steps=None): runs until agent calls done() or metric met
+          - EvaluationAgent guided: every _eval_interval steps, EvaluationAgent
+            can signal COMPLETE, REPLAN, PAUSE, or ESCALATE
 
         Returns:
             The final result text from the done action, or a summary.
         """
-        logger.info(f"🤖 Agent starting: '{self.goal}' (max {self.max_steps} steps)")
+        mode_str = f"max {self.max_steps} steps" if self.max_steps else "perpetual"
+        logger.info(f"🤖 Agent starting: '{self.goal}' ({mode_str})")
+        self._run_start_time = time.time()
+        self.stop_condition.start_timer()
 
-        while self.step_number < self.max_steps:
+        while True:
+            # ── Check step budget ───────────────────────────────────────────
+            if self.max_steps is not None and self.step_number >= self.max_steps:
+                logger.info(f"📊 Step budget ({self.max_steps}) reached — consulting EvaluationAgent...")
+                signal = await self._run_evaluation()
+                if signal == EvalSignal.COMPLETE:
+                    self._save_checkpoint()
+                    return self._summarize_history() + f"\n\n[EvaluationAgent: COMPLETE] {self._last_eval_signal}"
+                elif signal == EvalSignal.REPLAN:
+                    # Grant extra steps for the new plan
+                    extension = 50
+                    self.max_steps += extension
+                    logger.info(f"🔄 Step budget extended by {extension} for replanning (now {self.max_steps})")
+                else:
+                    # Any other signal at budget exhaustion = stop
+                    logger.warning(f"⚠️ Step budget exhausted (signal={signal.value})")
+                    self._save_checkpoint()
+                    return self._summarize_history()
+
+            # ── Check stop condition ────────────────────────────────────────
+            sc_ctx = self._build_sc_context()
+            if self.stop_condition.is_met(sc_ctx):
+                logger.info(f"🏁 Stop condition met: {self.stop_condition.progress_text(sc_ctx)}")
+                signal = await self._run_evaluation()
+                if signal == EvalSignal.CONTINUE:
+                    # EvaluationAgent disagrees — keep going briefly
+                    if self.max_steps is not None:
+                        self.max_steps += 20
+                    logger.info("EvaluationAgent says CONTINUE despite stop condition — extending run")
+                else:
+                    self._save_checkpoint()
+                    summary = self._summarize_history()
+                    return summary + f"\n\n[Stop condition met: {self.stop_condition.progress_text(sc_ctx)}]"
+
+            # ── Watchdog ────────────────────────────────────────────────────
+            idle_secs = time.time() - self._last_progress_time
+            if idle_secs > self._watchdog_seconds:
+                logger.warning(f"🐕 Watchdog: no progress in {int(idle_secs)}s")
+                self.scratchpad.append(
+                    f"[WATCHDOG] No screen change detected in {int(idle_secs / 60)} minutes. "
+                    "Try a completely different approach."
+                )
+                self._last_progress_time = time.time()  # Reset to avoid spam
+
+            # ── Execute step ────────────────────────────────────────────────
             try:
                 result = await self._execute_step()
 
                 if result is not None:
-                    # Agent called "done" — task is complete
-                    logger.info(f"✅ Agent finished at step {self.step_number + 1}: {result}")
-                    self._save_checkpoint()  # Final checkpoint
+                    logger.info(f"✅ Agent done at step {self.step_number + 1}: {result[:120]}")
+                    self._save_checkpoint()
                     return result
 
                 self.step_number += 1
+                self._consecutive_step_errors = 0  # Reset on clean step
 
-                # Periodic checkpoint every N steps
+                # Periodic checkpoint
                 if self.step_number % self._checkpoint_interval == 0:
                     self._save_checkpoint()
 
-            except Exception as e:
-                logger.error(f"❌ Step {self.step_number + 1} failed: {e}")
-                self.step_number += 1
-                # Continue to next step — the agent can recover
+                # Periodic EvaluationAgent check
+                if self.step_number > 0 and self.step_number % self._eval_interval == 0:
+                    signal = await self._run_evaluation()
+                    if signal == EvalSignal.COMPLETE:
+                        self._save_checkpoint()
+                        return self._summarize_history() + "\n\n[EvaluationAgent: Goal achieved]"
+                    elif signal == EvalSignal.PAUSE:
+                        logger.info("⏸️ EvaluationAgent: PAUSE — waiting for user")
+                        # Loop continues; frontend will surface the pending_auth alert
 
-        # Hit max steps without completing
-        logger.warning(f"⚠️ Agent hit max steps ({self.max_steps}) without completing")
-        self._save_checkpoint()  # Save what we have
-        return self._summarize_history()
+            except Exception as e:
+                self._consecutive_step_errors += 1
+                logger.error(f"❌ Step {self.step_number + 1} error ({self._consecutive_step_errors} consecutive): {e}")
+
+                if self._consecutive_step_errors >= 5:
+                    logger.error("🚨 5 consecutive step errors — emergency pause")
+                    self.pending_auth = {
+                        "url": getattr(self.page, "url", ""),
+                        "type": "escalate",
+                        "message": f"Agent hit 5 consecutive errors. Last: {e}. Human review needed.",
+                    }
+                    self._save_checkpoint()
+                    await asyncio.sleep(5)  # Brief pause before continuing
+
+                self.step_number += 1
+                self._save_checkpoint()  # Save state after every error
+                await asyncio.sleep(1)   # Small pause to avoid tight crash loops
 
     async def _execute_step(self) -> str | None:
         """
@@ -319,12 +492,16 @@ class AgentLoop:
         #     f"Actions: {len(agent_output.action)}"
         # )
 
-        # ─── 3. ACT ───
+        # ─── 3. ACT (hold ScreenLock so only one task touches the computer) ───
         logger.debug(f"Step {self.step_number + 1}: Acting...")
-        action_results = await self._execute_actions(
-            agent_output.action,
-            browser_state,
-        )
+        async with screen_lock.acquire(
+            task_id=self._task_id,
+            goal=agent_output.next_goal[:80],
+        ):
+            action_results = await self._execute_actions(
+                agent_output.action,
+                browser_state,
+            )
 
         # ─── 4. RECORD + REACTIVE TRACKING ───
         url_after = self.page.url
@@ -339,6 +516,7 @@ class AgentLoop:
 
         # Track consecutive failures for adaptive retry
         any_failed = any(not r.success for r in action_results)
+        any_success = any(r.success for r in action_results)
         current_goal = agent_output.next_goal.strip().lower()[:50]
 
         if any_failed and current_goal == self._last_goal:
@@ -349,6 +527,24 @@ class AgentLoop:
         else:
             self._consecutive_failures = 0
         self._last_goal = current_goal
+
+        # Watchdog: update last progress time when something meaningful happened
+        page_changed = url_after != url_before
+        if any_success and (page_changed or not any_failed):
+            self._last_progress_time = time.time()
+
+        # Metric tracking: check for metric signals in scratchpad/memory
+        # Agent can write "METRIC:submissions=3" to its memory to update metrics
+        if agent_output.memory:
+            for line in agent_output.memory.splitlines():
+                if line.startswith("METRIC:"):
+                    try:
+                        kv = line[7:].strip()
+                        k, v = kv.split("=", 1)
+                        self.metrics[k.strip()] = float(v.strip())
+                        logger.info(f"📈 Metric update: {k.strip()} = {v.strip()}")
+                    except Exception:
+                        pass
 
         # Accumulate scratchpad from agent's memory (capture key findings)
         if agent_output.memory and len(agent_output.memory) > 20:
@@ -564,6 +760,22 @@ class AgentLoop:
                     extracted_content=action.done.text,
                 ))
                 break
+
+            # ── Approval gate ────────────────────────────────────────────────
+            tier = self._approval_guard.classify(action)
+            if self._approval_guard.needs_approval(tier):
+                allowed = await self._approval_guard.gate(
+                    action=action,
+                    tier=tier,
+                    goal=getattr(self, '_last_goal', ''),
+                )
+                if not allowed:
+                    results.append(ActionResult(
+                        action_name=action.action_name,
+                        success=False,
+                        error=f"Blocked by approval guard ({tier.value}): user denied or timed out",
+                    ))
+                    continue
 
             # Execute the action
             url_before = self.page.url

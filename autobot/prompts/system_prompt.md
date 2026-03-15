@@ -333,6 +333,18 @@ For complex tasks, break your work into logical phases. Track in your `memory`:
 - When completing a phase, note what you accomplished before moving to the next
 - If a phase fails after multiple attempts, move to the next phase with whatever you have
 
+## Metric Tracking (Long-Running Tasks)
+For tasks with measurable goals (Kaggle submissions, papers written, problems solved), report progress in your `memory` field using this exact format:
+```
+METRIC:submissions=3
+METRIC:papers_written=2
+METRIC:problems_solved=7
+```
+This lets the system track your progress and know when the goal is achieved.
+- Write ONE metric per line, each starting with `METRIC:`
+- Update the metric every time you complete a unit of work
+- Example: after each Kaggle submission, write `METRIC:submissions=N` where N is the total so far
+
 ## Completion
 - Call `done` when the full task is completed
 - Set `success=true` only if you verified the outcome

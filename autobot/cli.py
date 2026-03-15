@@ -123,35 +123,26 @@ def _start_server(host: str, port: int) -> None:
 
 
 def _run_task(task: str) -> None:
-    """Run a single task from the command line."""
+    """Run a single task from the command line via AgentRunner."""
     import asyncio
 
     async def _execute() -> None:
-        # Import here to avoid circular imports and slow startup for --version/--help
-        from autobot.browser_agent import BrowserController
-        from autobot.engine import AutomationEngine
-        from autobot.autonomy import AutonomousRunner
-        from autobot.llm_brain import LLMBrain
+        from autobot.agent.runner import AgentRunner
 
-        print(f"🤖 Autobot executing: {task}")
+        print(f"Autobot executing: {task}")
         print("─" * 50)
 
-        browser = BrowserController()
-        engine = AutomationEngine(browser=browser)
-        brain = LLMBrain()
-        runner = AutonomousRunner(engine=engine, brain=brain, browser=browser)
-
+        runner = AgentRunner.from_env(
+            log_callback=lambda msg: print(f"  {msg}"),
+        )
         try:
-            result = await runner.run(goal=task, max_steps=25, max_hours=0.5)
+            result = await runner.run(task)
             print("─" * 50)
-            if result:
-                print(f"✅ Task completed: {result}")
-            else:
-                print("⚠️  Task finished without explicit result.")
+            print(f"Done: {result}" if result else "Task finished.")
         except KeyboardInterrupt:
-            print("\n🛑 Task cancelled by user.")
+            print("\nCancelled.")
         except Exception as e:
-            print(f"❌ Task failed: {e}")
+            print(f"Failed: {e}")
             sys.exit(1)
 
     asyncio.run(_execute())

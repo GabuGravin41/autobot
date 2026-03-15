@@ -7,7 +7,8 @@ import {
     Maximize2, Minimize2, X, Move,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, getBrowserScreenshotUrl } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus } from '../services/apiService';
+import TaskQueuePanel from './TaskQueuePanel';
 
 interface DashboardPageProps {
     backendOnline: boolean;
@@ -21,14 +22,17 @@ interface DashboardPageProps {
     onAbortRun: () => void;
     onSelectRun: (run: RunHistory) => void;
     onSelectArtifact: (artifact: any) => void;
-    scheduledTasks: any[];
+    scheduledTasks: QueuedTask[];
+    screenLockStatus: ScreenLockStatus | null;
+    onAddTask: (goal: string) => void;
     onCancelTask: (id: string) => void;
 }
 
 export default function DashboardPage({
     backendOnline, backendStatus, activeRun, liveRuns, liveAdapters,
     liveLogLines, screenshotUrl, onRefreshScreenshot, onAbortRun,
-    onSelectRun, onSelectArtifact, scheduledTasks, onCancelTask,
+    onSelectRun, onSelectArtifact, scheduledTasks, screenLockStatus,
+    onAddTask, onCancelTask,
 }: DashboardPageProps) {
     const navigate = useNavigate();
     const [isScreenPopout, setIsScreenPopout] = useState(false);
@@ -329,46 +333,14 @@ export default function DashboardPage({
                         </div>
                     </div>
 
-                    {/* Task Queue section */}
-                    <div className="mt-12 space-y-6">
-                        <div className="flex items-center justify-between px-2">
-                            <h3 className="text-xl font-bold tracking-tight text-[var(--brand-primary)]">Operation Queue</h3>
-                            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
-                                {scheduledTasks.length} Pending Actions
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-1 gap-4">
-                            {scheduledTasks.map(task => (
-                                <div key={task.id} className="glass-panel p-4 rounded-2xl border-[var(--base-border)] flex items-center justify-between group">
-                                    <div className="flex items-center gap-4">
-                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                                            task.status === 'running' ? 'bg-brand-500/20 text-brand-500 animate-spin' :
-                                            task.status === 'done' ? 'bg-emerald-500/20 text-emerald-500' :
-                                            'bg-[var(--base-border)] text-[var(--base-text-muted)]'
-                                        }`}>
-                                            {task.status === 'running' ? '↻' : task.id}
-                                        </div>
-                                        <div>
-                                            <div className="text-sm font-bold">{task.goal}</div>
-                                            <div className="text-[9px] uppercase tracking-widest opacity-60">Status: {task.status} • Created: {new Date(task.created_at).toLocaleTimeString()}</div>
-                                        </div>
-                                    </div>
-                                    {task.status === 'queued' && (
-                                        <button 
-                                            onClick={() => onCancelTask(task.id)}
-                                            className="opacity-0 group-hover:opacity-100 p-2 rounded-lg hover:bg-red-500/10 text-red-400 transition-all"
-                                        >
-                                            <AlertCircle size={14} />
-                                        </button>
-                                    )}
-                                </div>
-                            ))}
-                            {scheduledTasks.length === 0 && (
-                                <div className="text-center py-8 text-[var(--base-text-muted)] text-sm italic">
-                                    Queue is empty.
-                                </div>
-                            )}
-                        </div>
+                    {/* Task Queue */}
+                    <div className="mt-12">
+                        <TaskQueuePanel
+                            tasks={scheduledTasks}
+                            lockStatus={screenLockStatus}
+                            onAddTask={onAddTask}
+                            onCancelTask={onCancelTask}
+                        />
                     </div>
                 </div>
 

@@ -38,6 +38,11 @@ export interface AuthNotification {
     message: string;
 }
 
+export interface ApprovalPending {
+    key: string;
+    message: string;
+}
+
 export interface BackendStatus {
     status: string;
     run_status: 'idle' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -48,6 +53,7 @@ export interface BackendStatus {
     llm_provider: string;
     llm_model: string;
     human_input_pending?: HumanInputPending | null;
+    human_approval_pending?: ApprovalPending | null;
     anti_sleep_enabled?: boolean;
     auth_notification?: AuthNotification | null;
 }
@@ -189,6 +195,7 @@ export interface BackendSettings {
     browser_mode: string;
     has_openrouter_key: boolean;
     has_openai_key: boolean;
+    approval_mode: 'strict' | 'balanced' | 'trusted';
 }
 
 export const getSettings = (): Promise<BackendSettings> =>
@@ -200,6 +207,7 @@ export const updateSettings = (settings: Partial<{
     browser_mode: string;
     openrouter_api_key: string;
     openai_api_key: string;
+    approval_mode: string;
 }>): Promise<{ status: string; keys_changed: string[] }> =>
     apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(settings) });
 
@@ -329,14 +337,58 @@ export const toggleAntiSleep = (enabled: boolean): Promise<{ status: string; ena
     apiFetch('/api/utils/anti-sleep', { method: 'POST', body: JSON.stringify({ enabled }) });
 
 // ── Scheduler ───────────────────────────────────────────────────────────────
-export const getTasks = (): Promise<ScheduledTask[]> =>
-    apiFetch<ScheduledTask[]>('/api/tasks');
 
-export const addTask = (goal: string): Promise<{ status: string; task_id: string }> =>
-    apiFetch('/api/tasks', { method: 'POST', body: JSON.stringify({ goal }) });
+/** Task as returned by the scheduler API */
+export interface QueuedTask {
+    id: string;
+    goal: string;
+    status: 'queued' | 'scheduled' | 'starting' | 'running' | 'done' | 'failed' | 'cancelled';
+    priority: number;
+    run_at: string | null;        // ISO string or null
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+    current_step: number;
+    max_steps: number | null;
+    eval_signal: string;
+    metrics: Record<string, number>;
+    stop_progress: string;
+    elapsed_seconds: number;
+    result: string | null;
+    error: string | null;
+}
+
+export const getTasks = (): Promise<{ tasks: QueuedTask[] }> =>
+    apiFetch<{ tasks: QueuedTask[] }>('/api/tasks');
+
+export const getTaskDetail = (taskId: string): Promise<QueuedTask> =>
+    apiFetch<QueuedTask>(`/api/tasks/${taskId}`);
+
+export const getTaskLogs = (taskId: string, since = 0): Promise<{ lines: string[]; total: number }> =>
+    apiFetch(`/api/tasks/${taskId}/logs?since=${since}`);
+
+export const addTask = (
+    goal: string,
+    priority = 1,
+    run_at?: number,
+): Promise<{ status: string; task_id: string }> =>
+    apiFetch('/api/tasks', {
+        method: 'POST',
+        body: JSON.stringify({ goal, priority, run_at: run_at ?? null }),
+    });
 
 export const cancelTask = (taskId: string): Promise<{ status: string; task_id: string }> =>
     apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+
+export interface ScreenLockStatus {
+    locked: boolean;
+    holder_id: string | null;
+    holder_goal: string;
+    held_for_seconds: number;
+}
+
+export const getScreenLockStatus = (): Promise<ScreenLockStatus> =>
+    apiFetch<ScreenLockStatus>('/api/screen-lock');
 
 // ── Tunnel ──────────────────────────────────────────────────────────────────
 export const startTunnel = (): Promise<{ status: string; url: string }> =>

@@ -15,11 +15,13 @@ import {
 
 // Services
 import {
-  getStatus, getAdapters, getRuns, getWorkflows, getTasks, cancelTask, runPlan, cancelRun,
+  getStatus, getAdapters, getRuns, getWorkflows, getTasks, cancelTask, addTask,
+  getScreenLockStatus, runPlan, cancelRun,
   connectLogStream, updateSettings, getBrowserScreenshotUrl, submitHumanInput,
   getRun as apiGetRun, deleteRun as apiDeleteRun, sendChat,
   runAutonomous, cancelAutonomous, getAutonomousStatus,
   BackendStatus, BackendAdapter, BackendRun, BackendWorkflow,
+  QueuedTask, ScreenLockStatus,
 } from './services/apiService';
 
 // Components
@@ -58,7 +60,8 @@ export default function App() {
   const [liveAdapters, setLiveAdapters] = useState<BackendAdapter[]>([]);
   const [liveRuns, setLiveRuns] = useState<RunHistory[]>([]);
   const [liveLogLines, setLiveLogLines] = useState<string[]>([]);
-  const [scheduledTasks, setScheduledTasks] = useState<any[]>([]);
+  const [scheduledTasks, setScheduledTasks] = useState<QueuedTask[]>([]);
+  const [screenLockStatus, setScreenLockStatus] = useState<ScreenLockStatus | null>(null);
 
   const refreshTimer = useRef<NodeJS.Timeout | null>(null);
   const [workflows, setWorkflows] = useState<BackendWorkflow[]>([]);
@@ -92,16 +95,18 @@ export default function App() {
     let disconnect: (() => void) | null = null;
     const poll = async () => {
       try {
-        const [status, adapters, runs, wfs, tasks] = await Promise.all([
+        const [status, adapters, runs, wfs, tasksResp, lockStatus] = await Promise.all([
           getStatus(), getAdapters(), getRuns(),
           getWorkflows().catch(() => ({ workflows: [] })),
-          getTasks(),
+          getTasks().catch(() => ({ tasks: [] })),
+          getScreenLockStatus().catch(() => null),
         ]);
         setBackendStatus(status);
         setLiveAdapters(adapters.adapters);
         setLiveRuns(runs.runs as any as RunHistory[]);
         if (wfs.workflows?.length) setWorkflows(wfs.workflows);
-        setScheduledTasks(tasks);
+        setScheduledTasks(tasksResp.tasks);
+        setScreenLockStatus(lockStatus);
         setBackendOnline(true);
       } catch { setBackendOnline(false); }
     };
@@ -273,10 +278,16 @@ export default function App() {
                   onSelectRun={handleViewDetails}
                   onSelectArtifact={setSelectedArtifact}
                   scheduledTasks={scheduledTasks}
+                  screenLockStatus={screenLockStatus}
+                  onAddTask={async (goal) => {
+                    await addTask(goal);
+                    const resp = await getTasks().catch(() => ({ tasks: [] }));
+                    setScheduledTasks(resp.tasks);
+                  }}
                   onCancelTask={async (id) => {
                     await cancelTask(id);
-                    const tasks = await getTasks();
-                    setScheduledTasks(tasks);
+                    const resp = await getTasks().catch(() => ({ tasks: [] }));
+                    setScheduledTasks(resp.tasks);
                   }}
                 />
               } />

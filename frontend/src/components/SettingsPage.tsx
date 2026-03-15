@@ -103,6 +103,7 @@ export default function SettingsPage({
             // Set initial provider from saved config
             if (settings.llm_provider) setSelectedProvider(settings.llm_provider);
             if (settings.llm_model) setModelInput(settings.llm_model);
+            if (settings.approval_mode) setPolicy(settings.approval_mode as any);
         }).catch(() => {});
     }, []);
 
@@ -345,7 +346,10 @@ export default function SettingsPage({
                             {[AdapterPolicy.STRICT, AdapterPolicy.BALANCED, AdapterPolicy.TRUSTED].map(p => (
                                 <button
                                     key={p}
-                                    onClick={() => setPolicy(p)}
+                                    onClick={() => {
+                                        setPolicy(p);
+                                        updateSettings({ approval_mode: p }).catch(() => {});
+                                    }}
                                     className={`py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider border transition-all ${policy === p
                                         ? 'bg-[var(--brand-primary)]/20 border-brand-500 text-[var(--brand-primary)]'
                                         : 'bg-[var(--base-border)] border-[var(--base-border)] text-[var(--base-text-muted)] hover:bg-[var(--base-border)]'}`}

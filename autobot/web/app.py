@@ -143,6 +143,7 @@ class SettingsUpdate(BaseModel):
     openai_api_key: str | None = None
     google_api_key: str | None = None
     browser_mode: str | None = None
+    approval_mode: str | None = None   # "strict" | "balanced" | "trusted"
 
 
 # ── Agent Endpoints ───────────────────────────────────────────────────────────
@@ -237,6 +238,15 @@ def start_mission_run(req: MissionRunRequest):
     return {"run_id": run_id, "status": "started", "goal": req.goal, "mode": "mission"}
 
 
+def _get_human_approval_pending() -> dict | None:
+    """Return pending HumanGate approval request for the frontend."""
+    try:
+        from ..agent.human_gate import get_pending
+        return get_pending()
+    except Exception:
+        return None
+
+
 @app.get("/api/agent/status")
 @app.get("/api/status")  # Backwards compat for old dashboard
 def get_agent_status():
@@ -261,6 +271,7 @@ def get_agent_status():
         },
         "anti_sleep_enabled": anti_sleep.enabled,
         "auth_notification": runner_status.get("auth_notification"),
+        "human_approval_pending": _get_human_approval_pending(),
         **{k: v for k, v in runner_status.items() if k != "auth_notification"},
     }
 
@@ -332,6 +343,7 @@ def get_settings():
         "has_xai_key": bool(os.getenv("XAI_API_KEY")),
         "llm_enabled": True,
         "cors_allow_all": os.getenv("AUTOBOT_CORS_ALLOW_ALL", "").lower() in ("1", "true", "yes"),
+        "approval_mode": os.getenv("AUTOBOT_APPROVAL_MODE", "balanced"),
     }
 
 
@@ -353,6 +365,8 @@ def update_settings(req: SettingsUpdate):
         updates["GOOGLE_API_KEY"] = req.google_api_key
         if not req.llm_provider:
             updates["AUTOBOT_LLM_PROVIDER"] = "google"
+    if req.approval_mode and req.approval_mode in ("strict", "balanced", "trusted"):
+        updates["AUTOBOT_APPROVAL_MODE"] = req.approval_mode
 
     if updates:
         for key, val in updates.items():
@@ -510,22 +524,64 @@ def get_anti_sleep_status():
 
 # ── Scheduler Endpoints ───────────────────────────────────────────────────────
 
+class AddTaskRequest(BaseModel):
+    goal: str
+    priority: int = 1
+    run_at: float | None = None   # epoch timestamp; None = ASAP
+
+
 @app.get("/api/tasks")
 async def get_tasks():
+    """List all tasks (queued, running, done, failed, cancelled)."""
     from ..agent.scheduler import scheduler
-    return scheduler.get_tasks()
+    return {"tasks": scheduler.get_all_tasks()}
+
 
 @app.post("/api/tasks")
-async def add_task(req: AgentRunRequest):
+async def add_task(req: AddTaskRequest):
+    """Add a task to the queue. Returns task_id."""
     from ..agent.scheduler import scheduler
-    task_id = await scheduler.add_task(req.goal)
+    task_id = await scheduler.add_task(
+        goal=req.goal,
+        priority=req.priority,
+        run_at=req.run_at,
+    )
     return {"status": "queued", "task_id": task_id}
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(task_id: str):
+    """Get detailed status for a single task."""
+    from ..agent.scheduler import scheduler
+    task = scheduler.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task.summary()
+
 
 @app.delete("/api/tasks/{task_id}")
 async def cancel_task(task_id: str):
+    """Cancel a queued or running task."""
     from ..agent.scheduler import scheduler
-    await scheduler.cancel_task(task_id)
+    found = await scheduler.cancel_task(task_id)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return {"status": "cancelled", "task_id": task_id}
+
+
+@app.get("/api/tasks/{task_id}/logs")
+async def get_task_logs(task_id: str, since: int = 0):
+    """Stream log lines for a task (poll with ?since=N to get incremental lines)."""
+    from ..agent.scheduler import scheduler
+    lines = scheduler.get_logs(task_id, since_line=since)
+    return {"task_id": task_id, "since": since, "lines": lines, "total": since + len(lines)}
+
+
+@app.get("/api/screen-lock")
+def get_screen_lock_status():
+    """Current screen lock holder — useful for multi-task dashboard."""
+    from ..agent.resource_manager import screen_lock
+    return screen_lock.get_status()
 
 
 # ── Server configuration ──────────────────────────────────────────────────────
@@ -624,7 +680,28 @@ def run_workflow_endpoint(req: dict):
 def stub_adapters(): return {"adapters": []}
 
 @app.get("/api/human_input")
-def stub_human_input(): return {"pending": False}
+def get_human_input():
+    """Return the current pending approval request (if any)."""
+    from ..agent.human_gate import get_pending
+    pending = get_pending()
+    if pending:
+        return {"pending": True, "key": pending["key"], "message": pending["message"]}
+    return {"pending": False}
+
+
+class HumanInputResponse(BaseModel):
+    key: str
+    response: str   # "allow" | "block"
+
+
+@app.post("/api/human_input")
+def submit_human_input(req: HumanInputResponse):
+    """Respond to a pending approval request."""
+    from ..agent.human_gate import respond
+    found = respond(key=req.key, response=req.response)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"No pending request for key: {req.key}")
+    return {"status": "ok", "key": req.key, "response": req.response}
 
 @app.get("/api/logs")
 def get_logs(limit: int = 500):
