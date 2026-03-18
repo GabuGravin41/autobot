@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'motion/react';
-import { Bot, MousePointer2, Keyboard, ExternalLink, LogOut } from 'lucide-react';
+import { Bot, MousePointer2, Keyboard, ExternalLink, LogOut, Sparkles } from 'lucide-react';
 
 // Types
 import {
@@ -21,7 +21,7 @@ import {
   getRun as apiGetRun, deleteRun as apiDeleteRun, sendChat,
   runAutonomous, cancelAutonomous, getAutonomousStatus,
   BackendStatus, BackendAdapter, BackendRun, BackendWorkflow,
-  QueuedTask, ScreenLockStatus,
+  QueuedTask, ScreenLockStatus, submitOnboarding,
 } from './services/apiService';
 
 // Components
@@ -89,6 +89,14 @@ export default function App() {
   // ── Modals ────────────────────────────────────────────────────────────────
   const [selectedRun, setSelectedRun] = useState<RunHistory | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<any | null>(null);
+
+  // ── Onboarding ────────────────────────────────────────────────────────────
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingName, setOnboardingName] = useState('');
+  const [onboardingKaggle, setOnboardingKaggle] = useState('');
+  const [onboardingEditor, setOnboardingEditor] = useState('');
+  const [onboardingAiTools, setOnboardingAiTools] = useState('');
+  const [onboardingLanguage, setOnboardingLanguage] = useState('');
 
   // ── Effects ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -166,6 +174,32 @@ export default function App() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    if (!localStorage.getItem('autobot_onboarded')) {
+      const t = setTimeout(() => setShowOnboarding(true), 1000);
+      return () => clearTimeout(t);
+    }
+  }, [isAuthenticated]);
+
+  const dismissOnboarding = () => {
+    localStorage.setItem('autobot_onboarded', '1');
+    setShowOnboarding(false);
+  };
+
+  const handleOnboardingSave = async () => {
+    try {
+      await submitOnboarding({
+        name: onboardingName || undefined,
+        kaggle_username: onboardingKaggle || undefined,
+        editor: onboardingEditor || undefined,
+        ai_tools: onboardingAiTools || undefined,
+        language: onboardingLanguage || undefined,
+      });
+    } catch (_) { /* best-effort — don't block onboarding if backend fails */ }
+    dismissOnboarding();
+  };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleSendMessage = async () => {
@@ -363,6 +397,76 @@ export default function App() {
         selectedRun={selectedRun} onCloseRun={() => setSelectedRun(null)}
         selectedArtifact={selectedArtifact} onCloseArtifact={() => setSelectedArtifact(null)}
       />
+
+      {/* Onboarding overlay */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] flex items-center justify-center p-6"
+            style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)' }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.92, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.92, y: 20 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+              className="glass-panel rounded-3xl p-10 w-full max-w-lg space-y-8 relative"
+            >
+              {/* Header */}
+              <div className="flex flex-col items-center gap-3 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-[var(--brand-primary)] flex items-center justify-center shadow-xl shadow-[var(--brand-primary)]/30">
+                  <Sparkles className="text-white" size={26} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold tracking-tight">Let's set up Autobot</h2>
+                  <p className="text-sm text-[var(--base-text-muted)] mt-1">I'll remember this so you never have to repeat yourself</p>
+                </div>
+              </div>
+
+              {/* Fields */}
+              <div className="space-y-4">
+                {[
+                  { label: 'Your name', placeholder: 'e.g. Sarah', value: onboardingName, onChange: setOnboardingName },
+                  { label: 'Kaggle username', placeholder: 'e.g. sarah_ml', value: onboardingKaggle, onChange: setOnboardingKaggle },
+                  { label: 'Primary code editor', placeholder: 'e.g. VS Code, PyCharm', value: onboardingEditor, onChange: setOnboardingEditor },
+                  { label: 'AI tools you use', placeholder: 'e.g. ChatGPT, Claude, Gemini', value: onboardingAiTools, onChange: setOnboardingAiTools },
+                  { label: 'Preferred language', placeholder: 'e.g. Python, JavaScript', value: onboardingLanguage, onChange: setOnboardingLanguage },
+                ].map(({ label, placeholder, value, onChange }) => (
+                  <div key={label}>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-1.5">{label}</label>
+                    <input
+                      type="text"
+                      placeholder={placeholder}
+                      value={value}
+                      onChange={e => onChange(e.target.value)}
+                      className="input-field w-full"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={handleOnboardingSave}
+                  className="btn-primary w-full py-3.5 text-sm uppercase tracking-widest"
+                >
+                  Save &amp; Get Started
+                </button>
+                <button
+                  onClick={dismissOnboarding}
+                  className="text-[11px] text-[var(--base-text-muted)] hover:text-[var(--base-text)] transition-colors text-center underline underline-offset-2"
+                >
+                  Skip for now
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

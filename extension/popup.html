@@ -1,159 +1,70 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Autobot Settings</title>
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            width: 300px;
-            font-family: 'Segoe UI', -apple-system, sans-serif;
-            background: #0f1117;
-            color: #e2e8f0;
-            padding: 18px;
-        }
-
-        .logo-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 18px;
-        }
-
-        .logo-icon {
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #6366f1, #06b6d4);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .logo-icon svg {
-            fill: white;
-            width: 18px;
-            height: 18px;
-        }
-
-        h1 {
-            font-size: 15px;
-            font-weight: 700;
-        }
-
-        p.subtitle {
-            font-size: 11px;
-            color: #7c86aa;
-            margin-top: 2px;
-        }
-
-        label {
-            display: block;
-            font-size: 12px;
-            color: #a8b4d8;
-            margin-bottom: 6px;
-            margin-top: 14px;
-        }
-
-        input {
-            width: 100%;
-            background: #1a1d29;
-            border: 1px solid #2a2d3a;
-            border-radius: 6px;
-            color: #e2e8f0;
-            font-size: 12px;
-            padding: 8px 10px;
-            outline: none;
-            transition: border-color 0.15s;
-        }
-
-        input:focus {
-            border-color: #6366f1;
-        }
-
-        #status-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 10px;
-            font-size: 12px;
-            color: #7c86aa;
-        }
-
-        #status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #4a5068;
-        }
-
-        #status-dot.green {
-            background: #22c55e;
-        }
-
-        #status-dot.red {
-            background: #ef4444;
-        }
-
-        button {
-            margin-top: 14px;
-            width: 100%;
-            padding: 9px;
-            border: none;
-            border-radius: 6px;
-            background: linear-gradient(90deg, #6366f1, #06b6d4);
-            color: white;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: opacity 0.15s;
-        }
-
-        button:hover {
-            opacity: 0.9;
-        }
-
-        .saved-msg {
-            text-align: center;
-            font-size: 11px;
-            color: #22c55e;
-            margin-top: 8px;
-            min-height: 16px;
-        }
-    </style>
+    <title>Autobot</title>
+    <link rel="stylesheet" href="popup.css" />
 </head>
-
 <body>
-    <div class="logo-row">
+    <!-- Header -->
+    <div class="header">
         <div class="logo-icon">
-            <svg viewBox="0 0 24 24">
-                <path
-                    d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7H3a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13a.5.5 0 0 0-.5.5.5.5 0 0 0 .5.5.5.5 0 0 0 .5-.5.5.5 0 0 0-.5-.5m9 0a.5.5 0 0 0-.5.5.5.5 0 0 0 .5.5.5.5 0 0 0 .5-.5.5.5 0 0 0-.5-.5M3 21v-1a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v1H3Z" />
+            <svg viewBox="0 0 24 24" fill="white" width="18" height="18">
+                <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7H3a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2M7.5 13a.5.5 0 0 0-.5.5.5.5 0 0 0 .5.5.5.5 0 0 0 .5-.5.5.5 0 0 0-.5-.5m9 0a.5.5 0 0 0-.5.5.5.5 0 0 0 .5.5.5.5 0 0 0 .5-.5.5.5 0 0 0-.5-.5M3 21v-1a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v1H3Z"/>
             </svg>
         </div>
         <div>
-            <h1>Autobot</h1>
-            <p class="subtitle">Local AI Agent</p>
+            <span class="title">Autobot</span>
+            <span class="subtitle">Local AI Agent</span>
+        </div>
+        <div id="status-dot" class="dot" title="Connection status"></div>
+    </div>
+
+    <!-- Live screenshot -->
+    <div id="screenshot-wrap">
+        <img id="screenshot" src="" alt="Screen" />
+        <div id="screenshot-placeholder">No screenshot yet</div>
+    </div>
+
+    <!-- Run status bar -->
+    <div class="status-bar">
+        <span id="run-badge" class="badge badge-idle">IDLE</span>
+        <span id="step-info" class="step-info"></span>
+        <span id="model-info" class="model-info"></span>
+    </div>
+
+    <!-- Agent narrative -->
+    <div id="narrative-box" class="narrative" style="display:none"></div>
+
+    <!-- Current goal -->
+    <div id="goal-box" class="goal" style="display:none"></div>
+
+    <!-- Approval request -->
+    <div id="approval-box" class="approval-box" style="display:none">
+        <div class="approval-label">⚠️ Agent needs approval</div>
+        <div id="approval-msg" class="approval-msg"></div>
+        <div class="approval-btns">
+            <button id="allow-btn" class="btn-allow">Allow</button>
+            <button id="block-btn" class="btn-block">Block</button>
         </div>
     </div>
 
-    <label for="server-url">Backend Server URL</label>
-    <input id="server-url" type="url" placeholder="http://127.0.0.1:8000" />
-    <div id="status-row">
-        <div id="status-dot"></div>
-        <span id="status-text">Checking...</span>
+    <!-- Run controls -->
+    <div id="controls" class="controls" style="display:none">
+        <button id="abort-btn" class="btn-abort">Abort Run</button>
+        <a id="dashboard-link" class="btn-dash" target="_blank">Open Dashboard</a>
     </div>
-    <button id="save-btn">Save & Connect</button>
-    <p class="saved-msg" id="saved-msg"></p>
+
+    <!-- Settings row -->
+    <details class="settings-details">
+        <summary>Settings</summary>
+        <label>Backend URL</label>
+        <input id="server-url" type="url" placeholder="http://127.0.0.1:8000" />
+        <button id="save-btn" class="btn-save">Save</button>
+        <p id="saved-msg" class="saved-msg"></p>
+    </details>
 
     <script src="popup.js"></script>
 </body>
-
 </html>

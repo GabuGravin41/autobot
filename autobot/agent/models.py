@@ -189,6 +189,11 @@ class AgentOutput(BaseModel):
     next_goal: str = Field(
         description="One clear sentence: what you will do next and why."
     )
+    narrative: str = Field(
+        default="",
+        description="Plain English for the user: 'I am doing X because Y.' Max 1 sentence. "
+                    "Write as if explaining to the person watching. E.g. 'Opening Kaggle to submit the trained model.'"
+    )
     confidence: str = Field(
         default="high",
         description="How confident are you this action will succeed? 'high', 'medium', or 'low'. "

@@ -82,6 +82,8 @@ class StepPromptBuilder:
         max_steps: int,
         agent_history: str | None = None,
         native_ui: str | None = None,
+        page_snapshot=None,  # autobot.dom.page_snapshot.PageSnapshot | None
+        memories: list[tuple[str, str]] | None = None,  # [(key, value), ...]
     ):
         self.browser_state = browser_state
         self.task = task
@@ -89,6 +91,8 @@ class StepPromptBuilder:
         self.max_steps = max_steps
         self.agent_history = agent_history
         self.native_ui = native_ui
+        self.page_snapshot = page_snapshot
+        self.memories = memories or []
 
     def _get_screen_size(self) -> tuple[int, int]:
         """Read screen resolution from the page title set by AgentLoop."""
@@ -119,7 +123,17 @@ class StepPromptBuilder:
         """
         parts: list[str] = []
 
-        # 1. Agent history
+        # 1. Recalled memories from previous runs
+        if self.memories:
+            mem_lines = "\n".join(f"  {k}: {v}" for k, v in self.memories)
+            parts.append(
+                f"<memory>\n"
+                f"Facts remembered from previous sessions (use these to avoid repeating work):\n"
+                f"{mem_lines}\n"
+                f"</memory>"
+            )
+
+        # 2. Agent history
         if self.agent_history:
             parts.append(f"<agent_history>\n{self.agent_history}\n</agent_history>")
 
@@ -137,7 +151,27 @@ class StepPromptBuilder:
         browser_state_text = self._build_browser_state()
         parts.append(f"<browser_state>\n{browser_state_text}\n</browser_state>")
 
-        # 4. Screen resolution (critical for coordinate estimation in Human Mode)
+        # 4. DOM snapshot — structured element list from Chrome DevTools (when available)
+        if self.page_snapshot and self.page_snapshot.elements:
+            snapshot_text = self.page_snapshot.to_prompt_text()
+            parts.append(
+                f"<dom_snapshot>\n"
+                f"IMPORTANT: These are the REAL interactive elements on the current page, "
+                f"extracted directly from the browser DOM. Use element numbers [N] to identify "
+                f"what to click — coordinates from the screenshot are less reliable.\n\n"
+                f"{snapshot_text}\n"
+                f"</dom_snapshot>"
+            )
+        elif self.page_snapshot:
+            # Snapshot succeeded but no interactive elements — still show page text
+            parts.append(
+                f"<dom_snapshot>\n"
+                f"URL: {self.page_snapshot.url}\nTitle: {self.page_snapshot.title}\n"
+                f"(No interactive elements detected — page may still be loading)\n"
+                f"</dom_snapshot>"
+            )
+
+        # 5. Screen resolution (critical for coordinate estimation in Human Mode)
         screen_w, screen_h = self._get_screen_size()
         parts.append(
             f"<screen_info>\n"
@@ -150,7 +184,7 @@ class StepPromptBuilder:
             f"</screen_info>"
         )
 
-        # 5. Native OS state
+        # 6. Native OS state
         if self.native_ui:
             parts.append(f"<native_os_state>\n{self.native_ui}\n</native_os_state>")
 

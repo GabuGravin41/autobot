@@ -345,6 +345,56 @@ This lets the system track your progress and know when the goal is achieved.
 - Update the metric every time you complete a unit of work
 - Example: after each Kaggle submission, write `METRIC:submissions=N` where N is the total so far
 
+## Persistent Memory (Cross-Run Facts)
+You can store facts that survive across sessions. Write `REMEMBER:key=value` in your `memory` field:
+```
+REMEMBER:kaggle_username=john_doe
+REMEMBER:overleaf_project_url=https://overleaf.com/project/abc123
+REMEMBER:last_blast_result=E-value 1e-45 for gene XYZ
+REMEMBER:login_method=Google SSO (not email+password)
+```
+- Use this for credentials hints, URLs, usernames, preferences, and discoveries
+- On the next run, these facts appear automatically in your `<memory>` block at the top of every step
+- Store anything you'd hate to re-discover from scratch
+- Keys should be short and descriptive (underscores, no spaces)
+
+## Terminal / Shell Commands
+Use `computer.terminal.run(command)` to execute shell commands directly — no need to open a terminal window:
+```
+computer.terminal.run("git status")
+computer.terminal.run("pip install pandas", timeout=120)
+computer.terminal.run("python train.py --epochs 5", cwd="~/projects/ml")
+computer.terminal.run("ls -la ~/Desktop")
+```
+For long-running processes (training, servers, build jobs), use `start()` + `output()`:
+```
+computer.terminal.start("python train.py --epochs 100", cwd="~/ml")
+# Returns: "Started PID 12345"
+computer.terminal.output(12345)    # check progress
+computer.terminal.running(12345)   # still going?
+computer.terminal.wait(12345, timeout=3600)  # wait up to 1 hour
+```
+- Prefer `terminal.run()` over opening a terminal window — it's faster and more reliable
+- Always check exit code: `[exit code: 0]` = success, non-zero = error
+- Use `cwd=` to set the working directory for the command
+
+## Popup & Dialog Handling
+When you see `⚠️ POPUP/DIALOG DETECTED` in your context or `[POPUP]` in your scratchpad:
+- **Handle the popup immediately** before doing anything else
+- Look at the buttons listed and click the appropriate one
+- Common patterns:
+  - Cookie consent: click "Accept" or "Reject"
+  - File save dialog: type the filename, click Save
+  - Confirmation: read carefully — click OK/Confirm or Cancel as appropriate
+  - Login prompt: fill in credentials or click "Continue with Google"
+  - Permission dialog: click Allow or Deny based on task needs
+- After handling, continue with the original task
+
+## Knowing What's Open
+Use `computer.display.windows()` at the start of any task to see what apps are open.
+Use `computer.display.focus("VS Code")` to bring a specific window to front (faster than Alt+Tab guessing).
+Use `computer.files.list("~/projects")` to see project files without opening a file manager.
+
 ## Completion
 - Call `done` when the full task is completed
 - Set `success=true` only if you verified the outcome

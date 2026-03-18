@@ -88,6 +88,7 @@ class AgentLoop:
         llm_client: Any,  # OpenAI-compatible client
         goal: str,
         model: str = "gpt-4o",
+        fast_model: str | None = None,  # Cheaper model for routine steps (multi-LLM routing)
         max_steps: int | None = 100,   # None = perpetual
         max_actions_per_step: int = 5,
         use_vision: bool = True,
@@ -99,6 +100,9 @@ class AgentLoop:
         self.llm_client = llm_client
         self.goal = goal
         self.model = model
+        # fast_model: used for routine steps to reduce cost/latency.
+        # Step 0 (planning) and REPLAN steps always use the primary model.
+        self.fast_model: str | None = fast_model or os.getenv("AUTOBOT_FAST_MODEL")
         self.max_actions_per_step = max_actions_per_step
         self.use_vision = use_vision
         self.custom_instructions = custom_instructions
@@ -159,6 +163,10 @@ class AgentLoop:
         # Approval guard — gates risky actions based on AUTOBOT_APPROVAL_MODE
         self._approval_guard = ApprovalGuard()
 
+        # Persistent memory store — facts survive across runs
+        from autobot.memory.store import memory_store
+        self._memory_store = memory_store
+
         # Computer API for OS-level tools
         self.computer = Computer()
 
@@ -172,6 +180,7 @@ class AgentLoop:
         self.system_prompt = self.system_prompt_builder.build()
 
         self.last_screenshot_path: str | None = None
+        self._last_narrative: str = ""   # Latest plain-English "what I'm doing"
 
     def get_status(self) -> dict[str, Any]:
         """Returns the current status metadata for the dashboard."""
@@ -190,6 +199,7 @@ class AgentLoop:
             "eval_signal": self._last_eval_signal,
             "metrics": self.metrics,
             "elapsed_seconds": int(elapsed),
+            "narrative": self._last_narrative,
         }
 
     def _save_checkpoint(self):
@@ -349,6 +359,11 @@ class AgentLoop:
                 if self.step_number % self._checkpoint_interval == 0:
                     self._save_checkpoint()
 
+                # Periodic history compression (every 25 steps, when history > 15 entries)
+                _compress_interval = int(os.getenv("AUTOBOT_COMPRESS_INTERVAL", "25"))
+                if self.step_number > 0 and self.step_number % _compress_interval == 0 and len(self.history) > 15:
+                    await self._compress_history()
+
                 # Periodic EvaluationAgent check
                 if self.step_number > 0 and self.step_number % self._eval_interval == 0:
                     signal = await self._run_evaluation()
@@ -386,11 +401,32 @@ class AgentLoop:
         """
         step_start = time.time()
 
-        # ─── 1. OBSERVE (Vision-Only) ───
-        logger.debug(f"Step {self.step_number + 1}: Capturing vision observation...")
-        
+        # ─── 1. OBSERVE (Hybrid: DOM snapshot + Screenshot) ───
+        logger.debug(f"Step {self.step_number + 1}: Capturing observation...")
+
         import base64
-        screenshot_bytes = await self.page.screenshot()
+        from autobot.dom.page_snapshot import get_page_snapshot
+
+        # Run screenshot + DOM snapshot in parallel to save time
+        screenshot_bytes, page_snapshot = await asyncio.gather(
+            self.page.screenshot(),
+            get_page_snapshot(),
+            return_exceptions=True,
+        )
+
+        # Handle any exceptions from parallel gather
+        if isinstance(screenshot_bytes, Exception):
+            logger.warning(f"Screenshot failed: {screenshot_bytes}")
+            screenshot_bytes = b""
+        if isinstance(page_snapshot, Exception):
+            logger.debug(f"Page snapshot failed: {page_snapshot}")
+            page_snapshot = None
+
+        if page_snapshot:
+            logger.debug(
+                f"DOM snapshot: {page_snapshot.num_interactive} interactive elements, "
+                f"{len(page_snapshot.text)} chars of text"
+            )
 
         # Get screen resolution for coordinate guidance in prompt
         try:
@@ -398,7 +434,7 @@ class AgentLoop:
         except Exception:
             screen_w, screen_h = 1920, 1080
 
-        # Save full-res screenshot for dashboard live-view BEFORE downscaling
+        # Save full-res screenshot for dashboard live-view
         try:
             from pathlib import Path
             screenshot_dir = Path("screenshots")
@@ -409,19 +445,27 @@ class AgentLoop:
         except Exception as e:
             logger.warning(f"Failed to save agent screenshot: {e}")
 
-        # Compress screenshot PNG → JPEG to save tokens/money (no resolution change!)
+        # Compress screenshot PNG → JPEG to save tokens
         llm_screenshot_b64 = self._compress_screenshot(screenshot_bytes)
 
+        # Use real URL/title from DOM snapshot when available
+        page_url = (page_snapshot.url if page_snapshot and page_snapshot.url else self.page.url)
+        page_title = (
+            page_snapshot.title
+            if page_snapshot and page_snapshot.title
+            else f"Human Mode | Screen: {screen_w}×{screen_h}"
+        )
+
         browser_state = BrowserState(
-            url=self.page.url,
-            title=f"Human Mode | Screen: {screen_w}×{screen_h}",
+            url=page_url,
+            title=f"{page_title} | Screen: {screen_w}×{screen_h}",
             tabs=[],
             screenshot_b64=llm_screenshot_b64,
             element_tree=None,
             selector_map=SelectorMap(),
-            num_links=0,
-            num_interactive=0,
-            total_elements=0,
+            num_links=page_snapshot.num_links if page_snapshot else 0,
+            num_interactive=page_snapshot.num_interactive if page_snapshot else 0,
+            total_elements=page_snapshot.num_interactive if page_snapshot else 0,
             page_info=None
         )
 
@@ -441,9 +485,23 @@ class AgentLoop:
             selector_map=browser_state.selector_map,
         )
 
+        # Popup detection — inject scratchpad alert so agent handles it first
+        if page_snapshot and page_snapshot.has_popup:
+            popup_info = "; ".join(
+                f'"{d.get("title","?")}\" [{"/".join(d.get("buttons",[]))}]'
+                for d in page_snapshot.dialogs
+            )
+            alert = f"[POPUP] Dialog detected: {popup_info}. Handle this before continuing."
+            if not any("[POPUP]" in s for s in self.scratchpad[-3:]):
+                self.scratchpad.append(alert)
+                logger.info(f"🔔 Popup detected: {popup_info}")
+
         # ─── 2. THINK ───
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
-        
+
+        # Recall relevant memories for this goal
+        recalled = self._memory_store.recall(self.goal, top_k=6)
+
         # Build the step prompt
         step_builder = StepPromptBuilder(
             browser_state=browser_state,
@@ -452,6 +510,8 @@ class AgentLoop:
             max_steps=self.max_steps,
             agent_history=self._build_history_text(),
             native_ui=native_ui,
+            page_snapshot=page_snapshot,
+            memories=recalled,
         )
 
         user_messages = step_builder.build_messages(use_vision=self.use_vision)
@@ -492,6 +552,12 @@ class AgentLoop:
         #     f"Actions: {len(agent_output.action)}"
         # )
 
+        # Capture narrative for dashboard display
+        if agent_output.narrative:
+            self._last_narrative = agent_output.narrative
+        elif agent_output.next_goal:
+            self._last_narrative = agent_output.next_goal
+
         # ─── 3. ACT (hold ScreenLock so only one task touches the computer) ───
         logger.debug(f"Step {self.step_number + 1}: Acting...")
         async with screen_lock.acquire(
@@ -522,6 +588,16 @@ class AgentLoop:
         if any_failed and current_goal == self._last_goal:
             self._consecutive_failures += 1
             logger.warning(f"Consecutive failure #{self._consecutive_failures} on goal: {current_goal}")
+            # Auto-remember failed approaches after 3 consecutive failures
+            if self._consecutive_failures == 3:
+                import hashlib as _hl
+                key = "failed_" + _hl.md5(f"{self.goal[:40]}{current_goal[:40]}".encode()).hexdigest()[:8]
+                failed_actions = "; ".join(
+                    a.computer_call.call[:60] if a.computer_call else a.action_name
+                    for a in agent_output.action
+                ) or current_goal[:80]
+                self._memory_store.remember(key, f"FAILED 3x on '{current_goal[:60]}': {failed_actions}")
+                logger.info(f"🧠 Auto-remembered failure: {key}")
         elif any_failed:
             self._consecutive_failures = 1
         else:
@@ -533,16 +609,24 @@ class AgentLoop:
         if any_success and (page_changed or not any_failed):
             self._last_progress_time = time.time()
 
-        # Metric tracking: check for metric signals in scratchpad/memory
-        # Agent can write "METRIC:submissions=3" to its memory to update metrics
+        # Parse special directives from agent memory field
         if agent_output.memory:
             for line in agent_output.memory.splitlines():
+                # METRIC:key=value — update numeric metric tracker
                 if line.startswith("METRIC:"):
                     try:
                         kv = line[7:].strip()
                         k, v = kv.split("=", 1)
                         self.metrics[k.strip()] = float(v.strip())
                         logger.info(f"📈 Metric update: {k.strip()} = {v.strip()}")
+                    except Exception:
+                        pass
+                # REMEMBER:key=value — persist fact to cross-run memory store
+                elif line.startswith("REMEMBER:"):
+                    try:
+                        kv = line[9:].strip()
+                        k, v = kv.split("=", 1)
+                        self._memory_store.remember(k.strip(), v.strip())
                     except Exception:
                         pass
 
@@ -617,8 +701,20 @@ class AgentLoop:
         Free OpenRouter models frequently return empty responses when sent large
         base64 images, so the text-only fallback is critical for reliability.
         """
+        # Multi-LLM routing: use fast_model for routine steps (step > 0 and not a REPLAN).
+        # Step 0 is planning (needs full intelligence); REPLAN also uses primary model.
+        is_planning_step = self.step_number == 0
+        is_replan = self._last_eval_signal == "replan"
+        active_model = (
+            self.model
+            if (not self.fast_model or is_planning_step or is_replan)
+            else self.fast_model
+        )
+        if self.fast_model and active_model == self.fast_model:
+            logger.debug(f"[multi-LLM] Step {self.step_number}: using fast model ({self.fast_model})")
+
         args = {
-            "model": self.model,
+            "model": active_model,
             "messages": messages,
             "temperature": 0.2,
             "max_tokens": 4096,   # Agent needs room for detailed thinking + coordinate reasoning
@@ -628,11 +724,11 @@ class AgentLoop:
         async def _do_call(current_args: dict) -> str:
             resp = await self.llm_client.chat.completions.create(**current_args)
             if not resp.choices:
-                raise ValueError(f"No choices returned by {self.model}")
+                raise ValueError(f"No choices returned by {current_args['model']}")
             content = resp.choices[0].message.content
             if not content or not content.strip():
                 finish = getattr(resp.choices[0], "finish_reason", "unknown")
-                raise ValueError(f"Empty content from {self.model} (finish_reason={finish})")
+                raise ValueError(f"Empty content from {current_args['model']} (finish_reason={finish})")
             return str(content)
 
         last_error: Exception | None = None
@@ -1148,8 +1244,9 @@ class AgentLoop:
 
         module = getattr(self.computer, module_name, None)
         if module is None:
+            available = [a for a in dir(self.computer) if not a.startswith("_")]
             raise ValueError(f"Unknown computer module '{module_name}'. "
-                             f"Available: mouse, keyboard, clipboard, display, kaggle, anti_sleep")
+                             f"Available: {', '.join(available)}")
 
         method = getattr(module, method_name, None)
         if method is None:
@@ -1239,6 +1336,53 @@ class AgentLoop:
                 )
 
         return "\n".join(lines)
+
+    async def _compress_history(self) -> None:
+        """
+        Compress old history entries into a summary to prevent context overflow.
+
+        Keeps the last 10 steps verbatim. Summarises everything older into a
+        compact paragraph injected into the scratchpad as [HISTORY SUMMARY].
+        Called every AUTOBOT_COMPRESS_INTERVAL steps (default 25).
+        """
+        keep = 10
+        old_entries = self.history[:-keep]
+        if not old_entries:
+            return
+
+        # Build a compact text of the old entries
+        old_text = "\n".join(
+            f"Step {e.step_number + 1}: {e.agent_output.next_goal} → "
+            + (", ".join(r.extracted_content or r.error or "ok" for r in e.action_results[:2]))
+            for e in old_entries
+        )
+
+        summary = None
+        if self._evaluator:
+            try:
+                prompt = (
+                    f"Summarise these completed agent steps in 3-5 sentences, "
+                    f"focusing on what was accomplished and what failed:\n\n{old_text[:3000]}"
+                )
+                resp = await self.llm_client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                )
+                summary = resp.choices[0].message.content.strip()
+            except Exception:
+                pass
+
+        if not summary:
+            # Fallback: just list key outcomes
+            summary = f"Steps 0-{old_entries[-1].step_number + 1}: " + "; ".join(
+                e.agent_output.next_goal[:50] for e in old_entries[-5:]
+            )
+
+        # Inject into scratchpad and trim old history
+        self.scratchpad.append(f"[HISTORY SUMMARY — steps 0–{old_entries[-1].step_number + 1}] {summary}")
+        self.history = self.history[-keep:]
+        logger.info(f"📜 History compressed: {len(old_entries)} entries → 1 summary. {len(self.history)} recent steps kept.")
 
     def _summarize_history(self) -> str:
         """Generate a summary when the agent hits max steps."""

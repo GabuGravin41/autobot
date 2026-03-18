@@ -73,3 +73,102 @@ class Display:
         """Get screen height in pixels."""
         import pyautogui
         return pyautogui.size().height
+
+    @staticmethod
+    def windows() -> str:
+        """
+        List all open windows with their titles and applications.
+
+        Returns a formatted list so the agent knows what apps are open
+        without needing to take a screenshot. Use this to orient yourself
+        at the start of a task or to find which window to switch to.
+
+        Returns:
+            Formatted list of open windows, or a screenshot-based fallback.
+        """
+        import platform
+        import subprocess
+
+        system = platform.system()
+        try:
+            if system == "Linux":
+                # wmctrl -l lists: id  desktop  host  title
+                result = subprocess.run(
+                    ["wmctrl", "-l"], capture_output=True, text=True, timeout=3
+                )
+                if result.returncode == 0:
+                    lines = ["Open windows:\n"]
+                    for line in result.stdout.strip().splitlines():
+                        parts = line.split(None, 3)
+                        title = parts[3] if len(parts) > 3 else "(no title)"
+                        # Strip the hostname from the title
+                        import socket
+                        hostname = socket.gethostname()
+                        title = title.replace(hostname, "").strip()
+                        if title and title not in ("Desktop",):
+                            lines.append(f"  • {title}")
+                    return "\n".join(lines) if len(lines) > 1 else "No windows open."
+
+            elif system == "Darwin":  # macOS
+                script = 'tell application "System Events" to get name of every process whose background only is false'
+                result = subprocess.run(
+                    ["osascript", "-e", script], capture_output=True, text=True, timeout=3
+                )
+                if result.returncode == 0:
+                    apps = [a.strip() for a in result.stdout.strip().split(",")]
+                    return "Open applications:\n" + "\n".join(f"  • {a}" for a in apps if a)
+
+            elif system == "Windows":
+                import ctypes
+                # Use EnumWindows via subprocess powershell
+                ps = "Get-Process | Where-Object {$_.MainWindowTitle} | Select-Object Name,MainWindowTitle | Format-Table -AutoSize"
+                result = subprocess.run(
+                    ["powershell", "-Command", ps],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    return "Open windows:\n" + result.stdout.strip()
+
+        except FileNotFoundError:
+            return "Window listing unavailable (wmctrl not installed). Take a screenshot to see what's open."
+        except Exception as e:
+            logger.debug(f"windows() failed: {e}")
+
+        return "Window listing unavailable on this platform. Use screenshot to see what's open."
+
+    @staticmethod
+    def focus(window_title: str) -> str:
+        """
+        Bring a window to the foreground by searching its title.
+
+        Args:
+            window_title: Partial title of the window to focus (case-insensitive).
+
+        Returns:
+            Status string confirming which window was focused.
+        """
+        import platform
+        import subprocess
+
+        system = platform.system()
+        try:
+            if system == "Linux":
+                result = subprocess.run(
+                    ["wmctrl", "-a", window_title],
+                    capture_output=True, text=True, timeout=3,
+                )
+                import time; time.sleep(0.3)
+                if result.returncode == 0:
+                    return f"Focused window matching: '{window_title}'"
+                return f"No window found matching: '{window_title}'. Use display.windows() to see what's open."
+
+            elif system == "Darwin":
+                script = f'tell application "{window_title}" to activate'
+                subprocess.run(["osascript", "-e", script], timeout=3)
+                import time; time.sleep(0.3)
+                return f"Activated: {window_title}"
+
+        except Exception as e:
+            return f"focus() failed: {e}. Try Alt+Tab instead."
+
+        return f"focus() not supported on {system}."

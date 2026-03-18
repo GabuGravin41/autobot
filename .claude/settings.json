@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/rc_check/**)",
+      "Bash(tar -tzf researchclaw-0.1.4.tar.gz)",
+      "Bash(tar -xzf researchclaw-0.1.4.tar.gz --wildcards */pyproject.toml -O)",
+      "Bash(pip index:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python -c \":*)",
+      "Bash(wmctrl -l)"
+    ]
+  }
+}

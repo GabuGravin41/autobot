@@ -56,7 +56,23 @@ export interface BackendStatus {
     human_approval_pending?: ApprovalPending | null;
     anti_sleep_enabled?: boolean;
     auth_notification?: AuthNotification | null;
+    narrative?: string | null;
 }
+
+// ── Onboarding ──────────────────────────────────────────────────────────────
+export interface OnboardingData {
+    name?: string;
+    kaggle_username?: string;
+    editor?: string;
+    ai_tools?: string;
+    language?: string;
+}
+
+export const submitOnboarding = (data: OnboardingData): Promise<{ status: string; saved: string[] }> =>
+    apiFetch('/api/onboarding', { method: 'POST', body: JSON.stringify(data) });
+
+export const getOnboardingStatus = (): Promise<{ complete: boolean }> =>
+    apiFetch('/api/onboarding/status');
 
 export const getStatus = (): Promise<BackendStatus> =>
     apiFetch<BackendStatus>('/api/status');
@@ -330,7 +346,7 @@ export const getPendingHumanInput = (): Promise<{ pending: boolean; prompt?: str
     apiFetch('/api/human_input');
 
 export const submitHumanInput = (key: string, value: string): Promise<{ status: string; key: string }> =>
-    apiFetch('/api/human_input', { method: 'POST', body: JSON.stringify({ key, value }) });
+    apiFetch('/api/human_input', { method: 'POST', body: JSON.stringify({ key, response: value }) });
 
 // ── Anti-Sleep ──────────────────────────────────────────────────────────────
 export const toggleAntiSleep = (enabled: boolean): Promise<{ status: string; enabled: boolean }> =>

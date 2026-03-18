@@ -268,6 +268,7 @@ def get_agent_status():
         "browser": {
             "active": _agent_status == "running",
             "mode": "cdp",
+            "url": runner_status.get("browser_url", ""),
         },
         "anti_sleep_enabled": anti_sleep.enabled,
         "auth_notification": runner_status.get("auth_notification"),
@@ -702,6 +703,48 @@ def submit_human_input(req: HumanInputResponse):
     if not found:
         raise HTTPException(status_code=404, detail=f"No pending request for key: {req.key}")
     return {"status": "ok", "key": req.key, "response": req.response}
+
+class OnboardingData(BaseModel):
+    name: str | None = None
+    kaggle_username: str | None = None
+    editor: str | None = None
+    ai_tools: str | None = None
+    language: str | None = None
+
+
+@app.post("/api/onboarding")
+def submit_onboarding(data: OnboardingData):
+    """Save first-run onboarding profile to persistent memory."""
+    from ..memory.store import memory_store
+    saved: list[str] = []
+    if data.name:
+        memory_store.remember("user_name", data.name)
+        saved.append("name")
+    if data.kaggle_username:
+        memory_store.remember("kaggle_username", data.kaggle_username)
+        saved.append("kaggle_username")
+    if data.editor:
+        memory_store.remember("preferred_editor", data.editor)
+        saved.append("editor")
+    if data.ai_tools:
+        memory_store.remember("ai_tools", data.ai_tools)
+        saved.append("ai_tools")
+    if data.language:
+        memory_store.remember("preferred_language", data.language)
+        saved.append("language")
+    # Mark onboarding as complete so the UI doesn't show it again
+    memory_store.remember("onboarding_complete", "true")
+    return {"status": "ok", "saved": saved}
+
+
+@app.get("/api/onboarding/status")
+def onboarding_status():
+    """Check whether the user has completed first-run onboarding."""
+    from ..memory.store import memory_store
+    done = memory_store.recall("onboarding_complete", top_k=1)
+    complete = any(v == "true" for _, v in done)
+    return {"complete": complete}
+
 
 @app.get("/api/logs")
 def get_logs(limit: int = 500):

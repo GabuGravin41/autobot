@@ -49,6 +49,10 @@ class AgentRunner:
         self.browser_launcher = browser_launcher or AsyncBrowserLauncher.from_env()
         self.llm_client = llm_client
         self.model = model
+        # Fast model for routine steps — cheaper/faster (e.g. gemini-2.0-flash)
+        # Set AUTOBOT_FAST_MODEL env var to enable multi-LLM routing.
+        # If unset, all steps use the primary model.
+        self.fast_model: str | None = os.getenv("AUTOBOT_FAST_MODEL")
         self.max_steps = max_steps
         self.use_vision = use_vision
         self.log = log_callback or (lambda msg: logger.info(msg))
@@ -156,6 +160,7 @@ class AgentRunner:
                 llm_client=self.llm_client,
                 goal=goal,
                 model=self.model,
+                fast_model=self.fast_model,
                 max_steps=steps,
                 use_vision=self.use_vision,
                 stop_condition=estimate.stop_condition,
@@ -370,12 +375,31 @@ class AgentRunner:
         # Pull live state from active loop
         loop_status = active_loop.get_status() if active_loop else {}
 
+        # Inline screenshot as base64 for extension popup / status polling
+        screenshot_b64: str | None = None
+        ss_path = self.last_screenshot_path
+        if ss_path:
+            from pathlib import Path as _Path
+            p = _Path(ss_path)
+            if p.exists():
+                import base64 as _b64
+                screenshot_b64 = _b64.b64encode(p.read_bytes()).decode()
+
         status = {
             "status": self.status,
             "goal": self.current_goal,
             "current_step": self.current_step,
             "max_steps": loop_status.get("max_steps") or self._max_steps_override or self.max_steps,
             "result": self.result[:500] if self.result else "",
+            # Screenshot (base64 JPEG) for live dashboard / extension
+            "screenshot_b64": screenshot_b64,
+            # Plain-English narrative from agent
+            "narrative": loop_status.get("narrative", ""),
+            # LLM info
+            "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", ""),
+            "llm_model": self.model,
+            # Current browser URL (best-effort — page may be None if not yet launched)
+            "browser_url": self._get_current_url(),
             # Evaluation + stop condition progress
             "eval_signal": loop_status.get("eval_signal", "continue"),
             "stop_condition": loop_status.get("stop_condition"),
@@ -394,6 +418,16 @@ class AgentRunner:
         if hasattr(self, '_mission_agent') and self._mission_agent:
             status["mission"] = self._mission_agent.get_status()
         return status
+
+    def _get_current_url(self) -> str:
+        """Best-effort: return the current page URL from the active agent loop."""
+        try:
+            loop = self._agent_loop
+            if loop and loop.page:
+                return loop.page.url or ""
+        except Exception:
+            pass
+        return ""
 
 
 def _create_llm_client() -> Any | None:

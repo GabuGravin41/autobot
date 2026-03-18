@@ -4,10 +4,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
     Terminal, Play, CheckCircle2, AlertCircle, Activity, Zap, Monitor,
     Download, PlusCircle, Search, ChevronRight, FileText, Mail,
-    Maximize2, Minimize2, X, Move,
+    Maximize2, Minimize2, X, Move, Brain, ExternalLink,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, getBrowserScreenshotUrl } from '../services/apiService';
 import TaskQueuePanel from './TaskQueuePanel';
 
 interface DashboardPageProps {
@@ -52,6 +52,57 @@ export default function DashboardPage({
     };
 
     const handleDragEnd = () => setIsDragging(false);
+
+    const openScreenInNewWindow = () => {
+        const goal = activeRun?.planName || backendStatus?.browser?.url || 'Autobot Live Screen';
+        const escapedGoal = goal.replace(/`/g, '\\`').replace(/\\/g, '\\\\');
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>${goal.replace(/</g, '&lt;').replace(/>/g, '&gt;')} — Autobot Screen</title>
+  <meta charset="utf-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #e2e8f0; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #111827; border-bottom: 1px solid #1f2937; flex-shrink: 0; }
+    .title { font-size: 11px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: #94a3b8; }
+    .goal { font-size: 13px; font-weight: 600; color: #e2e8f0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .close-btn { padding: 5px 14px; background: #dc2626; color: white; border: none; border-radius: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; }
+    .close-btn:hover { background: #b91c1c; }
+    .screen-wrap { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; animation: pulse 1.5s infinite; display: inline-block; margin-right: 6px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="title"><span class="live-dot"></span>Live Screen — Autobot</div>
+      <div class="goal" id="goal-text"></div>
+    </div>
+    <button class="close-btn" onclick="window.close()">Close</button>
+  </header>
+  <div class="screen-wrap">
+    <img id="screen-img" src="" alt="Live screen" />
+  </div>
+  <script>
+    document.getElementById('goal-text').textContent = \`${escapedGoal}\`;
+    const BASE = '${getBrowserScreenshotUrl().replace(/\?t=\d+$/, '')}';
+    function refresh() {
+      document.getElementById('screen-img').src = BASE + '?t=' + Date.now();
+    }
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>`;
+        const win = window.open('', '_blank', 'width=1280,height=800,menubar=no,toolbar=no,location=no,status=no');
+        if (win) {
+            win.document.write(html);
+            win.document.close();
+        }
+    };
 
     const runArtifacts = activeRun?.artifacts ? Object.entries(activeRun.artifacts).map(([k, v]) => ({
         id: k,
@@ -146,6 +197,23 @@ export default function DashboardPage({
                                     </div>
                                 </div>
 
+                                {/* Agent narrative banner */}
+                                {backendStatus?.narrative && (
+                                    <motion.div
+                                        initial={{ opacity: 0, y: -6 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        className="flex items-start gap-3 px-4 py-3 rounded-2xl bg-[var(--brand-primary)]/10 border border-[var(--brand-primary)]/20"
+                                    >
+                                        <div className="shrink-0 mt-0.5 text-[var(--brand-primary)]">
+                                            <Brain size={16} />
+                                        </div>
+                                        <div>
+                                            <div className="text-[9px] font-bold uppercase tracking-widest text-[var(--brand-primary)] mb-1">What I'm doing</div>
+                                            <p className="text-sm text-[var(--base-text)] leading-relaxed">{backendStatus.narrative}</p>
+                                        </div>
+                                    </motion.div>
+                                )}
+
                                 {/* Log terminal */}
                                 <div className="glass-panel bg-[var(--base-border)] rounded-2xl p-6 h-[280px] flex flex-col">
                                     <div className="flex items-center justify-between mb-4 pb-4 border-b border-[var(--base-border)]">
@@ -176,12 +244,23 @@ export default function DashboardPage({
                                     <div className="space-y-4">
                                         <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] flex items-center gap-2 justify-between">
                                             <span className="flex items-center gap-2"><Monitor size={12} /> Screen preview</span>
-                                            <button
-                                                onClick={onRefreshScreenshot}
-                                                className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[10px] font-bold uppercase tracking-wider transition-colors"
-                                            >
-                                                {screenshotUrl ? 'Refresh' : 'See current screen'}
-                                            </button>
+                                            <div className="flex items-center gap-2">
+                                                {screenshotUrl && (
+                                                    <button
+                                                        onClick={openScreenInNewWindow}
+                                                        className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1"
+                                                        title="Pop out to new window"
+                                                    >
+                                                        <ExternalLink size={10} />
+                                                    </button>
+                                                )}
+                                                <button
+                                                    onClick={onRefreshScreenshot}
+                                                    className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[10px] font-bold uppercase tracking-wider transition-colors"
+                                                >
+                                                    {screenshotUrl ? 'Refresh' : 'See current screen'}
+                                                </button>
+                                            </div>
                                         </div>
                                         {screenshotUrl ? (
                                             <div
@@ -351,7 +430,10 @@ export default function DashboardPage({
                             <div className="flex items-center justify-between gap-2 mb-3">
                                 <h3 className="text-sm font-bold tracking-tight flex items-center gap-2"><Monitor size={14} /> Screen</h3>
                                 <div className="flex items-center gap-2">
-                                    <button onClick={() => setIsScreenPopout(true)} className="px-2 py-1 rounded-lg bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors" title="Pop out">
+                                    <button onClick={openScreenInNewWindow} className="px-2 py-1 rounded-lg bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1" title="Pop out to new window">
+                                        <ExternalLink size={12} />
+                                    </button>
+                                    <button onClick={() => setIsScreenPopout(true)} className="px-2 py-1 rounded-lg bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors" title="Pop out (floating)">
                                         <Maximize2 size={12} />
                                     </button>
                                     <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-[var(--brand-primary)]/20 hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors">

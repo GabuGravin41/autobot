@@ -116,15 +116,6 @@ class ApprovalGuard:
             return RiskTier.CAUTION
         return RiskTier.SAFE
 
-    def needs_approval(self, tier: RiskTier) -> bool:
-        """Does this risk tier require user approval under the current mode?"""
-        if self.mode == "trusted":
-            return False
-        if self.mode == "strict":
-            return tier in (RiskTier.CAUTION, RiskTier.DANGER)
-        # balanced (default)
-        return tier == RiskTier.DANGER
-
     async def gate(
         self,
         action: "ActionModel",
@@ -133,31 +124,75 @@ class ApprovalGuard:
         timeout: float = 120.0,
     ) -> bool:
         """
-        Gate an action.
+        Gate an action based on current approval mode and risk tier.
 
-        Returns True if the action should proceed, False if it should be skipped.
-        In trusted/safe modes this returns immediately without blocking.
+        trusted  — Always proceeds. Sends a desktop notification for DANGER actions
+                   so the user is informed but the agent never pauses.
+        balanced — Pauses for DANGER only; CAUTION proceeds with a warning log.
+        strict   — Pauses for CAUTION and DANGER; requires explicit Allow from user.
+
+        Returns True to proceed, False to skip this action.
         """
-        if not self.needs_approval(tier):
-            return True  # proceed immediately
+        text = _action_text(action)
+        tier_label = tier.value.upper()
 
+        if tier == RiskTier.SAFE:
+            return True
+
+        if self.mode == "trusted":
+            if tier == RiskTier.DANGER:
+                logger.warning(f"[TRUSTED/DANGER] Proceeding without pause: {text[:100]}")
+                _send_notification(
+                    title="Autobot — Risky Action (trusted mode)",
+                    body=f"Doing: {text[:120]}\nYou can pause or abort from the Autobot dashboard.",
+                )
+            return True  # trusted never pauses
+
+        if self.mode == "balanced" and tier == RiskTier.CAUTION:
+            logger.info(f"[BALANCED/CAUTION] Proceeding: {text[:100]}")
+            return True  # balanced only pauses for DANGER
+
+        # strict: pause for CAUTION + DANGER
+        # balanced: pause for DANGER
         from autobot.agent.human_gate import wait_for_approval
 
-        text = _action_text(action)
-        # Stable key so the same action in a tight loop produces the same key
         key = "approval_" + hashlib.md5(text.encode()).hexdigest()[:10]
-        tier_label = tier.value.upper()
         message = (
-            f"[{tier_label}] Agent wants to: {text[:200]}"
-            + (f"\n\nContext: {goal[:200]}" if goal else "")
+            f"[{tier_label}] Agent wants to:\n{text[:200]}"
+            + (f"\n\nCurrent goal: {goal[:200]}" if goal else "")
+            + f"\n\nMode: {self.mode} — click Allow to proceed or Block to skip."
         )
-
-        logger.warning(f"⛔ Approval required ({self.mode} mode, {tier_label}): {text[:100]}")
+        logger.warning(f"⛔ Approval required ({self.mode}/{tier_label}): {text[:100]}")
+        _send_notification(
+            title=f"Autobot needs your approval ({tier_label})",
+            body=f"{text[:120]}\nOpen the Autobot dashboard to Allow or Block.",
+        )
         allowed = await wait_for_approval(key=key, message=message, timeout=timeout)
-
-        if allowed:
-            logger.info(f"✅ User approved: {text[:80]}")
-        else:
-            logger.warning(f"🚫 User blocked (or timed out): {text[:80]}")
-
+        logger.info(f"{'✅ Approved' if allowed else '🚫 Blocked'}: {text[:80]}")
         return allowed
+
+
+# ── Desktop notification ──────────────────────────────────────────────────────
+
+def _send_notification(title: str, body: str) -> None:
+    """Send a best-effort desktop notification. Never raises."""
+    import platform
+    import subprocess
+    system = platform.system()
+    try:
+        if system == "Linux":
+            subprocess.Popen(
+                ["notify-send", "--urgency=normal", "--expire-time=8000", title, body],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        elif system == "Darwin":
+            script = f'display notification "{body[:200]}" with title "{title}"'
+            subprocess.Popen(["osascript", "-e", script],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif system == "Windows":
+            ps = (f"Add-Type -AssemblyName System.Windows.Forms; "
+                  f"[System.Windows.Forms.MessageBox]::Show('{body[:200]}','{title}')")
+            subprocess.Popen(["powershell", "-Command", ps],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass

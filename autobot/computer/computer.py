@@ -25,7 +25,10 @@ from autobot.computer.mouse import Mouse
 from autobot.computer.keyboard import Keyboard
 from autobot.computer.display import Display
 from autobot.computer.clipboard import Clipboard
+from autobot.computer.files import Files
+from autobot.computer.terminal import Terminal
 from autobot.computer.kaggle_tool import Kaggle
+from autobot.computer.research_tool import Research
 from autobot.computer.anti_sleep import anti_sleep
 
 if platform.system() == 'Windows':
@@ -51,7 +54,10 @@ class Computer:
         self.keyboard = Keyboard()
         self.display = Display()
         self.clipboard = Clipboard()
+        self.files = Files()
+        self.terminal = Terminal()
         self.kaggle = Kaggle()
+        self.research = Research()
         self.anti_sleep = anti_sleep
         if platform.system() == 'Windows':
             self.window = Window(self.mouse, self.keyboard)
@@ -63,7 +69,10 @@ class Computer:
             self.keyboard,
             self.display,
             self.clipboard,
+            self.files,
+            self.terminal,
             self.kaggle,
+            self.research,
             self.anti_sleep,
         ]
         if hasattr(self, 'window'):
@@ -106,7 +115,7 @@ class Computer:
         """
         methods: list[dict[str, str]] = []
 
-        for name, method in inspect.getmembers(tool, predicate=inspect.ismethod):
+        for name, method in inspect.getmembers(tool, predicate=lambda m: inspect.ismethod(m) or inspect.isfunction(m) or isinstance(m, staticmethod)):
             # Skip private/dunder methods
             if name.startswith("_"):
                 continue
