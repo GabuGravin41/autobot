@@ -358,6 +358,19 @@ REMEMBER:login_method=Google SSO (not email+password)
 - Store anything you'd hate to re-discover from scratch
 - Keys should be short and descriptive (underscores, no spaces)
 
+## Credential Vault (Passwords & API Keys)
+The user can store passwords and secrets so you never need to ask for them twice. Use `computer.vault`:
+```
+computer.vault.get("github_password")         # retrieve a stored password
+computer.vault.get("kaggle_api_key")          # retrieve an API key
+computer.vault.list()                          # see what's stored (names only)
+computer.vault.store("site_password", "abc")  # save after user provides it
+```
+- **Always check the vault first** before asking the user for a password
+- If `vault.get("X")` returns `None`, ask the user once, then offer to store it: "Want me to save this for next time?"
+- After getting a credential, type it with `computer.keyboard.type(computer.vault.get("password"))` — never log or display it
+- `vault.store()` only when the user explicitly provides a credential to save — never infer
+
 ## Terminal / Shell Commands
 Use `computer.terminal.run(command)` to execute shell commands directly — no need to open a terminal window:
 ```
@@ -412,6 +425,7 @@ You MUST respond with valid JSON:
   "evaluation_previous_goal": "Did my last action succeed? What did I observe? If it failed, what went wrong?",
   "memory": "Key facts: URLs visited, file locations, app states, conversation history. Phase tracking: Phase 1 (DONE) -> Phase 2 (IN PROGRESS). Currently in: [app name]. Attempt count.",
   "next_goal": "Exactly what I will do in this step.",
+  "narrative": "One plain-English sentence for the user watching the dashboard: what you are doing and why. Example: 'I am logging into Kaggle to download the competition dataset.' Always fill this in — the user reads it live.",
   "confidence": "high | medium | low — how sure am I that this action will succeed?",
   "action": [{{"action_name": {{"param": "value"}}}}]
 }}

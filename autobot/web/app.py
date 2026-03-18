@@ -26,9 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Set
 
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Response
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import logging
@@ -96,6 +96,12 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error", "error": str(exc)})
 
 # Allow Vite dev server + remote monitoring (Vercel, phone, etc.)
 _extra_origins = [o.strip() for o in os.getenv("AUTOBOT_CORS_ORIGINS", "").split(",") if o.strip()]
@@ -334,6 +340,12 @@ def _save_run_history(run_id: str, goal: str, success: bool, result: str):
 @app.get("/api/settings")
 def get_settings():
     provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter")
+    has_user_key = bool(
+        os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or
+        os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or
+        os.getenv("XAI_API_KEY")
+    )
+    using_default_key = bool(os.getenv("AUTOBOT_DEFAULT_API_KEY")) and not has_user_key
     return {
         "llm_provider": provider,
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", ""),
@@ -345,6 +357,7 @@ def get_settings():
         "llm_enabled": True,
         "cors_allow_all": os.getenv("AUTOBOT_CORS_ALLOW_ALL", "").lower() in ("1", "true", "yes"),
         "approval_mode": os.getenv("AUTOBOT_APPROVAL_MODE", "balanced"),
+        "using_default_key": using_default_key,
     }
 
 
@@ -976,6 +989,19 @@ def stop_tunnel():
 def tunnel_status():
     """Get the current tunnel status."""
     return {"active": _ngrok_url is not None, "url": _ngrok_url}
+
+
+# ── Health check ─────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+def health_check():
+    """Uptime check for monitoring, load balancers, and Docker HEALTHCHECK."""
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "agent_status": _agent_status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── Static Files mount — MUST be last so it doesn't shadow API/WS routes ─────

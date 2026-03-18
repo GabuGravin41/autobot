@@ -2,10 +2,14 @@
 set -e
 
 echo "=================================="
-echo " Starting Autobot (Linux/macOS)  "
+echo "   Starting Autobot (Linux/macOS) "
 echo "=================================="
 
-# 1. Setup Python Virtual Environment
+# ── Pre-flight checks ──────────────────────────────────────────────
+command -v python3 >/dev/null 2>&1 || { echo "❌ python3 not found. Please install Python 3.10+."; exit 1; }
+command -v npm    >/dev/null 2>&1 || { echo "❌ npm not found. Please install Node.js 18+."; exit 1; }
+
+# ── 1. Python virtual environment ─────────────────────────────────
 if [ ! -d "venv" ]; then
     echo ">> [1/4] Creating Python virtual environment..."
     python3 -m venv venv
@@ -17,34 +21,39 @@ echo ">> Activating virtual environment..."
 source venv/bin/activate
 
 echo ">> [2/4] Installing backend dependencies..."
-pip install -r requirements.txt > /dev/null
+pip install -r requirements.txt -q
 
-# 2. Setup Node environment
-echo ">> [3/4] Installing frontend dependencies..."
+# ── 2. Frontend build ──────────────────────────────────────────────
+echo ">> [3/4] Building frontend..."
 cd frontend
-npm install > /dev/null
+npm install -q
+npm run build
 cd ..
 
-# 3. Start Backend in background
-echo ">> [4/4] Launching FastApi backend..."
+# ── 3. Check .env ──────────────────────────────────────────────────
+if [ ! -f ".env" ]; then
+    echo ""
+    echo "⚠️  No .env file found. Creating from .env.example..."
+    cp .env.example .env
+    echo "   → Edit .env and add your API key before running tasks."
+    echo ""
+fi
+
+# ── 4. Launch backend ──────────────────────────────────────────────
+echo ">> [4/4] Launching Autobot backend..."
 export PYTHONPATH=$(pwd)
 python -m autobot.main &
 BACKEND_PID=$!
 
-# 4. Start Frontend
-echo ">> [4/4] Launching React frontend..."
-cd frontend
-npm run dev -- --host &
-FRONTEND_PID=$!
-
+echo ""
 echo "=================================="
-echo " Autopilot is now RUNNING!        "
-echo " Backend URL: http://0.0.0.0:8000 "
-echo " Frontend URL: http://localhost:3000 "
-echo " Press Ctrl+C to stop both servers."
+echo "   Autobot is now RUNNING!        "
+echo "   Open: http://127.0.0.1:8000    "
+echo "   Press Ctrl+C to stop.          "
 echo "=================================="
+echo ""
 
-# Catch termination signal and kill both processes
-trap "echo -e '\nStopping servers...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0" SIGINT SIGTERM EXIT
+# Catch termination and clean up
+trap "echo -e '\nStopping Autobot...'; kill $BACKEND_PID 2>/dev/null; exit 0" SIGINT SIGTERM EXIT
 
 wait

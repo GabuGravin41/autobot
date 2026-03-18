@@ -40,7 +40,7 @@ from autobot.agent.models import (
     ScrollAction,
     StepHistoryEntry,
 )
-from autobot.agent.approval import ApprovalGuard
+from autobot.agent.approval import ApprovalGuard, RiskTier
 from autobot.agent.evaluator import EvalSignal, EvaluationAgent
 from autobot.agent.resource_manager import screen_lock
 from autobot.agent.stop_condition import StopCondition, after_steps
@@ -49,6 +49,7 @@ from autobot.dom.models import (
     BrowserState,
     DOMSerializedState,
     SelectorMap,
+    TabInfo,
 )
 from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 
@@ -138,6 +139,10 @@ class AgentLoop:
         self._consecutive_failures = 0
         self._consecutive_step_errors = 0   # raw exception count
         self._last_goal = ""
+
+        # URL loop detection: counts how many times each URL has been the active page
+        self._url_visit_counts: dict[str, int] = {}
+        self._url_loop_alerted: set[str] = set()  # URLs we've already warned about
 
         # Watchdog: track last time the screen changed (action had effect)
         self._last_progress_time = time.time()
@@ -456,10 +461,23 @@ class AgentLoop:
             else f"Human Mode | Screen: {screen_w}×{screen_h}"
         )
 
+        # Build tab list from open HumanMode pages (tab_index = Chrome tab number)
+        _open_tabs: list[TabInfo] = []
+        try:
+            if hasattr(self.page, 'context') and hasattr(self.page.context, 'pages'):
+                for _p in self.page.context.pages:
+                    _open_tabs.append(TabInfo(
+                        tab_id=str(_p.tab_index),
+                        url=_p.url or "about:blank",
+                        title=f"Tab {_p.tab_index}",
+                    ))
+        except Exception:
+            pass
+
         browser_state = BrowserState(
             url=page_url,
             title=f"{page_title} | Screen: {screen_w}×{screen_h}",
-            tabs=[],
+            tabs=_open_tabs,
             screenshot_b64=llm_screenshot_b64,
             element_tree=None,
             selector_map=SelectorMap(),
@@ -495,6 +513,19 @@ class AgentLoop:
             if not any("[POPUP]" in s for s in self.scratchpad[-3:]):
                 self.scratchpad.append(alert)
                 logger.info(f"🔔 Popup detected: {popup_info}")
+
+        # URL loop detection — if visiting the same URL too many times, push agent to try something different
+        _url_key = page_url.split("?")[0].rstrip("/")  # normalise (strip query params & trailing slash)
+        self._url_visit_counts[_url_key] = self._url_visit_counts.get(_url_key, 0) + 1
+        _url_visits = self._url_visit_counts[_url_key]
+        if _url_visits >= 4 and _url_key not in self._url_loop_alerted:
+            self._url_loop_alerted.add(_url_key)
+            self.scratchpad.append(
+                f"[URL LOOP] You have been on '{_url_key}' {_url_visits} times without completing the goal. "
+                "Try a completely different approach: a different URL, a different tool, or a different strategy. "
+                "Do NOT keep repeating the same action."
+            )
+            logger.warning(f"🔁 URL loop detected: {_url_key} visited {_url_visits}x")
 
         # ─── 2. THINK ───
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
@@ -570,7 +601,19 @@ class AgentLoop:
             )
 
         # ─── 4. RECORD + REACTIVE TRACKING ───
+        # Read the real current URL from CDP — HumanModeEmulator._url is only
+        # updated by goto(), so click-based navigation would leave it stale.
         url_after = self.page.url
+        try:
+            from autobot.dom.page_snapshot import _get_current_url_sync
+            _real_url = await asyncio.to_thread(_get_current_url_sync)
+            if _real_url:
+                url_after = _real_url
+                # Sync back so loop detection and tab list see the correct URL
+                if hasattr(self.page, '_url'):
+                    self.page._url = _real_url
+        except Exception:
+            pass
         entry = StepHistoryEntry(
             step_number=self.step_number,
             agent_output=agent_output,
@@ -588,15 +631,34 @@ class AgentLoop:
         if any_failed and current_goal == self._last_goal:
             self._consecutive_failures += 1
             logger.warning(f"Consecutive failure #{self._consecutive_failures} on goal: {current_goal}")
-            # Auto-remember failed approaches after 3 consecutive failures
-            if self._consecutive_failures == 3:
+
+            # Inject a structured fallback suggestion after each failure
+            _FALLBACK_STRATEGIES = [
+                "Try a keyboard shortcut instead of clicking (e.g. Tab to navigate, Enter to confirm).",
+                "Scroll down/up — the target element may be off-screen.",
+                "Take a fresh screenshot first to re-observe the current state before acting.",
+                "Try right-clicking to reveal context menu options.",
+                "Refresh the page (F5) and wait 3 seconds before retrying.",
+                "Open the target in a new tab (Ctrl+T) to avoid cached/broken state.",
+                "Use computer.terminal.run() to verify or manipulate files instead of the UI.",
+                "Try a completely different URL or entry point to reach the same destination.",
+            ]
+            _hint = _FALLBACK_STRATEGIES[self._consecutive_failures % len(_FALLBACK_STRATEGIES)]
+            _hint_key = f"[FALLBACK #{self._consecutive_failures}]"
+            if not any(_hint_key in s for s in self.scratchpad[-5:]):
+                self.scratchpad.append(
+                    f"{_hint_key} Stuck on '{current_goal[:60]}'. Suggestion: {_hint}"
+                )
+
+            # Auto-remember failed approaches after 2 consecutive failures on the same goal
+            if self._consecutive_failures == 2:
                 import hashlib as _hl
                 key = "failed_" + _hl.md5(f"{self.goal[:40]}{current_goal[:40]}".encode()).hexdigest()[:8]
                 failed_actions = "; ".join(
                     a.computer_call.call[:60] if a.computer_call else a.action_name
                     for a in agent_output.action
                 ) or current_goal[:80]
-                self._memory_store.remember(key, f"FAILED 3x on '{current_goal[:60]}': {failed_actions}")
+                self._memory_store.remember(key, f"FAILED 2x on '{current_goal[:60]}': {failed_actions}")
                 logger.info(f"🧠 Auto-remembered failure: {key}")
         elif any_failed:
             self._consecutive_failures = 1
@@ -632,8 +694,15 @@ class AgentLoop:
 
         # Accumulate scratchpad from agent's memory (capture key findings)
         if agent_output.memory and len(agent_output.memory) > 20:
-            # Only save substantive memory entries (not just "retry" notes)
-            if not any(kw in agent_output.memory.lower() for kw in ("retry", "attempt", "trying again")):
+            # Suppress only very short/generic filler entries — keep substantive "retry" notes
+            # that contain actual context (URLs, values, error messages)
+            _mem = agent_output.memory.lower()
+            _is_pure_filler = (
+                len(agent_output.memory) < 50
+                and any(kw in _mem for kw in ("retry", "trying again", "attempt"))
+                and not any(useful in _mem for useful in ("http", "error", "fail", "url", "file", "step"))
+            )
+            if not _is_pure_filler:
                 self.scratchpad.append(f"[Step {self.step_number + 1}] {agent_output.memory}")
                 # Keep scratchpad manageable
                 if len(self.scratchpad) > 20:
@@ -859,7 +928,7 @@ class AgentLoop:
 
             # ── Approval gate ────────────────────────────────────────────────
             tier = self._approval_guard.classify(action)
-            if self._approval_guard.needs_approval(tier):
+            if tier != RiskTier.SAFE:
                 allowed = await self._approval_guard.gate(
                     action=action,
                     tier=tier,
@@ -909,7 +978,25 @@ class AgentLoop:
 
         try:
             if action.navigate is not None:
-                await self.page.goto(action.navigate.url)
+                target_url = action.navigate.url
+                await self.page.goto(target_url)
+                # Detect obvious page-load errors (redirect to error page, offline, etc.)
+                landed_url = self.page.url
+                _ERROR_SIGNALS = ("404", "403", "500", "503", "error", "not-found",
+                                  "page-not-found", "unavailable", "offline", "chrome-error")
+                url_lower = landed_url.lower()
+                if any(sig in url_lower for sig in _ERROR_SIGNALS):
+                    self.scratchpad.append(
+                        f"[PAGE ERROR] Navigated to '{target_url}' but landed on '{landed_url}' — "
+                        "possible 404/error page. Try a different URL or check if the site is down."
+                    )
+                    logger.warning(f"⚠️ Page error detected after navigate: {landed_url}")
+                    return ActionResult(
+                        action_name="navigate",
+                        success=False,
+                        error=f"Page load error — landed on '{landed_url}'. The page may be down or the URL wrong.",
+                        page_changed=True,
+                    )
                 return ActionResult(action_name="navigate", success=True, page_changed=True)
 
             elif action.click is not None:
@@ -954,15 +1041,17 @@ class AgentLoop:
                 return ActionResult(action_name="new_tab", success=True, page_changed=True)
 
             elif action.switch_tab is not None:
+                tab_id = action.switch_tab.tab_id
                 for p in self.page.context.pages:
-                    if str(hash(p))[-6:] == action.switch_tab.tab_id:
+                    if str(getattr(p, 'tab_index', '')) == tab_id:
                         self.page = p
                         await p.bring_to_front()
                         return ActionResult(action_name="switch_tab", success=True, page_changed=True)
+                available = [str(getattr(p, 'tab_index', '?')) for p in self.page.context.pages]
                 return ActionResult(
                     action_name="switch_tab",
                     success=False,
-                    error=f"Tab {action.switch_tab.tab_id} not found",
+                    error=f"Tab {tab_id} not found. Available tabs: {available}",
                 )
 
             elif action.close_tab is not None:
@@ -1370,8 +1459,8 @@ class AgentLoop:
                     max_tokens=200,
                 )
                 summary = resp.choices[0].message.content.strip()
-            except Exception:
-                pass
+            except Exception as compress_err:
+                logger.warning(f"History compression LLM call failed (using fallback): {compress_err}")
 
         if not summary:
             # Fallback: just list key outcomes

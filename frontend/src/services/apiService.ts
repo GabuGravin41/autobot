@@ -13,17 +13,30 @@ import { API_BASE, WS_BASE } from '../config';
 const BASE_URL = API_BASE;
 
 
-/** Generic fetch helper with JSON body */
-async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-    const res = await fetch(`${BASE_URL}${path}`, {
-        headers: { 'Content-Type': 'application/json', ...(options?.headers || {}) },
-        ...options,
-    });
-    if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`API Error ${res.status}: ${err}`);
+/** Generic fetch helper with JSON body and 15s timeout */
+async function apiFetch<T>(path: string, options?: RequestInit & { timeoutMs?: number }): Promise<T> {
+    const timeoutMs = options?.timeoutMs ?? 15_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(`${BASE_URL}${path}`, {
+            headers: { 'Content-Type': 'application/json', ...(options?.headers || {}) },
+            signal: controller.signal,
+            ...options,
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`API Error ${res.status}: ${err}`);
+        }
+        return res.json();
+    } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') {
+            throw new Error(`Request to ${path} timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
     }
-    return res.json();
 }
 
 // ── Status ─────────────────────────────────────────────────────────────────
@@ -211,7 +224,9 @@ export interface BackendSettings {
     browser_mode: string;
     has_openrouter_key: boolean;
     has_openai_key: boolean;
+    has_google_key: boolean;
     approval_mode: 'strict' | 'balanced' | 'trusted';
+    using_default_key: boolean;
 }
 
 export const getSettings = (): Promise<BackendSettings> =>
@@ -236,8 +251,8 @@ export const getLogs = (limit: number = 500): Promise<LogsResponse> =>
     apiFetch(`/api/logs?limit=${limit}`).then((r: any) => ({ logs: r.logs || [] }));
 
 // ── WebSocket log streaming (with exponential backoff and optional polling fallback) ─
-const WS_RECONNECT_BASE_MS = 2000;
-const WS_RECONNECT_MAX_MS = 30000;
+const WS_RECONNECT_BASE_MS = 1000;
+const WS_RECONNECT_MAX_MS = 10000;  // max 10s between retries (was 30s)
 const WS_MAX_RECONNECT_ATTEMPTS = 15;
 
 export function connectLogStream(

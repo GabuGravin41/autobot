@@ -1,19 +1,28 @@
-FROM node:20-alpine
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies
+# Install dependencies first (cached layer)
 COPY package*.json ./
-RUN npm install
+RUN npm ci --silent
 
-# Copy application code
+# Copy source and build
 COPY . .
+ARG VITE_API_URL=""
+ENV VITE_API_URL=${VITE_API_URL}
+RUN npm run build
 
-# Set environment
-ENV HOST=0.0.0.0
-ENV PORT=3000
+# ── Stage 2: Serve ────────────────────────────────────────────────────────────
+# Serve the built static files with Vite preview (lightweight, no dev overhead)
+FROM node:20-alpine AS runtime
 
-# Build for production could go here, but for development we just start Vite
+WORKDIR /app
+
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package*.json ./
+RUN npm ci --silent --omit=dev
+
 EXPOSE 3000
 
-CMD ["npm", "run", "dev", "--", "--host"]
+CMD ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "3000", "--outDir", "dist"]

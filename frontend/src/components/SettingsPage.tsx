@@ -81,7 +81,7 @@ export default function SettingsPage({
     const [showApiKey, setShowApiKey] = useState(false);
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
-    const [currentConfig, setCurrentConfig] = useState({ provider: '', model: '', hasKey: false });
+    const [currentConfig, setCurrentConfig] = useState({ provider: '', model: '', hasKey: false, usingDefaultKey: false });
     const [customModels, setCustomModels] = useState<{ id: string; name: string }[]>([]);
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
@@ -99,6 +99,7 @@ export default function SettingsPage({
                 provider: settings.llm_provider || 'google',
                 model: settings.llm_model || '',
                 hasKey: settings.has_google_key || settings.has_openrouter_key || settings.has_openai_key,
+                usingDefaultKey: settings.using_default_key || false,
             });
             // Set initial provider from saved config
             if (settings.llm_provider) setSelectedProvider(settings.llm_provider);
@@ -170,8 +171,24 @@ export default function SettingsPage({
                 <p className="text-[var(--base-text-muted)]">Configure your Autobot instance — LLM provider, API keys, and preferences.</p>
             </header>
 
+            {/* Shared/default key warning banner */}
+            {currentConfig.usingDefaultKey && (
+                <div className="glass-panel p-4 rounded-2xl border border-amber-500/40 flex items-start gap-4 bg-amber-500/5">
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center flex-shrink-0">
+                        <AlertCircle size={18} className="text-amber-400" />
+                    </div>
+                    <div className="flex-1">
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-amber-400 mb-1">Using Shared API Key</div>
+                        <div className="text-sm text-[var(--base-text-muted)]">
+                            Autobot is running on a built-in shared key — you may hit rate limits during heavy use.
+                            Add your own free key below to get dedicated quota.
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Current config banner */}
-            {currentConfig.model && (
+            {currentConfig.model && !currentConfig.usingDefaultKey && (
                 <div className="glass-panel p-4 rounded-2xl border border-[var(--brand-primary)]/20 flex items-center gap-4">
                     <div className="w-10 h-10 rounded-xl bg-[var(--brand-primary)]/20 flex items-center justify-center">
                         <Server size={18} className="text-[var(--brand-primary)]" />

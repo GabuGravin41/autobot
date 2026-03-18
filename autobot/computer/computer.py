@@ -29,6 +29,7 @@ from autobot.computer.files import Files
 from autobot.computer.terminal import Terminal
 from autobot.computer.kaggle_tool import Kaggle
 from autobot.computer.research_tool import Research
+from autobot.computer.vault import Vault
 from autobot.computer.anti_sleep import anti_sleep
 
 if platform.system() == 'Windows':
@@ -58,6 +59,7 @@ class Computer:
         self.terminal = Terminal()
         self.kaggle = Kaggle()
         self.research = Research()
+        self.vault = Vault()
         self.anti_sleep = anti_sleep
         if platform.system() == 'Windows':
             self.window = Window(self.mouse, self.keyboard)
@@ -71,6 +73,7 @@ class Computer:
             self.clipboard,
             self.files,
             self.terminal,
+            self.vault,
             self.kaggle,
             self.research,
             self.anti_sleep,

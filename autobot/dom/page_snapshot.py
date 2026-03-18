@@ -196,48 +196,79 @@ async def _get_active_tab_ws_url() -> str | None:
     return None
 
 
+def _get_current_url_sync() -> str | None:
+    """
+    Read the active tab URL from Chrome's CDP JSON endpoint (no WebSocket needed).
+
+    This is a cheap synchronous HTTP call (~1ms) used to get the real current URL
+    after the agent navigates by clicking — the HumanModeEmulator's cached _url
+    only updates on goto() calls, so this gives us the truth.
+
+    Returns None if Chrome isn't running or isn't reachable.
+    """
+    try:
+        req = urllib.request.urlopen(
+            f"http://{_CDP_HOST}:{_CDP_PORT}/json", timeout=1
+        )
+        tabs = json.loads(req.read())
+        for tab in tabs:
+            if tab.get("type") == "page" and tab.get("url"):
+                return tab["url"]
+    except Exception:
+        pass
+    return None
+
+
 async def get_page_snapshot(timeout: float = 4.0) -> PageSnapshot | None:
     """
     Extract a structured snapshot of the current browser page via CDP.
 
     Returns None if Chrome DevTools is unavailable or the call times out.
     Never raises — always safe to call and ignore the result.
+    Retries up to 2 times with short backoff for transient connection failures.
     """
-    try:
-        ws_url = await asyncio.wait_for(_get_active_tab_ws_url(), timeout=1.0)
-        if not ws_url:
-            return None
-
-        client = CDPClient(ws_url)
-        await asyncio.wait_for(client.connect(), timeout=2.0)
-
+    last_error: Exception | None = None
+    for attempt in range(3):
         try:
-            result = await asyncio.wait_for(
-                client.call("Runtime.evaluate", {
-                    "expression": _JS_EXTRACT,
-                    "returnByValue": True,
-                }),
-                timeout=timeout,
+            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(), timeout=1.0)
+            if not ws_url:
+                return None  # Chrome not running — no point retrying
+
+            client = CDPClient(ws_url)
+            await asyncio.wait_for(client.connect(), timeout=2.0)
+
+            try:
+                result = await asyncio.wait_for(
+                    client.call("Runtime.evaluate", {
+                        "expression": _JS_EXTRACT,
+                        "returnByValue": True,
+                    }),
+                    timeout=timeout,
+                )
+            finally:
+                await client.close()
+
+            value = result.get("result", {}).get("value")
+            if not value:
+                return None
+
+            data = json.loads(value)
+            return PageSnapshot(
+                url=data.get("url", ""),
+                title=data.get("title", ""),
+                elements=data.get("elements", []),
+                text=data.get("text", ""),
+                num_interactive=data.get("num_interactive", 0),
+                num_links=data.get("num_links", 0),
+                num_inputs=data.get("num_inputs", 0),
+                dialogs=data.get("dialogs", []),
             )
-        finally:
-            await client.close()
 
-        value = result.get("result", {}).get("value")
-        if not value:
-            return None
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))  # 0.5s, 1.0s backoff
+            continue
 
-        data = json.loads(value)
-        return PageSnapshot(
-            url=data.get("url", ""),
-            title=data.get("title", ""),
-            elements=data.get("elements", []),
-            text=data.get("text", ""),
-            num_interactive=data.get("num_interactive", 0),
-            num_links=data.get("num_links", 0),
-            num_inputs=data.get("num_inputs", 0),
-            dialogs=data.get("dialogs", []),
-        )
-
-    except Exception as e:
-        logger.debug(f"Page snapshot unavailable: {e}")
-        return None
+    logger.debug(f"Page snapshot unavailable after 3 attempts: {last_error}")
+    return None

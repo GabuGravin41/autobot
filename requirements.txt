@@ -1,12 +1,40 @@
-fastapi>=0.111.0
-uvicorn[standard]>=0.29.0
-pydantic>=2.5.0
+# ── Web framework ─────────────────────────────────────────────────
+fastapi>=0.111.0,<1.0.0
+uvicorn[standard]>=0.29.0,<1.0.0
+pydantic>=2.5.0,<3.0.0
 python-dotenv>=1.0.0
-pyautogui>=0.9.54
+
+# ── LLM providers ────────────────────────────────────────────────
+openai>=1.0.0               # OpenAI + OpenRouter + xAI (all openai-compat)
+google-generativeai>=0.8.0  # Google Gemini direct API
+
+# ── Browser / automation ─────────────────────────────────────────
 playwright>=1.49.0
-openai>=1.0.0
+pyautogui>=0.9.54
+
+# ── HTTP + WebSocket ──────────────────────────────────────────────
 httpx>=0.25.0
 websockets>=12.0
+
+# ── Desktop control (Linux) ───────────────────────────────────────
+# xdotool and wmctrl are system packages — install via:
+#   sudo apt install xdotool wmctrl   (Ubuntu/Debian)
+#   brew install xdotool              (macOS, wmctrl not needed)
+
+# ── Image processing ─────────────────────────────────────────────
+Pillow>=10.0.0              # Screenshot JPEG compression (reduces LLM token usage)
+
+# ── Encryption (Credential Vault) ─────────────────────────────────
+cryptography>=41.0.0        # Fernet encryption for ~/.autobot/vault.json
+
+# ── Kaggle ────────────────────────────────────────────────────────
 kaggle>=1.6.0
-uiautomation>=2.0.29
-numpy<2
+
+# ── Windows UI automation (Windows only, skipped on Linux/macOS) ─
+# uiautomation>=2.0.29  # Uncomment on Windows only
+
+# ── Numeric / ML ─────────────────────────────────────────────────
+numpy>=1.24.0,<2.0.0        # numpy 2.x has breaking changes with some deps
+
+# ── Packaging (dev/build only) ────────────────────────────────────
+# pyinstaller>=6.0.0        # Uncomment when building desktop AppImage

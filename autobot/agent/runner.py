@@ -440,10 +440,13 @@ def _create_llm_client() -> Any | None:
     - openai       → OpenAI directly (OPENAI_API_KEY)
     - xai          → Grok via x.ai (XAI_API_KEY)
     - auto         → tries google → openrouter → openai in order
+
+    Default key: if no user key is set, falls back to AUTOBOT_DEFAULT_API_KEY
+    (bundled in the distributed binary for zero-config first-run experience).
     """
     from openai import AsyncOpenAI
 
-    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter").lower()
+    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "auto").lower()
 
     if provider == "google":
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
@@ -493,4 +496,33 @@ def _create_llm_client() -> Any | None:
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
             return AsyncOpenAI(api_key=api_key)
+
+        # ── Default key fallback (zero-config / bundled binary) ──────────────
+        # AUTOBOT_DEFAULT_API_KEY and AUTOBOT_DEFAULT_PROVIDER are set when
+        # building the distributed binary so users can start immediately without
+        # configuring their own key. Users override by adding their own key to
+        # .env or via the Settings page.
+        default_key = os.getenv("AUTOBOT_DEFAULT_API_KEY")
+        default_provider = os.getenv("AUTOBOT_DEFAULT_PROVIDER", "google")
+        default_model = os.getenv("AUTOBOT_DEFAULT_MODEL", "gemini-2.0-flash")
+        if default_key:
+            logger.info(
+                f"Using built-in shared API key (provider={default_provider}, model={default_model}). "
+                "Add your own key in Settings to avoid rate limits."
+            )
+            # Set env vars so the rest of the system picks up the right model
+            if not os.getenv("AUTOBOT_LLM_MODEL"):
+                os.environ["AUTOBOT_LLM_MODEL"] = default_model
+            if default_provider == "google":
+                return AsyncOpenAI(
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                    api_key=default_key,
+                )
+            elif default_provider == "openrouter":
+                return AsyncOpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=default_key,
+                )
+            return AsyncOpenAI(api_key=default_key)
+
         return None

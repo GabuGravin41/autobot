@@ -48,6 +48,23 @@ class _BackgroundProcess:
         self._output_offset = 0  # bytes already returned by output()
 
 
+_LOG_RETENTION_DAYS = 7  # delete terminal logs older than this
+
+
+def _cleanup_old_logs(log_dir: Path) -> None:
+    """Delete log files older than _LOG_RETENTION_DAYS. Silent, best-effort."""
+    try:
+        cutoff = time.time() - _LOG_RETENTION_DAYS * 86400
+        for f in log_dir.glob("proc_*.log"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 class Terminal:
     """
     Shell command execution tool.
@@ -155,6 +172,7 @@ class Terminal:
         # Write output to a temp log file so we can tail it
         log_dir = Path.home() / ".autobot" / "terminal_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+        _cleanup_old_logs(log_dir)  # prune logs older than 7 days
         log_path = log_dir / f"proc_{int(time.time())}.log"
 
         try:

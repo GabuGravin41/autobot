@@ -11,7 +11,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
-    CheckCircle2, Clock, X, Plus, ChevronDown, ChevronUp,
+    AlertCircle, CheckCircle2, Clock, X, Plus, ChevronDown, ChevronUp,
     Activity, Cpu, BarChart2, Loader2, Ban, Terminal,
 } from 'lucide-react';
 import { QueuedTask, ScreenLockStatus, getTaskLogs } from '../services/apiService';

@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ class MemoryStore:
         env_path = os.getenv("AUTOBOT_MEMORY_PATH")
         self.path = Path(env_path) if env_path else (path or _DEFAULT_PATH)
         self._data: dict[str, dict] = {}
+        self._lock = threading.Lock()
         self._load()
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -43,6 +45,7 @@ class MemoryStore:
             self._data = {}
 
     def _save(self) -> None:
+        # Caller must hold self._lock
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(
@@ -58,20 +61,22 @@ class MemoryStore:
         """Store or update a fact. Key is normalised to lowercase-underscore."""
         key = _normalise_key(key)
         now = datetime.now(timezone.utc).isoformat()
-        existing = self._data.get(key)
-        self._data[key] = {
-            "value": value.strip(),
-            "updated": now,
-            "hits": (existing["hits"] if existing else 0),
-        }
-        self._save()
+        with self._lock:
+            existing = self._data.get(key)
+            self._data[key] = {
+                "value": value.strip(),
+                "updated": now,
+                "hits": (existing["hits"] if existing else 0),
+            }
+            self._save()
         logger.info(f"🧠 Remembered: {key} = {value[:60]}")
 
     def forget(self, key: str) -> None:
         key = _normalise_key(key)
-        if key in self._data:
-            del self._data[key]
-            self._save()
+        with self._lock:
+            if key in self._data:
+                del self._data[key]
+                self._save()
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
@@ -96,13 +101,13 @@ class MemoryStore:
 
         scored.sort(reverse=True)
         results = []
-        for _, key in scored[:top_k]:
-            entry = self._data[key]
-            entry["hits"] = entry.get("hits", 0) + 1
-            results.append((key, entry["value"]))
-
-        if results:
-            self._save()  # persist hit counts
+        with self._lock:
+            for _, key in scored[:top_k]:
+                entry = self._data[key]
+                entry["hits"] = entry.get("hits", 0) + 1
+                results.append((key, entry["value"]))
+            if results:
+                self._save()  # persist hit counts
         return results
 
     def all_entries(self) -> list[tuple[str, str]]:
