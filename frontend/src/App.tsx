@@ -323,6 +323,10 @@ export default function App() {
                     const resp = await getTasks().catch(() => ({ tasks: [] }));
                     setScheduledTasks(resp.tasks);
                   }}
+                  onPlanFirst={(goal) => {
+                    setChatInput(goal);
+                    navigate('/planner');
+                  }}
                 />
               } />
               <Route path="/planner" element={
@@ -344,6 +348,7 @@ export default function App() {
                   onRunStart={setActiveRun}
                   onRunIdUpdate={(id) => setActiveRun(prev => prev ? { ...prev, id } : null)}
                   onRunError={(msg) => setActiveRun(prev => prev ? { ...prev, status: 'failed', logs: [...(prev.logs || []), 'Failed: ' + msg] } : null)}
+                  onWorkflowsChange={setWorkflows}
                 />
               } />
               <Route path="/history" element={

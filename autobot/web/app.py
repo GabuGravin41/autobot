@@ -3,9 +3,11 @@ autobot/web/app.py — FastAPI application bridging the React frontend
 to the new Agent architecture.
 
 API surface:
-  POST /api/agent/run      → start the new agent loop
-  GET  /api/agent/status   → get status of active agent
-  POST /api/agent/cancel   → cancel active agent
+  POST /api/agent/run         → start the new agent loop
+  GET  /api/agent/status      → get status of active agent
+  POST /api/agent/cancel      → cancel active agent
+  POST /api/mission/leetcode  → LeetCode multi-AI solving mission
+  POST /api/task/background   → non-visual background task (parallel)
 
   GET  /api/settings       → read current settings
   POST /api/settings       → update .env-based settings
@@ -198,6 +200,68 @@ def start_agent_run(req: AgentRunRequest):
     return {"run_id": run_id, "status": "started", "goal": req.goal}
 
 
+class LeetCodeRunRequest(BaseModel):
+    num_problems: int = 5
+    language: str = "python3"
+
+
+@app.post("/api/mission/leetcode")
+def start_leetcode_mission(req: LeetCodeRunRequest):
+    """
+    Start the LeetCode multi-AI solving mission.
+
+    Opens LeetCode + Claude/Grok/DeepSeek tabs and solves unsolved problems
+    by consulting each AI, picking the best solution, and submitting.
+    Tracks accuracy across all attempted problems.
+    """
+    global _agent_runner, _agent_status, _active_run_id, _run_log
+
+    run_id = f"leetcode_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+
+    with _agent_lock:
+        if _agent_status == "running":
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+        _active_run_id = run_id
+        _agent_status = "running"
+        _run_log.clear()
+
+    from ..missions.leetcode import LeetCodeMission
+    lc_mission = LeetCodeMission.from_env(
+        num_problems=req.num_problems,
+        language=req.language,
+        log_callback=_log,
+    )
+    _agent_runner = lc_mission.agent_runner
+
+    def _run_in_thread():
+        global _agent_status
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(lc_mission.run())
+            with _agent_lock:
+                _agent_status = "done"
+            _save_run_history(run_id, f"LeetCode: {req.num_problems} problems", True, result)
+        except Exception as ex:
+            with _agent_lock:
+                _agent_status = "failed"
+            _save_run_history(run_id, f"LeetCode: {req.num_problems} problems", False, str(ex))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_in_thread, daemon=True, name=f"leetcode-{run_id}").start()
+    return {
+        "run_id": run_id,
+        "status": "started",
+        "goal": f"Solve {req.num_problems} LeetCode problems in {req.language}",
+        "mode": "leetcode_mission",
+    }
+
+
 class MissionRunRequest(BaseModel):
     goal: str
 
@@ -295,6 +359,52 @@ async def get_browser_screenshot():
         logger.debug(f"Failed to serve screenshot: {e}")
     
     return Response(content=b"", media_type="image/png")
+
+
+class BackgroundRunRequest(BaseModel):
+    goal: str
+    max_steps: int = 50
+
+
+@app.post("/api/task/background")
+def start_background_task(req: BackgroundRunRequest):
+    """
+    Start a non-visual background task that runs in parallel with any active visual agent.
+
+    Background tasks can: run terminal commands, process files, call APIs, monitor processes.
+    They cannot: click, type, take screenshots, or acquire ScreenLock.
+
+    Example goals:
+      - "Run python train.py and wait for it to finish, then report final accuracy"
+      - "Download the Kaggle dataset using the API and extract it to ~/data/"
+      - "Monitor the running training job and alert me when loss < 0.01"
+    """
+    from ..agent.background_runner import BackgroundTaskRunner
+    run_id = f"bg_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+
+    bg_runner = BackgroundTaskRunner.from_env(
+        log_callback=_log,
+        task_id=run_id,
+    )
+
+    def _run_bg():
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(bg_runner.run(goal=req.goal))
+            _save_run_history(run_id, req.goal, True, result)
+        except Exception as ex:
+            _save_run_history(run_id, req.goal, False, str(ex))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    import threading
+    threading.Thread(target=_run_bg, daemon=True, name=f"bg-{run_id}").start()
+    return {"run_id": run_id, "status": "started", "goal": req.goal, "mode": "background"}
 
 
 @app.post("/api/agent/cancel")
@@ -419,6 +529,7 @@ def get_runs():
                     data = json.loads(history_file.read_text(encoding="utf-8"))
                     data["id"] = run_dir.name
                     data["planName"] = data.get("plan_name", "unnamed")
+                    data["goal"] = data.get("description", "")
                     data["timestamp"] = data.get("started_at", "unknown")
                     data["status"] = "success" if data.get("success") else "failed"
                     data["stepsCompleted"] = data.get("completed_steps", 0)
@@ -450,6 +561,21 @@ def clear_all_runs():
                 except Exception:
                     pass
     return {"status": "cleared"}
+
+
+@app.delete("/api/run/{run_id}")
+def delete_run(run_id: str):
+    """Delete a single run folder by ID."""
+    import shutil
+    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
+    run_dir = runs_root / run_id
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    try:
+        shutil.rmtree(run_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete run: {e}")
+    return {"status": "deleted", "run_id": run_id}
 
 
 @app.get("/api/run/{run_id}")
@@ -635,9 +761,64 @@ _BUILTIN_WORKFLOWS = [
     },
 ]
 
+_WORKFLOWS_FILE = Path(__file__).resolve().parent.parent.parent / "workflows.json"
+
+
+def _load_user_workflows() -> list[dict]:
+    """Load user-saved workflows from workflows.json."""
+    try:
+        if _WORKFLOWS_FILE.exists():
+            return json.loads(_WORKFLOWS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _save_user_workflows(workflows: list[dict]) -> None:
+    _WORKFLOWS_FILE.write_text(json.dumps(workflows, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 @app.get("/api/workflows")
 def get_workflows():
-    return {"workflows": _BUILTIN_WORKFLOWS}
+    user = [dict(w, source="user") for w in _load_user_workflows()]
+    builtin = [dict(w, source="builtin") for w in _BUILTIN_WORKFLOWS]
+    return {"workflows": builtin + user}
+
+
+class SaveWorkflowRequest(BaseModel):
+    name: str
+    description: str
+    goal: str                       # the full goal/instruction string
+    topic_label: str = ""           # optional placeholder shown in the Run card
+
+
+@app.post("/api/workflows/save")
+def save_workflow(req: SaveWorkflowRequest):
+    """Save a goal as a reusable named workflow."""
+    workflows = _load_user_workflows()
+    wf_id = f"user_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+    new_wf = {
+        "id": wf_id,
+        "name": req.name.strip(),
+        "description": req.description.strip(),
+        "goal": req.goal.strip(),
+        "topic_label": req.topic_label.strip(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    workflows.append(new_wf)
+    _save_user_workflows(workflows)
+    return {"status": "saved", "workflow": new_wf}
+
+
+@app.delete("/api/workflows/{workflow_id}")
+def delete_workflow(workflow_id: str):
+    """Delete a user-saved workflow. Built-in workflows cannot be deleted."""
+    workflows = _load_user_workflows()
+    updated = [w for w in workflows if w["id"] != workflow_id]
+    if len(updated) == len(workflows):
+        raise HTTPException(status_code=404, detail=f"User workflow '{workflow_id}' not found.")
+    _save_user_workflows(updated)
+    return {"status": "deleted", "workflow_id": workflow_id}
 
 
 @app.post("/api/workflows/run")
@@ -650,12 +831,19 @@ def run_workflow_endpoint(req: dict):
 
     wf = next((w for w in _BUILTIN_WORKFLOWS if w["id"] == wf_id), None)
     if not wf:
+        wf = next((w for w in _load_user_workflows() if w["id"] == wf_id), None)
+    if not wf:
         raise HTTPException(status_code=404, detail=f"Workflow '{wf_id}' not found")
 
-    # Build a natural language goal from the workflow + topic
-    goal = wf["description"]
-    if topic:
-        goal = f"{wf['description']} Topic/subject: {topic}"
+    # User-saved workflows store the full goal; built-ins build it from description
+    if wf.get("goal"):
+        goal = wf["goal"]
+        if topic:
+            goal = f"{goal}\n\nTopic/subject: {topic}"
+    else:
+        goal = wf["description"]
+        if topic:
+            goal = f"{wf['description']} Topic/subject: {topic}"
 
     run_id = f"wf_{wf_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
 

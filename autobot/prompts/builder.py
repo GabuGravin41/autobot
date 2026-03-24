@@ -84,6 +84,9 @@ class StepPromptBuilder:
         native_ui: str | None = None,
         page_snapshot=None,  # autobot.dom.page_snapshot.PageSnapshot | None
         memories: list[tuple[str, str]] | None = None,  # [(key, value), ...]
+        click_zoom_b64: str | None = None,              # base64 JPEG crop around last click
+        click_zoom_coords: tuple[int, int] | None = None,  # (x, y) of the click
+        affordances: str | None = None,                 # per-step tool availability summary
     ):
         self.browser_state = browser_state
         self.task = task
@@ -93,6 +96,9 @@ class StepPromptBuilder:
         self.native_ui = native_ui
         self.page_snapshot = page_snapshot
         self.memories = memories or []
+        self.click_zoom_b64 = click_zoom_b64
+        self.click_zoom_coords = click_zoom_coords
+        self.affordances = affordances
 
     def _get_screen_size(self) -> tuple[int, int]:
         """Read screen resolution from the page title set by AgentLoop."""
@@ -184,7 +190,11 @@ class StepPromptBuilder:
             f"</screen_info>"
         )
 
-        # 6. Native OS state
+        # 6. Per-step affordances — what tools are usable RIGHT NOW
+        if self.affordances:
+            parts.append(f"<affordances>\n{self.affordances}\n</affordances>")
+
+        # 7. Native OS state
         if self.native_ui:
             parts.append(f"<native_os_state>\n{self.native_ui}\n</native_os_state>")
 
@@ -257,7 +267,7 @@ class StepPromptBuilder:
         text_content = self.build_text()
 
         if use_vision and self.browser_state.screenshot_b64:
-            # Multi-part message with text + image
+            # Multi-part message with text + screenshot + optional click verification zoom
             content = [
                 {"type": "text", "text": text_content},
                 {"type": "text", "text": "Current screenshot:"},
@@ -269,6 +279,26 @@ class StepPromptBuilder:
                     },
                 },
             ]
+            # Click zoom: a 300×300 crop around the last clicked point.
+            # The LLM verifies whether the click landed on the correct target and can
+            # immediately correct coordinates for the next click if needed.
+            if self.click_zoom_b64 and self.click_zoom_coords:
+                cx, cy = self.click_zoom_coords
+                content.append({
+                    "type": "text",
+                    "text": (
+                        f"CLICK VERIFICATION ZOOM — 300×300 region centred on last click "
+                        f"at ({cx}, {cy}). Did it land on the right target? "
+                        "If off, correct coordinates for next click."
+                    ),
+                })
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{self.click_zoom_b64}",
+                        "detail": "high",
+                    },
+                })
             return [{"role": "user", "content": content}]
         else:
             # Text-only message

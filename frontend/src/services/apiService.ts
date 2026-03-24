@@ -190,6 +190,17 @@ export const runMission = (goal: string): Promise<{ run_id: string; status: stri
         body: JSON.stringify({ goal }),
     });
 
+/** Start the LeetCode multi-AI solving mission. */
+export const runLeetCodeMission = (
+    num_problems: number = 5,
+    language: string = 'python3',
+): Promise<{ run_id: string; status: string; goal: string; mode: string }> =>
+    apiFetch('/api/mission/leetcode', {
+        method: 'POST',
+        body: JSON.stringify({ num_problems, language }),
+        timeoutMs: 30_000,
+    });
+
 // ── AI Chat ─────────────────────────────────────────────────────────────────
 export interface ChatResponse {
     reply: string;
@@ -225,6 +236,7 @@ export interface BackendSettings {
     has_openrouter_key: boolean;
     has_openai_key: boolean;
     has_google_key: boolean;
+    has_xai_key: boolean;
     approval_mode: 'strict' | 'balanced' | 'trusted';
     using_default_key: boolean;
 }
@@ -348,6 +360,9 @@ export interface BackendWorkflow {
     name: string;
     description: string;
     topic_label: string;
+    goal?: string;
+    source?: 'builtin' | 'user';
+    created_at?: string;
 }
 
 export const getWorkflows = (): Promise<{ workflows: BackendWorkflow[] }> =>
@@ -355,6 +370,17 @@ export const getWorkflows = (): Promise<{ workflows: BackendWorkflow[] }> =>
 
 export const runWorkflow = (workflow_id: string, topic: string = ''): Promise<{ run_id: string; status: string; plan_name: string }> =>
     apiFetch('/api/workflows/run', { method: 'POST', body: JSON.stringify({ workflow_id, topic }) });
+
+export const saveWorkflow = (payload: {
+    name: string;
+    description: string;
+    goal: string;
+    topic_label?: string;
+}): Promise<{ status: string; workflow: BackendWorkflow }> =>
+    apiFetch('/api/workflows/save', { method: 'POST', body: JSON.stringify(payload) });
+
+export const deleteWorkflow = (workflow_id: string): Promise<{ status: string }> =>
+    apiFetch(`/api/workflows/${workflow_id}`, { method: 'DELETE' });
 
 // ── Human input (when a run requests password/token) ────────────────────────
 export const getPendingHumanInput = (): Promise<{ pending: boolean; prompt?: string; key?: string }> =>

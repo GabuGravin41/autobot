@@ -4,10 +4,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
     Terminal, Play, CheckCircle2, AlertCircle, Activity, Zap, Monitor,
     Download, PlusCircle, Search, ChevronRight, FileText, Mail,
-    Maximize2, Minimize2, X, Move, Brain, ExternalLink,
+    Maximize2, Minimize2, X, Move, Brain, ExternalLink, Code2,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, getBrowserScreenshotUrl } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, getBrowserScreenshotUrl, runLeetCodeMission } from '../services/apiService';
 import TaskQueuePanel from './TaskQueuePanel';
 
 interface DashboardPageProps {
@@ -26,16 +26,19 @@ interface DashboardPageProps {
     screenLockStatus: ScreenLockStatus | null;
     onAddTask: (goal: string) => void;
     onCancelTask: (id: string) => void;
+    onPlanFirst: (goal: string) => void;
 }
 
 export default function DashboardPage({
     backendOnline, backendStatus, activeRun, liveRuns, liveAdapters,
     liveLogLines, screenshotUrl, onRefreshScreenshot, onAbortRun,
     onSelectRun, onSelectArtifact, scheduledTasks, screenLockStatus,
-    onAddTask, onCancelTask,
+    onAddTask, onCancelTask, onPlanFirst,
 }: DashboardPageProps) {
     const navigate = useNavigate();
     const [isScreenPopout, setIsScreenPopout] = useState(false);
+    const [leetcodeProblems, setLeetcodeProblems] = useState(5);
+    const [leetcodeLaunching, setLeetcodeLaunching] = useState(false);
     const [popoutPos, setPopoutPos] = useState({ x: 100, y: 100 });
     const [isDragging, setIsDragging] = useState(false);
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -419,6 +422,7 @@ export default function DashboardPage({
                             lockStatus={screenLockStatus}
                             onAddTask={onAddTask}
                             onCancelTask={onCancelTask}
+                            onPlanFirst={onPlanFirst}
                         />
                     </div>
                 </div>
@@ -454,6 +458,56 @@ export default function DashboardPage({
                             </div>
                         </div>
                     )}
+
+                    {/* Quick Launch */}
+                    <div className="glass-panel p-5 rounded-3xl border-[var(--base-border)]">
+                        <h3 className="text-sm font-bold tracking-tight flex items-center gap-2 mb-4">
+                            <Zap size={14} className="text-amber-400" /> Quick Launch
+                        </h3>
+                        <div className="space-y-3">
+                            {/* LeetCode multi-AI mission */}
+                            <div className="flex items-center gap-3 p-3 rounded-xl bg-[var(--base-border)]/50">
+                                <Code2 size={18} className="text-orange-400 shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-xs font-bold">LeetCode Solver</div>
+                                    <div className="text-[9px] text-[var(--base-text-muted)] uppercase tracking-wider">Multi-AI · Claude + Grok + DeepSeek</div>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={50}
+                                        value={leetcodeProblems}
+                                        onChange={e => setLeetcodeProblems(Math.max(1, Math.min(50, Number(e.target.value))))}
+                                        className="w-12 text-center text-xs font-mono rounded-lg border border-[var(--base-border)] bg-[var(--base-bg)] px-1 py-1 focus:outline-none focus:border-[var(--brand-primary)]"
+                                        title="Number of problems to solve"
+                                    />
+                                    <button
+                                        disabled={leetcodeLaunching || !backendOnline}
+                                        onClick={async () => {
+                                            setLeetcodeLaunching(true);
+                                            try {
+                                                await runLeetCodeMission(leetcodeProblems, 'python3');
+                                                navigate('/history');
+                                            } catch (err) {
+                                                console.error('LeetCode launch failed:', err);
+                                            } finally {
+                                                setLeetcodeLaunching(false);
+                                            }
+                                        }}
+                                        className="btn-primary py-1 px-3 text-[9px] uppercase tracking-widest flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        {leetcodeLaunching ? (
+                                            <Activity size={10} className="animate-spin" />
+                                        ) : (
+                                            <Play size={10} />
+                                        )}
+                                        {leetcodeLaunching ? 'Launching…' : 'Run'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
 
                     <h3 className="text-xl font-bold tracking-tight px-2">Recent Artifacts</h3>
                     <div className="glass-panel p-6 rounded-3xl border-[var(--base-border)] space-y-6">

@@ -137,6 +137,42 @@ class Display:
         return "Window listing unavailable on this platform. Use screenshot to see what's open."
 
     @staticmethod
+    def window_titles() -> frozenset:
+        """
+        Return a frozenset of currently open window titles via wmctrl.
+
+        Used for OS-dialog detection: diff window lists before/after an action
+        to detect new system dialogs (file pickers, GTK dialogs, auth prompts)
+        that are invisible to DOM-based popup detection.
+
+        Returns an empty frozenset if wmctrl is unavailable (non-Linux or not installed).
+        Each call takes ~5-10ms — negligible for per-action checks.
+        """
+        import platform
+        import subprocess
+        import socket
+
+        if platform.system() != "Linux":
+            return frozenset()
+        try:
+            result = subprocess.run(
+                ["wmctrl", "-l"], capture_output=True, text=True, timeout=2
+            )
+            if result.returncode != 0:
+                return frozenset()
+            hostname = socket.gethostname()
+            titles: set[str] = set()
+            for line in result.stdout.strip().splitlines():
+                parts = line.split(None, 3)
+                if len(parts) > 3:
+                    title = parts[3].replace(hostname, "").strip()
+                    if title and title not in ("Desktop",):
+                        titles.add(title)
+            return frozenset(titles)
+        except Exception:
+            return frozenset()
+
+    @staticmethod
     def focus(window_title: str) -> str:
         """
         Bring a window to the foreground by searching its title.

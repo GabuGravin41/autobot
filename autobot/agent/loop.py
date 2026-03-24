@@ -168,6 +168,15 @@ class AgentLoop:
         # Approval guard — gates risky actions based on AUTOBOT_APPROVAL_MODE
         self._approval_guard = ApprovalGuard()
 
+        # Smart vision skipping: track what the last actions were and whether screen changed.
+        # Non-visual steps (typing, clipboard ops, terminal) skip sending the screenshot to the LLM.
+        self._last_action_types: list[str] = []      # e.g. ["keyboard.type", "clipboard.set"]
+        self._last_screenshot_hash: str | None = None  # MD5 of previous screenshot bytes
+
+        # Click zoom: after each mouse click, store a 300×300 region crop for next step
+        self._last_click_zoom_b64: str | None = None
+        self._last_click_coords: tuple[int, int] | None = None
+
         # Persistent memory store — facts survive across runs
         from autobot.memory.store import memory_store
         self._memory_store = memory_store
@@ -453,6 +462,30 @@ class AgentLoop:
         # Compress screenshot PNG → JPEG to save tokens
         llm_screenshot_b64 = self._compress_screenshot(screenshot_bytes)
 
+        # Smart vision skipping: don't send the screenshot to the LLM if the last actions
+        # were purely non-visual (typing, clipboard, terminal) AND the screen hasn't changed.
+        # The screenshot is still saved to disk for the dashboard — only suppressed from LLM.
+        import hashlib as _hashlib
+        _curr_hash = _hashlib.md5(screenshot_bytes).hexdigest() if screenshot_bytes else None
+        _skip_vision = False
+        _NON_VISUAL_PREFIXES = (
+            "keyboard.", "terminal.run", "terminal.start",
+            "clipboard.set", "clipboard.copy", "wait",
+        )
+        if os.getenv("AUTOBOT_SMART_VISION", "1") == "1" and self._last_action_types:
+            _last_nonvisual = all(
+                any(a.startswith(pfx) for pfx in _NON_VISUAL_PREFIXES)
+                for a in self._last_action_types
+            )
+            _screen_same = _curr_hash is not None and _curr_hash == self._last_screenshot_hash
+            if _last_nonvisual and _screen_same:
+                _skip_vision = True
+                logger.debug(
+                    f"Vision skip: last actions={self._last_action_types}, screen unchanged"
+                )
+        self._last_screenshot_hash = _curr_hash
+        _use_vision_this_step = self.use_vision and not _skip_vision
+
         # Use real URL/title from DOM snapshot when available
         page_url = (page_snapshot.url if page_snapshot and page_snapshot.url else self.page.url)
         page_title = (
@@ -543,9 +576,15 @@ class AgentLoop:
             native_ui=native_ui,
             page_snapshot=page_snapshot,
             memories=recalled,
+            click_zoom_b64=self._last_click_zoom_b64,
+            click_zoom_coords=self._last_click_coords,
+            affordances=self._build_affordances(page_snapshot, native_ui),
         )
+        # Click zoom is consumed once per step — clear after passing to builder
+        self._last_click_zoom_b64 = None
+        self._last_click_coords = None
 
-        user_messages = step_builder.build_messages(use_vision=self.use_vision)
+        user_messages = step_builder.build_messages(use_vision=_use_vision_this_step)
 
         # Construct full message list
         messages = [
@@ -599,6 +638,13 @@ class AgentLoop:
                 agent_output.action,
                 browser_state,
             )
+
+        # Record what action types were taken — used by smart vision skip next step
+        self._last_action_types = [
+            a.computer_call.call.split("(")[0].replace("computer.", "")
+            if a.computer_call else a.action_name
+            for a in agent_output.action
+        ]
 
         # ─── 4. RECORD + REACTIVE TRACKING ───
         # Read the real current URL from CDP — HumanModeEmulator._url is only
@@ -790,6 +836,47 @@ class AgentLoop:
             "response_format": {"type": "json_object"},
         }
 
+        # Output token budget — only tighten for budget/fast models.
+        # Premium models (Grok, Claude Opus, GPT-4o, Gemini Pro) run uncapped so their
+        # full reasoning capacity is preserved. Only "flash" and "lite" variants are tightened
+        # since they're designed for speed and have lower default output limits anyway.
+        _is_budget_model = any(
+            kw in active_model.lower() for kw in ("flash", "lite", "mini", "haiku")
+        )
+        if _is_budget_model and not is_planning_step and not is_replan:
+            args["max_tokens"] = int(os.getenv("AUTOBOT_MAX_TOKENS_ROUTINE", "2048"))
+
+        # Gemini Flash/Lite only: cap the internal chain-of-thought (thinkingBudget).
+        # Never applied to Grok, Claude, GPT-4o, Gemini Pro, or any full-power model.
+        # Set AUTOBOT_THINKING_BUDGET=-1 to disable even on flash models (full reasoning).
+        _thinking_budget = int(os.getenv("AUTOBOT_THINKING_BUDGET", "1024"))
+        if (
+            _thinking_budget >= 0
+            and _is_budget_model
+            and "gemini" in active_model.lower()
+            and not is_planning_step
+        ):
+            args.setdefault("extra_body", {}).update({
+                "generationConfig": {
+                    "thinkingConfig": {"thinkingBudget": _thinking_budget}
+                }
+            })
+
+        # Gemini: route system prompt via system_instruction for implicit prefix caching.
+        # Gemini caches identical system_instruction content across calls at ~10% of input token cost.
+        # Env: AUTOBOT_PROMPT_CACHE=0 disables this (use for non-Gemini compatible endpoints).
+        if os.getenv("AUTOBOT_PROMPT_CACHE", "1") == "1":
+            _base_url = str(getattr(self.llm_client, "base_url", "") or "")
+            if "generativelanguage.googleapis.com" in _base_url:
+                _sys = [m for m in args["messages"] if m["role"] == "system"]
+                _usr = [m for m in args["messages"] if m["role"] != "system"]
+                if _sys:
+                    args.setdefault("extra_body", {})["system_instruction"] = {
+                        "parts": [{"text": _sys[0]["content"]}]
+                    }
+                    args["messages"] = _usr
+                    logger.debug("Gemini: system prompt routed via system_instruction (prefix caching enabled)")
+
         async def _do_call(current_args: dict) -> str:
             resp = await self.llm_client.chat.completions.create(**current_args)
             if not resp.choices:
@@ -942,10 +1029,41 @@ class AgentLoop:
                     ))
                     continue
 
+            # OS dialog detection: snapshot window titles before actions that could spawn
+            # a system dialog (file picker, auth prompt, GTK dialog, Electron modal).
+            # These are invisible to DOM-based popup detection.
+            _dialog_detect = os.getenv("AUTOBOT_DIALOG_DETECT", "1") == "1"
+            _might_spawn_dialog = (
+                action.computer_call is not None or action.navigate is not None
+            )
+            _wins_before: frozenset = frozenset()
+            if _dialog_detect and _might_spawn_dialog:
+                _wins_before = await asyncio.to_thread(
+                    self.computer.display.window_titles
+                )
+
             # Execute the action
             url_before = self.page.url
             result = await self._execute_action(action, browser_state)
             results.append(result)
+
+            # Check for new OS windows after the action
+            if _dialog_detect and _might_spawn_dialog and _wins_before:
+                _wins_after = await asyncio.to_thread(
+                    self.computer.display.window_titles
+                )
+                for _wt in (_wins_after - _wins_before):
+                    # Skip new Chrome/browser tabs — those are expected
+                    if any(skip in _wt.lower() for skip in ("chrome", "chromium", "firefox", "brave")):
+                        continue
+                    _alert = (
+                        f"[SYSTEM DIALOG: '{_wt}'] A new OS window appeared after the last action. "
+                        "Take a screenshot — it may be a file picker, permission prompt, or save dialog. "
+                        "Handle it before continuing."
+                    )
+                    if not any(_wt in s for s in self.scratchpad[-3:]):
+                        self.scratchpad.append(_alert)
+                        logger.info(f"OS dialog detected: '{_wt}'")
 
             # Page change detection (adapted from Browser Use)
             # If the page changed, skip remaining actions
@@ -1287,11 +1405,41 @@ class AgentLoop:
         try:
             result = await asyncio.to_thread(self._dispatch_computer_call, call_str)
             await asyncio.sleep(0.8)
-            return ActionResult(
+
+            action_result = ActionResult(
                 action_name="computer_call",
                 success=True,
                 extracted_content=str(result) if result is not None else None,
             )
+
+            # Click zoom: capture a 300×300 region around the click target so the
+            # LLM can verify in the NEXT step whether the click landed correctly.
+            # Only ~400 tokens vs 10,000–20,000 for a full screenshot retry.
+            if "mouse.click" in call_str and os.getenv("AUTOBOT_CLICK_ZOOM", "1") == "1":
+                import re as _re
+                _m = (
+                    _re.search(r"x\s*=\s*(\d+).*?y\s*=\s*(\d+)", call_str)
+                    or _re.search(r"(\d+)\s*,\s*(\d+)", call_str)
+                )
+                if _m:
+                    _cx, _cy = int(_m.group(1)), int(_m.group(2))
+                    try:
+                        _sw, _sh = self.computer.display.size()
+                        _rx = max(0, _cx - 150)
+                        _ry = max(0, _cy - 150)
+                        _rw = min(300, _sw - _rx)
+                        _rh = min(300, _sh - _ry)
+                        import base64 as _b64
+                        _zoom_png_b64 = self.computer.display.screenshot_region(_rx, _ry, _rw, _rh)
+                        self._last_click_zoom_b64 = self._compress_screenshot(
+                            _b64.b64decode(_zoom_png_b64)
+                        )
+                        self._last_click_coords = (_cx, _cy)
+                        logger.debug(f"Click zoom captured at ({_cx},{_cy}) → {_rw}×{_rh}px region")
+                    except Exception as _ze:
+                        logger.debug(f"Click zoom capture failed: {_ze}")
+
+            return action_result
         except Exception as e:
             logger.error(f"Computer call failed [{call_str}]: {e}")
             return ActionResult(
@@ -1356,6 +1504,60 @@ class AgentLoop:
                 raise ValueError(f"Cannot parse args '{args_str}': {parse_err}")
 
         return method(*args, **kwargs)
+
+    def _build_affordances(self, page_snapshot: Any, native_ui: Any) -> str:
+        """
+        Build a concise affordance summary for the current step.
+
+        Tells the LLM exactly what tools are practically usable RIGHT NOW:
+        - Is a DOM available (interactive elements count)?
+        - What windows are open (active app context)?
+        - What's in the clipboard (can it be pasted immediately)?
+        - Are any background terminal processes running?
+
+        This replaces guess-work with factual grounding, reducing failed actions.
+        ~100-150 tokens per step, but prevents multiple retry steps.
+        """
+        lines: list[str] = []
+
+        # DOM status
+        if page_snapshot and page_snapshot.num_interactive > 0:
+            lines.append(f"DOM: {page_snapshot.num_interactive} interactive elements (see DOM snapshot below)")
+        elif page_snapshot and page_snapshot.url:
+            lines.append("DOM: browser page loaded but no interactive elements detected (SPA may still be rendering)")
+        else:
+            lines.append("DOM: unavailable — use mouse/keyboard from screenshot coordinates only")
+
+        # Active windows via wmctrl
+        try:
+            titles = list(self.computer.display.window_titles())[:5]
+            if titles:
+                lines.append(f"Open windows: {', '.join(titles)}")
+        except Exception:
+            pass
+
+        # Clipboard preview
+        try:
+            clip = self.computer.clipboard.get()
+            if clip and clip.strip():
+                preview = clip.strip()[:60].replace("\n", " ")
+                suffix = "..." if len(clip) > 60 else ""
+                lines.append(f"Clipboard: '{preview}{suffix}' ({len(clip)} chars — ready to paste)")
+            else:
+                lines.append("Clipboard: empty")
+        except Exception:
+            pass
+
+        # Background terminal processes
+        try:
+            _procs = getattr(self.computer.terminal, '_procs', {})
+            running = [pid for pid in _procs if self.computer.terminal.running(pid)]
+            if running:
+                lines.append(f"Background processes: {len(running)} running — PIDs {running} (use terminal.output(pid) to check)")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     def _build_history_text(self) -> str:
         """Build a text summary of all previous steps for the agent_history section."""

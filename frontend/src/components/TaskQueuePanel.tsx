@@ -211,10 +211,11 @@ interface TaskQueuePanelProps {
     lockStatus: ScreenLockStatus | null;
     onAddTask: (goal: string) => void;
     onCancelTask: (id: string) => void;
+    onPlanFirst?: (goal: string) => void;  // navigate to planner with goal pre-filled
 }
 
 export default function TaskQueuePanel({
-    tasks, lockStatus, onAddTask, onCancelTask,
+    tasks, lockStatus, onAddTask, onCancelTask, onPlanFirst,
 }: TaskQueuePanelProps) {
     const [input, setInput] = useState('');
     const [isAdding, setIsAdding] = useState(false);
@@ -227,6 +228,14 @@ export default function TaskQueuePanel({
         const goal = input.trim();
         if (!goal) return;
         onAddTask(goal);
+        setInput('');
+        setIsAdding(false);
+    };
+
+    const handlePlanFirst = () => {
+        const goal = input.trim();
+        if (!goal || !onPlanFirst) return;
+        onPlanFirst(goal);
         setInput('');
         setIsAdding(false);
     };
@@ -265,7 +274,7 @@ export default function TaskQueuePanel({
                         exit={{ opacity: 0, height: 0 }}
                         className="overflow-hidden"
                     >
-                        <div className="glass-panel p-4 rounded-2xl border border-[var(--brand-primary)]/20 flex gap-3">
+                        <div className="glass-panel p-4 rounded-2xl border border-[var(--brand-primary)]/20 space-y-3">
                             <input
                                 autoFocus
                                 value={input}
@@ -275,15 +284,32 @@ export default function TaskQueuePanel({
                                     if (e.key === 'Escape') { setIsAdding(false); setInput(''); }
                                 }}
                                 placeholder="Describe what you want Autobot to do..."
-                                className="flex-1 bg-transparent text-sm text-[var(--base-text)] placeholder-[var(--base-text-muted)] outline-none"
+                                className="w-full bg-transparent text-sm text-[var(--base-text)] placeholder-[var(--base-text-muted)] outline-none"
                             />
-                            <button
-                                onClick={handleAdd}
-                                disabled={!input.trim()}
-                                className="px-4 py-1.5 rounded-lg bg-[var(--brand-primary)] text-white text-[10px] font-bold uppercase tracking-widest disabled:opacity-40 hover:brightness-110 transition-all"
-                            >
-                                Queue
-                            </button>
+                            <div className="flex gap-2">
+                                {onPlanFirst && (
+                                    <button
+                                        onClick={handlePlanFirst}
+                                        disabled={!input.trim()}
+                                        title="Refine this in the AI Planner before queuing"
+                                        className="flex-1 px-3 py-2 rounded-lg border border-[var(--brand-primary)]/30 text-[var(--brand-primary)] text-[10px] font-bold uppercase tracking-widest disabled:opacity-40 hover:bg-[var(--brand-primary)]/10 transition-all"
+                                    >
+                                        Plan First →
+                                    </button>
+                                )}
+                                <button
+                                    onClick={handleAdd}
+                                    disabled={!input.trim()}
+                                    title="Queue this goal directly without planning"
+                                    className="flex-1 px-3 py-2 rounded-lg bg-[var(--brand-primary)] text-white text-[10px] font-bold uppercase tracking-widest disabled:opacity-40 hover:brightness-110 transition-all"
+                                >
+                                    Queue Directly
+                                </button>
+                            </div>
+                            <p className="text-[8px] text-[var(--base-text-muted)]">
+                                <strong>Plan First</strong> — opens the AI Planner to refine the goal, then queue the result. &nbsp;
+                                <strong>Queue Directly</strong> — send this description to the agent as-is.
+                            </p>
                         </div>
                     </motion.div>
                 )}

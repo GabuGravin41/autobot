@@ -2,12 +2,18 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import {
     Shield, Zap, Palette, Sparkles, PlusCircle, CheckCircle2, Key, MousePointer2,
-    Trash2, Save, Eye, EyeOff, Server, Globe, AlertCircle,
+    Trash2, Save, Eye, EyeOff, Server, Globe, AlertCircle, Search,
 } from 'lucide-react';
 import { BrowserMode, AdapterPolicy, LLMModel } from '../types';
 import { updateSettings, toggleAntiSleep, getStatus, getSettings, startTunnel, stopTunnel, getTunnelStatus } from '../services/apiService';
 
 type Theme = 'light' | 'dark';
+
+interface ModelConfig {
+    id: string;
+    name: string;
+    tags?: string[];   // e.g. ['vision', 'free', 'fast', 'powerful', 'coding']
+}
 
 interface ProviderConfig {
     id: string;
@@ -15,47 +21,91 @@ interface ProviderConfig {
     description: string;
     envKey: string;
     baseUrl: string;
-    models: { id: string; name: string }[];
+    models: ModelConfig[];
 }
 
 const PROVIDERS: ProviderConfig[] = [
     {
-        id: 'google', name: 'Google Gemini', description: 'Free tier available. Best for vision + reasoning.',
-        envKey: 'GOOGLE_API_KEY', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-        models: [
-            { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash Preview' },
-            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
-            { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite (Free)' },
-            { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
-        ],
-    },
-    {
-        id: 'openrouter', name: 'OpenRouter', description: 'Access 200+ models from one API key.',
+        id: 'openrouter', name: 'OpenRouter', description: '200+ models from one key. Recommended.',
         envKey: 'OPENROUTER_API_KEY', baseUrl: 'https://openrouter.ai/api/v1',
         models: [
-            { id: 'google/gemini-2.5-flash-preview', name: 'Gemini 2.5 Flash (via OR)' },
-            { id: 'deepseek/deepseek-chat-v3-0324', name: 'DeepSeek V3' },
-            { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
-            { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini' },
+            // ── Google Gemini ──
+            { id: 'google/gemini-2.5-flash-preview', name: 'Gemini 2.5 Flash Preview', tags: ['vision', 'fast', 'recommended'] },
+            { id: 'google/gemini-2.5-pro-preview', name: 'Gemini 2.5 Pro Preview', tags: ['vision', 'powerful'] },
+            { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash', tags: ['vision', 'fast'] },
+            { id: 'google/gemini-2.0-flash-lite-001', name: 'Gemini 2.0 Flash Lite', tags: ['fast', 'free'] },
+            // ── Anthropic Claude ──
+            { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4', tags: ['vision', 'powerful'] },
+            { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5', tags: ['vision', 'fast'] },
+            { id: 'anthropic/claude-3.7-sonnet', name: 'Claude 3.7 Sonnet', tags: ['vision', 'powerful', 'coding'] },
+            { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', tags: ['fast', 'cheap'] },
+            // ── OpenAI ──
+            { id: 'openai/gpt-4o', name: 'GPT-4o', tags: ['vision', 'powerful'] },
+            { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', tags: ['fast', 'cheap'] },
+            { id: 'openai/o3', name: 'OpenAI o3', tags: ['powerful', 'reasoning'] },
+            { id: 'openai/o4-mini', name: 'OpenAI o4 Mini', tags: ['fast', 'reasoning'] },
+            // ── xAI Grok ──
+            { id: 'x-ai/grok-3', name: 'Grok 3', tags: ['vision', 'powerful'] },
+            { id: 'x-ai/grok-3-mini', name: 'Grok 3 Mini', tags: ['fast', 'reasoning'] },
+            { id: 'x-ai/grok-2-vision-1212', name: 'Grok 2 Vision', tags: ['vision'] },
+            // ── DeepSeek ──
+            { id: 'deepseek/deepseek-chat-v3-0324', name: 'DeepSeek V3', tags: ['powerful', 'coding', 'cheap'] },
+            { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', tags: ['powerful', 'reasoning', 'coding'] },
+            { id: 'deepseek/deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 Distill 70B', tags: ['reasoning', 'cheap'] },
+            // ── Meta Llama ──
+            { id: 'meta-llama/llama-4-maverick', name: 'Llama 4 Maverick', tags: ['vision', 'powerful'] },
+            { id: 'meta-llama/llama-4-scout', name: 'Llama 4 Scout', tags: ['vision', 'fast'] },
+            { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', tags: ['powerful', 'coding'] },
+            // ── Mistral ──
+            { id: 'mistralai/mistral-large-2411', name: 'Mistral Large 2411', tags: ['powerful', 'coding'] },
+            { id: 'mistralai/codestral-2501', name: 'Codestral 2501', tags: ['coding'] },
+            // ── Free models ──
+            { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash (Free)', tags: ['free', 'vision'] },
+            { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1 (Free)', tags: ['free', 'reasoning'] },
+            { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B (Free)', tags: ['free'] },
         ],
     },
     {
-        id: 'openai', name: 'OpenAI', description: 'GPT-4o and newer models.',
+        id: 'google', name: 'Google Gemini', description: 'Free tier available. Direct Google API.',
+        envKey: 'GOOGLE_API_KEY', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+        models: [
+            { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash Preview', tags: ['vision', 'fast', 'recommended'] },
+            { id: 'gemini-2.5-pro-preview-05-06', name: 'Gemini 2.5 Pro Preview', tags: ['vision', 'powerful'] },
+            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tags: ['vision', 'fast'] },
+            { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', tags: ['fast', 'free'] },
+        ],
+    },
+    {
+        id: 'openai', name: 'OpenAI', description: 'Direct OpenAI API.',
         envKey: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1',
         models: [
-            { id: 'gpt-4o', name: 'GPT-4o' },
-            { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+            { id: 'gpt-4o', name: 'GPT-4o', tags: ['vision', 'powerful'] },
+            { id: 'gpt-4o-mini', name: 'GPT-4o Mini', tags: ['fast', 'cheap'] },
+            { id: 'o3', name: 'o3', tags: ['powerful', 'reasoning'] },
+            { id: 'o4-mini', name: 'o4 Mini', tags: ['fast', 'reasoning'] },
         ],
     },
     {
-        id: 'xai', name: 'xAI (Grok)', description: 'Grok models via x.ai API.',
+        id: 'xai', name: 'xAI (Grok)', description: 'Grok models direct from x.ai.',
         envKey: 'XAI_API_KEY', baseUrl: 'https://api.x.ai/v1',
         models: [
-            { id: 'grok-2-vision-1212', name: 'Grok 2 Vision' },
-            { id: 'grok-beta', name: 'Grok Beta' },
+            { id: 'grok-3', name: 'Grok 3', tags: ['vision', 'powerful'] },
+            { id: 'grok-3-mini', name: 'Grok 3 Mini', tags: ['fast', 'reasoning'] },
+            { id: 'grok-2-vision-1212', name: 'Grok 2 Vision', tags: ['vision'] },
         ],
     },
 ];
+
+const TAG_COLORS: Record<string, string> = {
+    recommended: 'bg-[var(--brand-primary)]/20 text-[var(--brand-primary)]',
+    vision:      'bg-purple-500/20 text-purple-400',
+    powerful:    'bg-amber-500/20 text-amber-400',
+    reasoning:   'bg-blue-500/20 text-blue-400',
+    coding:      'bg-emerald-500/20 text-emerald-400',
+    fast:        'bg-sky-500/20 text-sky-400',
+    cheap:       'bg-teal-500/20 text-teal-400',
+    free:        'bg-green-500/20 text-green-400',
+};
 
 interface SettingsPageProps {
     browserMode: BrowserMode;
@@ -75,14 +125,16 @@ export default function SettingsPage({
     models, setModels, selectedModelId, setSelectedModelId,
 }: SettingsPageProps) {
     const [antiSleepEnabled, setAntiSleepEnabled] = useState(false);
-    const [selectedProvider, setSelectedProvider] = useState('google');
+    const [selectedProvider, setSelectedProvider] = useState('openrouter');
     const [modelInput, setModelInput] = useState('');
+    const [modelSearch, setModelSearch] = useState('');
     const [apiKeyInput, setApiKeyInput] = useState('');
     const [showApiKey, setShowApiKey] = useState(false);
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [currentConfig, setCurrentConfig] = useState({ provider: '', model: '', hasKey: false, usingDefaultKey: false });
-    const [customModels, setCustomModels] = useState<{ id: string; name: string }[]>([]);
+    const [customModels, setCustomModels] = useState<ModelConfig[]>([]);
+    const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
     const [tunnelActive, setTunnelActive] = useState(false);
     const [tunnelUrl, setTunnelUrl] = useState<string | null>(null);
     const [tunnelLoading, setTunnelLoading] = useState(false);
@@ -96,10 +148,16 @@ export default function SettingsPage({
         Promise.all([getStatus(), getSettings()]).then(([status, settings]) => {
             if (status.anti_sleep_enabled !== undefined) setAntiSleepEnabled(status.anti_sleep_enabled);
             setCurrentConfig({
-                provider: settings.llm_provider || 'google',
+                provider: settings.llm_provider || 'openrouter',
                 model: settings.llm_model || '',
                 hasKey: settings.has_google_key || settings.has_openrouter_key || settings.has_openai_key,
                 usingDefaultKey: settings.using_default_key || false,
+            });
+            setKeyStatus({
+                openrouter: settings.has_openrouter_key || false,
+                google: settings.has_google_key || false,
+                openai: settings.has_openai_key || false,
+                xai: settings.has_xai_key || false,
             });
             // Set initial provider from saved config
             if (settings.llm_provider) setSelectedProvider(settings.llm_provider);
@@ -109,7 +167,11 @@ export default function SettingsPage({
     }, []);
 
     const provider = PROVIDERS.find(p => p.id === selectedProvider) || PROVIDERS[0];
-    const allModels = [...provider.models, ...customModels];
+    const allModels = [...provider.models, ...customModels].filter(m => {
+        if (!modelSearch.trim()) return true;
+        const q = modelSearch.toLowerCase();
+        return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q) || (m.tags || []).some(t => t.includes(q));
+    });
 
     const handleToggleAntiSleep = async () => {
         try {
@@ -141,7 +203,10 @@ export default function SettingsPage({
             await updateSettings(updates);
             setSaveSuccess(true);
             setApiKeyInput('');
-            setCurrentConfig({ provider: selectedProvider, model: modelInput, hasKey: true });
+            setCurrentConfig(prev => ({ ...prev, provider: selectedProvider, model: modelInput.trim(), hasKey: true, usingDefaultKey: false }));
+            if (apiKeyInput.trim()) {
+                setKeyStatus(prev => ({ ...prev, [selectedProvider]: true }));
+            }
             setTimeout(() => setSaveSuccess(false), 3000);
         } catch (e) {
             alert('Failed to save: ' + (e instanceof Error ? e.message : 'Unknown'));
@@ -222,25 +287,38 @@ export default function SettingsPage({
                         <div className="space-y-3">
                             <label className="text-xs font-bold text-[var(--base-text-muted)] uppercase tracking-widest">Provider</label>
                             <div className="space-y-2">
-                                {PROVIDERS.map(p => (
-                                    <button
-                                        key={p.id}
-                                        onClick={() => {
-                                            setSelectedProvider(p.id);
-                                            setModelInput(p.models[0]?.id || '');
-                                        }}
-                                        className={`w-full p-3 rounded-xl border text-left transition-all ${selectedProvider === p.id
-                                            ? 'bg-[var(--brand-primary)]/10 border-[var(--brand-primary)]/50 text-[var(--brand-primary)]'
-                                            : 'bg-[var(--base-border)] border-[var(--base-border)] text-[var(--base-text-muted)] hover:border-[var(--base-text-muted)]/30'
-                                        }`}
-                                    >
-                                        <div className="flex items-center justify-between">
-                                            <span className="text-sm font-bold">{p.name}</span>
-                                            {selectedProvider === p.id && <CheckCircle2 size={14} />}
-                                        </div>
-                                        <p className="text-[9px] opacity-60 mt-0.5">{p.description}</p>
-                                    </button>
-                                ))}
+                                {PROVIDERS.map(p => {
+                                    const hasKey = keyStatus[p.id];
+                                    const isActive = selectedProvider === p.id;
+                                    return (
+                                        <button
+                                            key={p.id}
+                                            onClick={() => {
+                                                setSelectedProvider(p.id);
+                                                setModelSearch('');
+                                                // Keep current model if it belongs to this provider, else pick first
+                                                const belongs = p.models.some(m => m.id === modelInput);
+                                                if (!belongs) setModelInput(p.models[0]?.id || '');
+                                            }}
+                                            className={`w-full p-3 rounded-xl border text-left transition-all ${isActive
+                                                ? 'bg-[var(--brand-primary)]/10 border-[var(--brand-primary)]/50 text-[var(--brand-primary)]'
+                                                : 'bg-[var(--base-border)] border-[var(--base-border)] text-[var(--base-text-muted)] hover:border-[var(--base-text-muted)]/30'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-sm font-bold">{p.name}</span>
+                                                <div className="flex items-center gap-1.5">
+                                                    {hasKey
+                                                        ? <span className="text-[8px] font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">key ✓</span>
+                                                        : <span className="text-[8px] font-bold text-[var(--base-text-muted)] bg-[var(--base-border)] px-1.5 py-0.5 rounded-full">no key</span>
+                                                    }
+                                                    {isActive && <CheckCircle2 size={12} />}
+                                                </div>
+                                            </div>
+                                            <p className="text-[9px] opacity-60 mt-0.5">{p.description}</p>
+                                        </button>
+                                    );
+                                })}
                             </div>
                         </div>
 
@@ -255,7 +333,18 @@ export default function SettingsPage({
                                     <PlusCircle size={10} /> Custom
                                 </button>
                             </div>
-                            <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-1">
+                            {/* Search filter */}
+                            <div className="relative">
+                                <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--base-text-muted)]" />
+                                <input
+                                    type="text"
+                                    value={modelSearch}
+                                    onChange={e => setModelSearch(e.target.value)}
+                                    placeholder="Filter by name, tag (vision, free, coding…)"
+                                    className="w-full bg-[var(--base-border)] border border-[var(--base-border)] rounded-xl py-2 pl-8 pr-3 text-xs focus:outline-none focus:border-[var(--brand-primary)]/50"
+                                />
+                            </div>
+                            <div className="space-y-1.5 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
                                 {allModels.map(m => (
                                     <button
                                         key={m.id}
@@ -265,20 +354,37 @@ export default function SettingsPage({
                                             : 'bg-[var(--base-border)] border-[var(--base-border)] text-[var(--base-text-muted)] hover:border-[var(--base-text-muted)]/30'
                                         }`}
                                     >
-                                        <div className="text-sm font-bold">{m.name}</div>
-                                        <div className="text-[9px] opacity-50 font-mono">{m.id}</div>
+                                        <div className="flex items-start justify-between gap-2">
+                                            <div className="min-w-0">
+                                                <div className="text-sm font-bold truncate">{m.name}</div>
+                                                <div className="text-[9px] opacity-50 font-mono truncate">{m.id}</div>
+                                            </div>
+                                            {modelInput === m.id && <CheckCircle2 size={12} className="shrink-0 mt-0.5" />}
+                                        </div>
+                                        {m.tags && m.tags.length > 0 && (
+                                            <div className="flex flex-wrap gap-1 mt-1.5">
+                                                {m.tags.map(tag => (
+                                                    <span key={tag} className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full ${TAG_COLORS[tag] || 'bg-[var(--base-border)] text-[var(--base-text-muted)]'}`}>
+                                                        {tag}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
                                     </button>
                                 ))}
+                                {allModels.length === 0 && (
+                                    <p className="text-[var(--base-text-muted)] text-xs text-center py-4">No models match "{modelSearch}"</p>
+                                )}
                             </div>
-                            {/* Custom model ID input */}
+                            {/* Direct model ID input */}
                             <div>
-                                <label className="text-[9px] font-bold text-[var(--base-text-muted)] uppercase tracking-widest mb-1 block">Or enter model ID directly</label>
+                                <label className="text-[9px] font-bold text-[var(--base-text-muted)] uppercase tracking-widest mb-1 block">Selected / custom model ID</label>
                                 <input
                                     type="text"
                                     value={modelInput}
                                     onChange={e => setModelInput(e.target.value)}
-                                    placeholder="e.g. gemini-2.5-flash-preview-05-20"
-                                    className="w-full bg-[var(--base-border)] border border-[var(--base-border)] rounded-xl py-2.5 px-4 text-sm font-mono focus:outline-none focus:border-brand-500/50"
+                                    placeholder="e.g. google/gemini-2.5-flash-preview"
+                                    className="w-full bg-[var(--base-border)] border border-[var(--base-border)] rounded-xl py-2.5 px-4 text-sm font-mono focus:outline-none focus:border-[var(--brand-primary)]/50"
                                 />
                             </div>
                         </div>
