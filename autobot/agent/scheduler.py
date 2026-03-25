@@ -52,6 +52,12 @@ _PERSIST_FIELDS = {
 _SCHEDULER_TICK = 2.0          # seconds between scheduler loop ticks
 _MAX_LOG_LINES = 500           # per-task log ring buffer size
 
+# How many tasks can be actively running (using CPU/LLM) at the same time.
+# Only ONE holds the ScreenLock at any moment — the rest are in their LLM wait
+# window. This is what enables smooth time-sliced handoffs.
+# Env: AUTOBOT_MAX_CONCURRENT_TASKS (default 3)
+_MAX_CONCURRENT = int(os.getenv("AUTOBOT_MAX_CONCURRENT_TASKS", "3"))
+
 
 # ── Task model ────────────────────────────────────────────────────────────────
 
@@ -60,6 +66,7 @@ class TaskStatus(str):
     SCHEDULED = "scheduled"   # has a future run_at
     STARTING  = "starting"
     RUNNING   = "running"
+    PAUSED    = "paused"      # manually paused — will not be started until resumed
     DONE      = "done"
     FAILED    = "failed"
     CANCELLED = "cancelled"
@@ -273,6 +280,78 @@ class TaskScheduler:
             return []
         return task.logs[since_line:]
 
+    async def pause_task(self, task_id: str) -> bool:
+        """
+        Pause a queued task so the scheduler skips it until resumed.
+
+        If the task is already running, it cannot be paused mid-step (it will
+        finish its current action phase and then not be re-queued). For a
+        running task, use cancel_task() instead to stop it immediately.
+        Returns True if the task was found and is now paused.
+        """
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            if task.status == TaskStatus.QUEUED:
+                task.status = TaskStatus.PAUSED
+                self._save_queue()
+                logger.info(f"Task {task_id} paused.")
+                return True
+            return False
+
+    async def resume_task(self, task_id: str) -> bool:
+        """
+        Resume a paused task — returns it to the QUEUED state.
+        The scheduler will start it in the next tick if a slot is available.
+        """
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            if task.status == TaskStatus.PAUSED:
+                task.status = TaskStatus.QUEUED
+                self._save_queue()
+                logger.info(f"Task {task_id} resumed.")
+                return True
+            return False
+
+    async def reprioritize_task(self, task_id: str, new_priority: int) -> bool:
+        """
+        Change the priority of a queued or paused task.
+        Higher priority tasks acquire the ScreenLock first.
+        """
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            if task.status in (TaskStatus.QUEUED, TaskStatus.PAUSED, TaskStatus.SCHEDULED):
+                task.priority = new_priority
+                self._save_queue()
+                logger.info(f"Task {task_id} priority → {new_priority}.")
+                return True
+            return False
+
+    def get_schedule_status(self) -> dict:
+        """
+        Summary of the whole queue — useful for the dashboard.
+
+        Returns concurrent slot usage, per-task status, and ScreenLock info.
+        """
+        from autobot.agent.resource_manager import screen_lock
+        running = [t for t in self._tasks.values() if t.status == TaskStatus.RUNNING]
+        queued  = [t for t in self._tasks.values() if t.status == TaskStatus.QUEUED]
+        paused  = [t for t in self._tasks.values() if t.status == TaskStatus.PAUSED]
+        return {
+            "max_concurrent": _MAX_CONCURRENT,
+            "slots_used": len(running),
+            "slots_free": max(0, _MAX_CONCURRENT - len(running)),
+            "running": len(running),
+            "queued": len(queued),
+            "paused": len(paused),
+            "screen_lock": screen_lock.get_status(),
+        }
+
     # ── Internal loop ──────────────────────────────────────────────────────
 
     async def _scheduler_loop(self) -> None:
@@ -313,23 +392,37 @@ class TaskScheduler:
                     except Exception:
                         pass
 
-            # 4. If no task is running, start the next queued one
-            active = next(
-                (t for t in self._tasks.values() if t.status in (TaskStatus.RUNNING, TaskStatus.STARTING)),
-                None,
+            # 4. Start queued tasks up to the concurrent slot limit.
+            #
+            # Multiple tasks run simultaneously — they all hold their OWN LLM
+            # connections and only contend for the ScreenLock during the ACTION
+            # phase (typically 1–5 seconds per step). Between actions, the LLM
+            # wait window (2–10 s) lets other tasks grab the screen.
+            #
+            # This is the "smooth handoff" model: task A acts → releases lock →
+            # task B acquires lock → focuses its window → acts → releases → etc.
+            running_count = sum(
+                1 for t in self._tasks.values()
+                if t.status in (TaskStatus.RUNNING, TaskStatus.STARTING)
             )
-            if active is None:
+            slots_available = _MAX_CONCURRENT - running_count
+            if slots_available > 0:
                 queued = [
                     t for t in self._tasks.values()
-                    if t.status == TaskStatus.QUEUED
+                    if t.status == TaskStatus.QUEUED  # PAUSED tasks are excluded
                 ]
                 if queued:
-                    # Sort by priority DESC, then created_at ASC
+                    # Sort by priority DESC, then created_at ASC (FIFO within same priority)
                     queued.sort(key=lambda t: (-t.priority, t.created_at))
-                    next_task = queued[0]
-                    next_task.status = TaskStatus.STARTING
-                    # Start outside the lock to avoid deadlocks
-                    asyncio.create_task(self._start_task(next_task.id))
+                    for next_task in queued[:slots_available]:
+                        next_task.status = TaskStatus.STARTING
+                        logger.info(
+                            f"Scheduler: starting task {next_task.id} "
+                            f"({running_count + 1}/{_MAX_CONCURRENT} slots used)"
+                        )
+                        # Start outside the lock to avoid deadlocks
+                        asyncio.create_task(self._start_task(next_task.id))
+                        running_count += 1
 
     async def _start_task(self, task_id: str) -> None:
         """Launch an AgentRunner for this task in an asyncio task."""

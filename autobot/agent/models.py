@@ -170,10 +170,12 @@ class AgentOutput(BaseModel):
     """
     The complete structured output from the LLM at each step.
 
-    Adapted from Browser Use's structured JSON output requirement.
-    Forces the LLM to think, evaluate, remember, plan, then act.
+    All fields have defaults so a partial LLM response never crashes the loop.
     """
+    model_config = {"extra": "ignore"}   # silently drop unknown keys
+
     thinking: str = Field(
+        default="",
         description="Step-by-step reasoning about current state and what to do. "
                     "If something failed, explain WHY and what you'll try differently."
     )
@@ -187,19 +189,19 @@ class AgentOutput(BaseModel):
                     "Track retry counts: 'Attempt 2/3 for clicking New Project button'."
     )
     next_goal: str = Field(
+        default="",
         description="One clear sentence: what you will do next and why."
     )
     narrative: str = Field(
         default="",
-        description="Plain English for the user: 'I am doing X because Y.' Max 1 sentence. "
-                    "Write as if explaining to the person watching. E.g. 'Opening Kaggle to submit the trained model.'"
+        description="Plain English for the user: 'I am doing X because Y.' Max 1 sentence."
     )
     confidence: str = Field(
         default="high",
-        description="How confident are you this action will succeed? 'high', 'medium', or 'low'. "
-                    "Set to 'low' when unsure which element to target or after repeated failures."
+        description="'high', 'medium', or 'low'."
     )
     action: list[ActionModel] = Field(
+        default_factory=list,
         description="List of actions to execute sequentially."
     )
 

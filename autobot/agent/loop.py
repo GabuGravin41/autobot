@@ -165,6 +165,13 @@ class AgentLoop:
         # ScreenLock identity — used to identify this task in the resource manager
         self._task_id = task_id or f"loop-{id(self)}"
 
+        # Window hint for smooth context switching: when this task re-acquires the
+        # ScreenLock after another task used it, the hint tells us which window to
+        # bring to front (e.g. "Google Chrome", "code", "Terminal").
+        # Updated automatically on navigate actions and computer.display.focus() calls.
+        self._window_hint: str = "Google Chrome"   # default: most tasks start in browser
+        screen_lock.register_window(self._task_id, self._window_hint)
+
         # Approval guard — gates risky actions based on AUTOBOT_APPROVAL_MODE
         self._approval_guard = ApprovalGuard()
 
@@ -312,6 +319,8 @@ class AgentLoop:
         logger.info(f"🤖 Agent starting: '{self.goal}' ({mode_str})")
         self._run_start_time = time.time()
         self.stop_condition.start_timer()
+        # Register initial window hint so the ScreenLock can restore focus
+        screen_lock.register_window(self._task_id, self._window_hint)
 
         while True:
             # ── Check step budget ───────────────────────────────────────────
@@ -634,6 +643,19 @@ class AgentLoop:
             task_id=self._task_id,
             goal=agent_output.next_goal[:80],
         ):
+            # Context switch: another task was using the screen since we released it.
+            # Bring our window back into focus before acting — same as a human
+            # clicking back to their tab after switching to another program.
+            if screen_lock.context_switched:
+                hint = screen_lock.get_window_hint(self._task_id)
+                if hint:
+                    try:
+                        await asyncio.to_thread(self.computer.display.focus, hint)
+                        await asyncio.sleep(0.35)  # let the window fully render
+                        logger.info(f"🖥️  Window refocused: '{hint}' (task {self._task_id})")
+                    except Exception as _fe:
+                        logger.debug(f"Window focus failed: {_fe}")
+
             action_results = await self._execute_actions(
                 agent_output.action,
                 browser_state,
@@ -896,10 +918,13 @@ class AgentLoop:
             last_error = e
             logger.warning(f"LLM attempt 1 ({self.model}): {e}")
 
-        # Attempt 2: drop response_format (model may not support JSON mode)
+        # Attempt 2: drop response_format.
+        # OpenRouter and many models return 400 / empty / "unsupported" when JSON mode is
+        # requested for a model that doesn't support it. Broad trigger: retry without it
+        # unless the error is clearly about billing/auth (401/403/429).
         err_lower = str(last_error).lower()
-        if any(kw in err_lower for kw in ("400", "response_format", "json_object", "json mode",
-                                           "unsupported", "empty content", "no choices")):
+        _hard_errors = ("401", "403", "429", "insufficient_quota", "rate limit")
+        if not any(kw in err_lower for kw in _hard_errors):
             try:
                 no_format = {**args}
                 no_format.pop("response_format", None)
@@ -923,41 +948,113 @@ class AgentLoop:
 
         raise last_error
 
+    @staticmethod
+    def _normalize_agent_data(data: dict) -> dict:
+        """
+        Normalise raw LLM JSON before Pydantic validation.
+
+        Handles common LLM deviations:
+        - action is null / missing / a dict instead of a list
+        - action items are bare strings like "computer.mouse.click(x=5,y=10)"
+        - action items use {"call": "..."} instead of {"computer_call": {"call": "..."}}
+        - next_goal or thinking are None instead of empty string
+        """
+        # Ensure action is always a list
+        raw_action = data.get("action")
+        if raw_action is None:
+            data["action"] = []
+        elif isinstance(raw_action, dict):
+            data["action"] = [raw_action]
+        elif isinstance(raw_action, str):
+            # Bare string action — wrap as computer_call if it looks like one
+            if raw_action.startswith("computer."):
+                data["action"] = [{"computer_call": {"call": raw_action}}]
+            else:
+                data["action"] = []
+        elif isinstance(raw_action, list):
+            normalised = []
+            for item in raw_action:
+                if isinstance(item, str):
+                    if item.startswith("computer."):
+                        normalised.append({"computer_call": {"call": item}})
+                    # else skip non-parseable strings
+                elif isinstance(item, dict):
+                    # {"call": "computer.mouse.click(...)"} → {"computer_call": {"call": ...}}
+                    if "call" in item and "computer_call" not in item:
+                        normalised.append({"computer_call": {"call": item["call"]}})
+                    else:
+                        normalised.append(item)
+            data["action"] = normalised
+
+        # Coerce None strings to empty
+        for key in ("thinking", "next_goal", "memory", "narrative",
+                    "evaluation_previous_goal", "confidence"):
+            if data.get(key) is None:
+                data[key] = ""
+
+        return data
+
     def _parse_agent_output(self, raw: str) -> AgentOutput | None:
         """Parse the LLM's JSON response into an AgentOutput model."""
+        from pydantic import ValidationError
+        import re as _re_parse
+
+        def _try_build(data: dict) -> AgentOutput | None:
+            try:
+                return AgentOutput(**self._normalize_agent_data(data))
+            except (ValidationError, TypeError) as e:
+                logger.debug(f"AgentOutput build failed: {e}")
+                return None
+
         try:
             text = raw.strip()
 
-            # 1. Try direct parsing
+            # 1. Direct JSON parse
             try:
                 data = json.loads(text)
-                return AgentOutput(**data)
+                result = _try_build(data)
+                if result is not None:
+                    return result
             except json.JSONDecodeError:
                 pass
 
-            # 2. Try extracting from markdown code block
-            import re
-            json_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+            # 2. Extract from markdown code block
+            json_match = _re_parse.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re_parse.DOTALL)
             if json_match:
                 try:
                     data = json.loads(json_match.group(1))
-                    return AgentOutput(**data)
+                    result = _try_build(data)
+                    if result is not None:
+                        return result
                 except json.JSONDecodeError:
                     pass
 
-            # 3. Bracket-matching: find the outermost { ... } with proper nesting
+            # 3. Bracket-matching outermost { ... }
             json_str = self._extract_outermost_json(text)
             if json_str:
                 try:
                     data = json.loads(json_str)
-                    return AgentOutput(**data)
+                    result = _try_build(data)
+                    if result is not None:
+                        return result
                 except json.JSONDecodeError:
                     pass
 
-            logger.error(f"Failed to parse LLM output. Raw content: {raw[:500]}...")
+            # 4. Last resort: if the model returned plain text with a computer_call embedded,
+            #    extract it and wrap into a minimal AgentOutput so the agent doesn't deadlock.
+            cc_match = _re_parse.search(r'computer\.\w+\.\w+\([^)]*\)', text)
+            if cc_match:
+                logger.warning("LLM returned non-JSON — extracting embedded computer_call as fallback")
+                return AgentOutput(
+                    thinking=text[:200],
+                    next_goal="Execute extracted action",
+                    action=[{"computer_call": {"call": cc_match.group(0)}}],
+                )
+
+            logger.error(f"All JSON parse attempts failed. Raw[:300]: {raw[:300]}")
             return None
         except Exception as e:
-            logger.error(f"Error during agent output parsing: {e}")
+            logger.error(f"Unexpected error during agent output parsing: {e}")
             return None
 
     @staticmethod
@@ -1097,6 +1194,9 @@ class AgentLoop:
         try:
             if action.navigate is not None:
                 target_url = action.navigate.url
+                # Any navigate means we're in the browser — update window hint
+                self._window_hint = "Google Chrome"
+                screen_lock.register_window(self._task_id, "Google Chrome")
                 await self.page.goto(target_url)
                 # Detect obvious page-load errors (redirect to error page, offline, etc.)
                 landed_url = self.page.url
@@ -1412,14 +1512,29 @@ class AgentLoop:
                 extracted_content=str(result) if result is not None else None,
             )
 
+            # Track window context for smooth ScreenLock handoffs.
+            # When the agent explicitly focuses a window, update our hint so that
+            # after a context switch, we refocus the right window on next lock acquire.
+            import re as _re_wh
+            _focus_m = _re_wh.search(r"display\.focus\(['\"](.+?)['\"]\)", call_str)
+            if _focus_m:
+                _wh = _focus_m.group(1)
+                self._window_hint = _wh
+                screen_lock.register_window(self._task_id, _wh)
+                logger.debug(f"Window hint updated: '{_wh}'")
+            elif "mouse.click" in call_str or "keyboard.type" in call_str:
+                # Most mouse/keyboard actions are in whichever window is currently
+                # focused — keep the hint as-is (don't reset it here)
+                pass
+
             # Click zoom: capture a 300×300 region around the click target so the
             # LLM can verify in the NEXT step whether the click landed correctly.
             # Only ~400 tokens vs 10,000–20,000 for a full screenshot retry.
             if "mouse.click" in call_str and os.getenv("AUTOBOT_CLICK_ZOOM", "1") == "1":
                 import re as _re
                 _m = (
-                    _re.search(r"x\s*=\s*(\d+).*?y\s*=\s*(\d+)", call_str)
-                    or _re.search(r"(\d+)\s*,\s*(\d+)", call_str)
+                    _re.search(r"x\s*=\s*(-?\d+).*?y\s*=\s*(-?\d+)", call_str)
+                    or _re.search(r"(-?\d+)\s*,\s*(-?\d+)", call_str)
                 )
                 if _m:
                     _cx, _cy = int(_m.group(1)), int(_m.group(2))

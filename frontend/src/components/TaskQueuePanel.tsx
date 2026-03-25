@@ -2,19 +2,24 @@
  * TaskQueuePanel — Multi-task queue UI for the Dashboard.
  *
  * Shows:
- *  - ScreenLock status bar (which task currently controls the computer)
- *  - List of queued / running / done tasks with live metrics
- *  - Inline "Add Task" input (chat-safe: doesn't interrupt active task)
- *  - Cancel button per task
+ *  - Concurrent slot bar: how many tasks are running vs available
+ *  - ScreenLock status: which task controls the screen right now + waiting queue
+ *  - List of running / queued / paused / done tasks with live metrics
+ *  - Per-task: pause, resume, cancel controls
+ *  - Inline "Add Task" input
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
     AlertCircle, CheckCircle2, Clock, X, Plus, ChevronDown, ChevronUp,
-    Activity, Cpu, BarChart2, Loader2, Ban, Terminal,
+    Activity, Cpu, BarChart2, Loader2, Ban, Terminal, Pause, Play,
+    ArrowUp, ArrowDown,
 } from 'lucide-react';
-import { QueuedTask, ScreenLockStatus, getTaskLogs } from '../services/apiService';
+import {
+    QueuedTask, ScreenLockStatus, ScheduleStatus,
+    getTaskLogs, pauseTask, resumeTask, setTaskPriority,
+} from '../services/apiService';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +31,7 @@ function statusColor(status: QueuedTask['status']): string {
         case 'failed':    return 'text-red-400';
         case 'cancelled': return 'text-[var(--base-text-muted)]';
         case 'scheduled': return 'text-amber-300';
+        case 'paused':    return 'text-orange-400';
         default:          return 'text-[var(--base-text-muted)]';
     }
 }
@@ -38,6 +44,7 @@ function statusBg(status: QueuedTask['status']): string {
         case 'failed':    return 'bg-red-500/10';
         case 'cancelled': return 'bg-[var(--base-border)]';
         case 'scheduled': return 'bg-amber-300/10';
+        case 'paused':    return 'bg-orange-400/10';
         default:          return 'bg-[var(--base-border)]';
     }
 }
@@ -51,6 +58,7 @@ function StatusIcon({ status }: { status: QueuedTask['status'] }) {
         case 'failed':    return <AlertCircle size={15} className={cls} />;
         case 'cancelled': return <Ban size={15} className={cls} />;
         case 'scheduled': return <Clock size={15} className={cls} />;
+        case 'paused':    return <Pause size={15} className={cls} />;
         default:          return <Clock size={15} className={cls} />;
     }
 }
@@ -128,7 +136,7 @@ function TaskLogViewer({ taskId, isRunning }: { taskId: string; isRunning: boole
             } catch { /* ignore */ }
         };
 
-        poll(); // immediate first load
+        poll();
         const interval = isRunning ? setInterval(poll, 2000) : null;
         return () => {
             cancelled = true;
@@ -136,7 +144,6 @@ function TaskLogViewer({ taskId, isRunning }: { taskId: string; isRunning: boole
         };
     }, [taskId, isRunning]);
 
-    // Auto-scroll to bottom when new lines arrive
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [lines]);
@@ -162,9 +169,11 @@ function TaskLogViewer({ taskId, isRunning }: { taskId: string; isRunning: boole
                                 ? 'text-red-400'
                                 : line.includes('✅') || line.includes('complete') || line.includes('done')
                                     ? 'text-emerald-400'
-                                    : line.includes('🧠') || line.includes('💭')
-                                        ? 'text-[var(--brand-primary)]'
-                                        : 'text-[var(--base-text-muted)]'
+                                    : line.includes('🔄') || line.includes('context switch')
+                                        ? 'text-amber-300'
+                                        : line.includes('🧠') || line.includes('💭')
+                                            ? 'text-[var(--brand-primary)]'
+                                            : 'text-[var(--base-text-muted)]'
                         }`}>
                             {line}
                         </div>
@@ -176,29 +185,71 @@ function TaskLogViewer({ taskId, isRunning }: { taskId: string; isRunning: boole
     );
 }
 
-// ── Screen lock bar ───────────────────────────────────────────────────────────
+// ── Concurrent slots bar ──────────────────────────────────────────────────────
 
-function ScreenLockBar({ lockStatus }: { lockStatus: ScreenLockStatus | null }) {
-    if (!lockStatus) return null;
+function ConcurrentSlotsBar({ schedule }: { schedule: ScheduleStatus | null }) {
+    if (!schedule) return null;
+    const { max_concurrent, slots_used, slots_free, screen_lock } = schedule;
+    const waiters = screen_lock.waiting_tasks ?? [];
+
     return (
-        <div className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-widest mb-4 ${
-            lockStatus.locked
-                ? 'bg-[var(--brand-primary)]/10 border border-[var(--brand-primary)]/20 text-[var(--brand-primary)]'
-                : 'bg-[var(--base-border)] text-[var(--base-text-muted)]'
-        }`}>
-            <Cpu size={13} className={lockStatus.locked ? 'animate-pulse' : ''} />
-            {lockStatus.locked ? (
-                <span>
-                    Screen controlled by task <span className="font-mono">{lockStatus.holder_id}</span>
-                    {lockStatus.holder_goal && (
-                        <span className="ml-2 normal-case font-normal text-[var(--base-text-muted)]">
-                            — {lockStatus.holder_goal}
-                        </span>
-                    )}
-                    <span className="ml-2 font-mono">{lockStatus.held_for_seconds}s</span>
+        <div className="glass-panel p-4 rounded-2xl border border-[var(--base-border)] space-y-3 mb-4">
+            {/* Slot pills */}
+            <div className="flex items-center gap-3">
+                <Cpu size={13} className="text-[var(--base-text-muted)] shrink-0" />
+                <div className="flex gap-1.5 flex-wrap flex-1">
+                    {Array.from({ length: max_concurrent }).map((_, i) => (
+                        <div
+                            key={i}
+                            className={`h-2.5 flex-1 rounded-full transition-all ${
+                                i < slots_used
+                                    ? 'bg-[var(--brand-primary)]'
+                                    : 'bg-[var(--base-border)]'
+                            }`}
+                        />
+                    ))}
+                </div>
+                <span className="text-[10px] font-mono text-[var(--base-text-muted)] shrink-0">
+                    {slots_used}/{max_concurrent} slots
                 </span>
+            </div>
+
+            {/* Screen lock holder */}
+            {screen_lock.locked ? (
+                <div className="flex items-center gap-2 text-[10px]">
+                    <span className="w-2 h-2 rounded-full bg-[var(--brand-primary)] animate-pulse shrink-0" />
+                    <span className="text-[var(--brand-primary)] font-bold font-mono">
+                        {screen_lock.holder_id}
+                    </span>
+                    <span className="text-[var(--base-text-muted)] truncate">
+                        has the screen — {screen_lock.holder_goal || 'acting'}
+                    </span>
+                    <span className="ml-auto font-mono text-[var(--base-text-muted)] shrink-0">
+                        {screen_lock.held_for_seconds}s
+                    </span>
+                </div>
             ) : (
-                <span>Screen available — no task is active</span>
+                <div className="flex items-center gap-2 text-[10px] text-[var(--base-text-muted)]">
+                    <span className="w-2 h-2 rounded-full bg-[var(--base-border)] shrink-0" />
+                    Screen available
+                </div>
+            )}
+
+            {/* Tasks waiting for the screen */}
+            {waiters.length > 0 && (
+                <div className="space-y-1">
+                    <p className="text-[9px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
+                        Waiting for screen ({waiters.length})
+                    </p>
+                    {waiters.map(w => (
+                        <div key={w.task_id} className="flex items-center gap-2 text-[9px] font-mono text-amber-300">
+                            <Clock size={9} />
+                            <span>{w.task_id}</span>
+                            <span className="text-[var(--base-text-muted)] truncate flex-1">{w.goal}</span>
+                            <span>{w.waiting_seconds}s</span>
+                        </div>
+                    ))}
+                </div>
             )}
         </div>
     );
@@ -209,13 +260,15 @@ function ScreenLockBar({ lockStatus }: { lockStatus: ScreenLockStatus | null }) 
 interface TaskQueuePanelProps {
     tasks: QueuedTask[];
     lockStatus: ScreenLockStatus | null;
+    scheduleStatus: ScheduleStatus | null;
     onAddTask: (goal: string) => void;
     onCancelTask: (id: string) => void;
-    onPlanFirst?: (goal: string) => void;  // navigate to planner with goal pre-filled
+    onRefresh: () => void;
+    onPlanFirst?: (goal: string) => void;
 }
 
 export default function TaskQueuePanel({
-    tasks, lockStatus, onAddTask, onCancelTask, onPlanFirst,
+    tasks, lockStatus, scheduleStatus, onAddTask, onCancelTask, onRefresh, onPlanFirst,
 }: TaskQueuePanelProps) {
     const [input, setInput] = useState('');
     const [isAdding, setIsAdding] = useState(false);
@@ -240,8 +293,20 @@ export default function TaskQueuePanel({
         setIsAdding(false);
     };
 
-    const active = tasks.filter(t => ['starting', 'running'].includes(t.status));
-    const queued = tasks.filter(t => ['queued', 'scheduled'].includes(t.status));
+    const handlePause = async (taskId: string) => {
+        try { await pauseTask(taskId); onRefresh(); } catch { /* ignore */ }
+    };
+
+    const handleResume = async (taskId: string) => {
+        try { await resumeTask(taskId); onRefresh(); } catch { /* ignore */ }
+    };
+
+    const handlePriority = async (taskId: string, delta: number, current: number) => {
+        try { await setTaskPriority(taskId, Math.max(1, current + delta)); onRefresh(); } catch { /* ignore */ }
+    };
+
+    const active   = tasks.filter(t => ['starting', 'running'].includes(t.status));
+    const queued   = tasks.filter(t => ['queued', 'scheduled', 'paused'].includes(t.status));
     const finished = tasks.filter(t => ['done', 'failed', 'cancelled'].includes(t.status));
 
     return (
@@ -262,8 +327,8 @@ export default function TaskQueuePanel({
                 </button>
             </div>
 
-            {/* Screen lock */}
-            <ScreenLockBar lockStatus={lockStatus} />
+            {/* Concurrent scheduler status */}
+            <ConcurrentSlotsBar schedule={scheduleStatus} />
 
             {/* Inline add form */}
             <AnimatePresence>
@@ -291,7 +356,6 @@ export default function TaskQueuePanel({
                                     <button
                                         onClick={handlePlanFirst}
                                         disabled={!input.trim()}
-                                        title="Refine this in the AI Planner before queuing"
                                         className="flex-1 px-3 py-2 rounded-lg border border-[var(--brand-primary)]/30 text-[var(--brand-primary)] text-[10px] font-bold uppercase tracking-widest disabled:opacity-40 hover:bg-[var(--brand-primary)]/10 transition-all"
                                     >
                                         Plan First →
@@ -300,15 +364,14 @@ export default function TaskQueuePanel({
                                 <button
                                     onClick={handleAdd}
                                     disabled={!input.trim()}
-                                    title="Queue this goal directly without planning"
                                     className="flex-1 px-3 py-2 rounded-lg bg-[var(--brand-primary)] text-white text-[10px] font-bold uppercase tracking-widest disabled:opacity-40 hover:brightness-110 transition-all"
                                 >
                                     Queue Directly
                                 </button>
                             </div>
                             <p className="text-[8px] text-[var(--base-text-muted)]">
-                                <strong>Plan First</strong> — opens the AI Planner to refine the goal, then queue the result. &nbsp;
-                                <strong>Queue Directly</strong> — send this description to the agent as-is.
+                                <strong>Plan First</strong> — opens the AI Planner to refine the goal, then queue.&nbsp;
+                                <strong>Queue Directly</strong> — send as-is.
                             </p>
                         </div>
                     </motion.div>
@@ -322,7 +385,6 @@ export default function TaskQueuePanel({
                 </div>
             ) : (
                 <div className="space-y-3">
-                    {/* Active first */}
                     {[...active, ...queued, ...finished].map(task => (
                         <motion.div
                             key={task.id}
@@ -333,7 +395,9 @@ export default function TaskQueuePanel({
                             className={`glass-panel p-4 rounded-2xl border group transition-all ${
                                 task.status === 'running'
                                     ? 'border-[var(--brand-primary)]/30 glow-border'
-                                    : 'border-[var(--base-border)]'
+                                    : task.status === 'paused'
+                                        ? 'border-orange-400/20'
+                                        : 'border-[var(--base-border)]'
                             }`}
                         >
                             <div className="flex items-start gap-3">
@@ -352,17 +416,18 @@ export default function TaskQueuePanel({
                                         {task.status === 'running' && (
                                             <EvalBadge signal={task.eval_signal} />
                                         )}
+                                        {(task.priority ?? 1) > 1 && (
+                                            <span className="px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300 text-[9px] font-bold">
+                                                P{task.priority}
+                                            </span>
+                                        )}
                                     </div>
 
-                                    {/* Step progress */}
                                     <StepProgress task={task} />
-
-                                    {/* Metrics */}
                                     {task.status === 'running' && (
                                         <MetricsPills metrics={task.metrics} />
                                     )}
 
-                                    {/* Footer */}
                                     <div className="flex items-center gap-3 mt-2 text-[9px] text-[var(--base-text-muted)] font-mono">
                                         <span>#{task.id}</span>
                                         {task.elapsed_seconds > 0 && (
@@ -379,8 +444,51 @@ export default function TaskQueuePanel({
                                     </div>
                                 </div>
 
-                                {/* Expand + Cancel buttons */}
+                                {/* Controls */}
                                 <div className="flex items-center gap-1 shrink-0">
+                                    {/* Priority nudge (queued/paused only) */}
+                                    {['queued', 'paused', 'scheduled'].includes(task.status) && (
+                                        <>
+                                            <button
+                                                onClick={() => handlePriority(task.id, 1, task.priority ?? 1)}
+                                                className="p-1 rounded hover:bg-amber-400/10 text-[var(--base-text-muted)] hover:text-amber-300 transition-all opacity-0 group-hover:opacity-100"
+                                                title="Raise priority"
+                                            >
+                                                <ArrowUp size={12} />
+                                            </button>
+                                            <button
+                                                onClick={() => handlePriority(task.id, -1, task.priority ?? 1)}
+                                                className="p-1 rounded hover:bg-amber-400/10 text-[var(--base-text-muted)] hover:text-amber-300 transition-all opacity-0 group-hover:opacity-100"
+                                                title="Lower priority"
+                                            >
+                                                <ArrowDown size={12} />
+                                            </button>
+                                        </>
+                                    )}
+
+                                    {/* Pause (queued only) */}
+                                    {task.status === 'queued' && (
+                                        <button
+                                            onClick={() => handlePause(task.id)}
+                                            className="p-1.5 rounded-lg hover:bg-orange-400/10 text-[var(--base-text-muted)] hover:text-orange-400 transition-all opacity-0 group-hover:opacity-100"
+                                            title="Pause task (skip until resumed)"
+                                        >
+                                            <Pause size={13} />
+                                        </button>
+                                    )}
+
+                                    {/* Resume (paused only) */}
+                                    {task.status === 'paused' && (
+                                        <button
+                                            onClick={() => handleResume(task.id)}
+                                            className="p-1.5 rounded-lg hover:bg-emerald-500/10 text-emerald-400 transition-all"
+                                            title="Resume task"
+                                        >
+                                            <Play size={13} />
+                                        </button>
+                                    )}
+
+                                    {/* Expand logs */}
                                     <button
                                         onClick={() => toggleExpand(task.id)}
                                         className="p-1.5 rounded-lg hover:bg-[var(--brand-primary)]/10 text-[var(--base-text-muted)] hover:text-[var(--brand-primary)] transition-all"
@@ -390,7 +498,9 @@ export default function TaskQueuePanel({
                                             ? <ChevronUp size={14} />
                                             : <ChevronDown size={14} />}
                                     </button>
-                                    {['queued', 'scheduled', 'starting', 'running'].includes(task.status) && (
+
+                                    {/* Cancel */}
+                                    {['queued', 'scheduled', 'paused', 'starting', 'running'].includes(task.status) && (
                                         <button
                                             onClick={() => onCancelTask(task.id)}
                                             className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg hover:bg-red-500/10 text-red-400 transition-all"

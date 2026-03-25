@@ -79,7 +79,7 @@ class StepPromptBuilder:
         browser_state: BrowserState,
         task: str,
         step_number: int,
-        max_steps: int,
+        max_steps: int | None,
         agent_history: str | None = None,
         native_ui: str | None = None,
         page_snapshot=None,  # autobot.dom.page_snapshot.PageSnapshot | None
@@ -91,7 +91,7 @@ class StepPromptBuilder:
         self.browser_state = browser_state
         self.task = task
         self.step_number = step_number
-        self.max_steps = max_steps
+        self.max_steps = max_steps  # may be None in perpetual mode
         self.agent_history = agent_history
         self.native_ui = native_ui
         self.page_snapshot = page_snapshot
@@ -149,7 +149,7 @@ class StepPromptBuilder:
 <user_request>
 {self.task}
 </user_request>
-<step_info>Step {self.step_number + 1} of {self.max_steps} | Today: {date_str}</step_info>
+<step_info>Step {self.step_number + 1} of {self.max_steps if self.max_steps else '∞'} | Today: {date_str}</step_info>
 </agent_state>"""
         parts.append(agent_state)
 

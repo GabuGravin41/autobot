@@ -12,7 +12,14 @@ API surface:
   GET  /api/settings       → read current settings
   POST /api/settings       → update .env-based settings
   GET  /api/runs           → historical runs
-  DELETE /api/runs         → format/delete all historical runs
+  DELETE /api/runs         → clear all historical runs
+  DELETE /api/run/{run_id} → delete a single run
+  GET  /api/run/{run_id}   → get details of a single run
+
+  GET  /api/workflows           → list all workflows (builtin + user)
+  POST /api/workflows/save      → save a new user workflow
+  POST /api/workflows/{id}/run  → run a workflow
+  DELETE /api/workflows/{id}    → delete a user workflow
 
   WS   /ws/logs            → real-time log streaming
 """
@@ -722,6 +729,57 @@ def get_screen_lock_status():
     """Current screen lock holder — useful for multi-task dashboard."""
     from ..agent.resource_manager import screen_lock
     return screen_lock.get_status()
+
+
+@app.get("/api/schedule/status")
+async def get_schedule_status():
+    """
+    Full scheduling dashboard:
+    - How many concurrent slots are in use vs available
+    - ScreenLock holder + waiting tasks
+    - Running / queued / paused counts
+    """
+    from ..agent.scheduler import scheduler
+    return scheduler.get_schedule_status()
+
+
+@app.post("/api/tasks/{task_id}/pause")
+async def pause_task(task_id: str):
+    """Pause a queued task so the scheduler skips it until resumed."""
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.pause_task(task_id)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task {task_id} could not be paused (not in queued state)."
+        )
+    return {"status": "paused", "task_id": task_id}
+
+
+@app.post("/api/tasks/{task_id}/resume")
+async def resume_task(task_id: str):
+    """Resume a paused task — re-queues it so the scheduler will pick it up."""
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.resume_task(task_id)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task {task_id} could not be resumed (not in paused state)."
+        )
+    return {"status": "queued", "task_id": task_id}
+
+
+@app.patch("/api/tasks/{task_id}/priority")
+async def set_task_priority(task_id: str, priority: int):
+    """Change the priority of a queued/paused task (higher = runs first)."""
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.reprioritize_task(task_id, priority)
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task {task_id} is already running or not found."
+        )
+    return {"status": "updated", "task_id": task_id, "priority": priority}
 
 
 # ── Server configuration ──────────────────────────────────────────────────────

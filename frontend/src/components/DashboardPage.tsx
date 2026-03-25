@@ -7,7 +7,7 @@ import {
     Maximize2, Minimize2, X, Move, Brain, ExternalLink, Code2,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, getBrowserScreenshotUrl, runLeetCodeMission } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission } from '../services/apiService';
 import TaskQueuePanel from './TaskQueuePanel';
 
 interface DashboardPageProps {
@@ -24,8 +24,10 @@ interface DashboardPageProps {
     onSelectArtifact: (artifact: any) => void;
     scheduledTasks: QueuedTask[];
     screenLockStatus: ScreenLockStatus | null;
+    scheduleStatus: ScheduleStatus | null;
     onAddTask: (goal: string) => void;
     onCancelTask: (id: string) => void;
+    onRefreshTasks: () => void;
     onPlanFirst: (goal: string) => void;
 }
 
@@ -33,7 +35,7 @@ export default function DashboardPage({
     backendOnline, backendStatus, activeRun, liveRuns, liveAdapters,
     liveLogLines, screenshotUrl, onRefreshScreenshot, onAbortRun,
     onSelectRun, onSelectArtifact, scheduledTasks, screenLockStatus,
-    onAddTask, onCancelTask, onPlanFirst,
+    scheduleStatus, onAddTask, onCancelTask, onRefreshTasks, onPlanFirst,
 }: DashboardPageProps) {
     const navigate = useNavigate();
     const [isScreenPopout, setIsScreenPopout] = useState(false);
@@ -420,8 +422,10 @@ export default function DashboardPage({
                         <TaskQueuePanel
                             tasks={scheduledTasks}
                             lockStatus={screenLockStatus}
+                            scheduleStatus={scheduleStatus}
                             onAddTask={onAddTask}
                             onCancelTask={onCancelTask}
+                            onRefresh={onRefreshTasks}
                             onPlanFirst={onPlanFirst}
                         />
                     </div>

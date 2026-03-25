@@ -399,7 +399,7 @@ export const toggleAntiSleep = (enabled: boolean): Promise<{ status: string; ena
 export interface QueuedTask {
     id: string;
     goal: string;
-    status: 'queued' | 'scheduled' | 'starting' | 'running' | 'done' | 'failed' | 'cancelled';
+    status: 'queued' | 'scheduled' | 'starting' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
     priority: number;
     run_at: string | null;        // ISO string or null
     created_at: string;
@@ -437,15 +437,45 @@ export const addTask = (
 export const cancelTask = (taskId: string): Promise<{ status: string; task_id: string }> =>
     apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
 
+export const pauseTask = (taskId: string): Promise<{ status: string; task_id: string }> =>
+    apiFetch(`/api/tasks/${taskId}/pause`, { method: 'POST' });
+
+export const resumeTask = (taskId: string): Promise<{ status: string; task_id: string }> =>
+    apiFetch(`/api/tasks/${taskId}/resume`, { method: 'POST' });
+
+export const setTaskPriority = (taskId: string, priority: number): Promise<{ status: string }> =>
+    apiFetch(`/api/tasks/${taskId}/priority?priority=${priority}`, { method: 'PATCH' });
+
+export interface WaitingTask {
+    task_id: string;
+    goal: string;
+    waiting_seconds: number;
+}
+
 export interface ScreenLockStatus {
     locked: boolean;
     holder_id: string | null;
     holder_goal: string;
     held_for_seconds: number;
+    last_released_by: string | null;
+    waiting_tasks: WaitingTask[];
+}
+
+export interface ScheduleStatus {
+    max_concurrent: number;
+    slots_used: number;
+    slots_free: number;
+    running: number;
+    queued: number;
+    paused: number;
+    screen_lock: ScreenLockStatus;
 }
 
 export const getScreenLockStatus = (): Promise<ScreenLockStatus> =>
     apiFetch<ScreenLockStatus>('/api/screen-lock');
+
+export const getScheduleStatus = (): Promise<ScheduleStatus> =>
+    apiFetch<ScheduleStatus>('/api/schedule/status');
 
 // ── Tunnel ──────────────────────────────────────────────────────────────────
 export const startTunnel = (): Promise<{ status: string; url: string }> =>
