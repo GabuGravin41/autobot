@@ -7,7 +7,7 @@ import {
     Maximize2, Minimize2, X, Move, Brain, ExternalLink, Code2,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission, pauseRun, resumeRun } from '../services/apiService';
 import TaskQueuePanel from './TaskQueuePanel';
 
 interface DashboardPageProps {
@@ -301,14 +301,30 @@ export default function DashboardPage({
                                     </div>
                                 </div>
 
-                                {/* Abort button */}
-                                {activeRun.status === 'running' && (
-                                    <button
-                                        onClick={onAbortRun}
-                                        className="w-full py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 transition-colors"
-                                    >
-                                        ■ Abort Run
-                                    </button>
+                                {/* Pause / Abort controls */}
+                                {(activeRun.status === 'running' || backendStatus?.paused) && (
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={async () => {
+                                                try {
+                                                    if (backendStatus?.paused) {
+                                                        await resumeRun();
+                                                    } else {
+                                                        await pauseRun();
+                                                    }
+                                                } catch (e) { console.error(e); }
+                                            }}
+                                            className="flex-1 py-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] font-bold uppercase tracking-widest hover:bg-amber-500/20 transition-colors flex items-center justify-center gap-2"
+                                        >
+                                            {backendStatus?.paused ? '▶ Resume' : '⏸ Pause'}
+                                        </button>
+                                        <button
+                                            onClick={onAbortRun}
+                                            className="flex-1 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 transition-colors"
+                                        >
+                                            ■ Abort
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                         </div>
@@ -433,36 +449,6 @@ export default function DashboardPage({
 
                 {/* Artifacts sidebar */}
                 <div className="space-y-6">
-                    {backendOnline && screenshotUrl && (
-                        <div className="glass-panel p-4 rounded-3xl border-[var(--base-border)]">
-                            <div className="flex items-center justify-between gap-2 mb-3">
-                                <h3 className="text-sm font-bold tracking-tight flex items-center gap-2"><Monitor size={14} /> Screen</h3>
-                                <div className="flex items-center gap-2">
-                                    <button onClick={openScreenInNewWindow} className="px-2 py-1 rounded-lg bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1" title="Pop out to new window">
-                                        <ExternalLink size={12} />
-                                    </button>
-                                    <button onClick={() => setIsScreenPopout(true)} className="px-2 py-1 rounded-lg bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors" title="Pop out (floating)">
-                                        <Maximize2 size={12} />
-                                    </button>
-                                    <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-[var(--brand-primary)]/20 hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors">
-                                        Refresh
-                                    </button>
-                                </div>
-                            </div>
-                            <div
-                                className="relative aspect-video rounded-xl overflow-hidden border border-[var(--base-border)] cursor-pointer group/sidebar-screen"
-                                onClick={() => setIsScreenPopout(true)}
-                                title="Click to pop out"
-                            >
-                                <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
-                                    onError={(e) => (e.currentTarget.style.display = 'none')} />
-                                <div className="absolute inset-0 bg-black/0 group-hover/sidebar-screen:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover/sidebar-screen:opacity-100">
-                                    <Maximize2 size={20} className="text-white drop-shadow-lg" />
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
                     {/* Quick Launch */}
                     <div className="glass-panel p-5 rounded-3xl border-[var(--base-border)]">
                         <h3 className="text-sm font-bold tracking-tight flex items-center gap-2 mb-4">

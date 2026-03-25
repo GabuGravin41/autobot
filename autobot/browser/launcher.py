@@ -90,6 +90,31 @@ def _launch_chrome() -> None:
         logger.warning(f"Chrome launch failed: {e} — continuing anyway")
 
 
+def _query_cdp_url() -> str | None:
+    """Query Chrome CDP for the real URL of the frontmost tab.
+
+    Returns None if CDP is unreachable (Chrome not running, or no debugging port).
+    This is used by HumanModeEmulator.url to return the actual current URL even
+    when the agent navigated via keyboard shortcuts instead of goto().
+    """
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://localhost:9222/json", timeout=1) as resp:
+            tabs = json.loads(resp.read())
+        # Skip DevTools / extension / new-tab pages; return first real URL
+        for tab in tabs:
+            url = tab.get("url", "")
+            if url and not url.startswith((
+                "chrome-extension://", "devtools://", "chrome://newtab",
+                "chrome://new-tab-page", "about:blank",
+            )):
+                return url
+    except Exception:
+        pass
+    return None
+
+
 def _focus_chrome() -> None:
     """Bring the Chrome window to the foreground using xdotool (Linux)."""
     try:
@@ -333,6 +358,13 @@ class HumanModeEmulator:
 
     @property
     def url(self) -> str:
+        # Query Chrome's CDP for the real URL — catches keyboard navigation
+        # (agent uses ctrl+l + type + Enter) that bypasses goto() and leaves
+        # self._url stale as "about:blank".
+        real = _query_cdp_url()
+        if real:
+            self._url = real   # keep cached value in sync
+            return real
         return self._url
 
     @property

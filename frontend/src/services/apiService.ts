@@ -70,6 +70,7 @@ export interface BackendStatus {
     anti_sleep_enabled?: boolean;
     auth_notification?: AuthNotification | null;
     narrative?: string | null;
+    paused?: boolean;
 }
 
 // ── Onboarding ──────────────────────────────────────────────────────────────
@@ -159,6 +160,14 @@ export const runPlan = (plan: BackendPlan): Promise<{ run_id: string; status: st
 /** Cancel a running plan */
 export const cancelRun = (runId: string): Promise<{ status: string }> =>
     apiFetch(`/api/agent/cancel`, { method: 'POST' });
+
+/** Pause the active agent run (idles after the current step) */
+export const pauseRun = (): Promise<{ status: string }> =>
+    apiFetch('/api/agent/pause', { method: 'POST' });
+
+/** Resume a paused agent run */
+export const resumeRun = (): Promise<{ status: string }> =>
+    apiFetch('/api/agent/resume', { method: 'POST' });
 
 // ── Autonomous Multi-Agent Runner ───────────────────────────────────────────
 export interface AutonomousStatus {

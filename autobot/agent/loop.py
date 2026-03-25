@@ -175,6 +175,15 @@ class AgentLoop:
         # Approval guard — gates risky actions based on AUTOBOT_APPROVAL_MODE
         self._approval_guard = ApprovalGuard()
 
+        # Cancellation: set to True to stop the loop ASAP (checked each iteration
+        # and after each LLM call so blocking API calls also get interrupted).
+        self._cancelled = False
+        self._current_llm_task: asyncio.Task | None = None   # active LLM coroutine task
+
+        # Pause: when True the loop sits idle between steps without consuming LLM calls.
+        # resume() clears this flag and execution picks up at the next step boundary.
+        self._paused = False
+
         # Smart vision skipping: track what the last actions were and whether screen changed.
         # Non-visual steps (typing, clipboard ops, terminal) skip sending the screenshot to the LLM.
         self._last_action_types: list[str] = []      # e.g. ["keyboard.type", "clipboard.set"]
@@ -203,6 +212,32 @@ class AgentLoop:
         self.last_screenshot_path: str | None = None
         self._last_narrative: str = ""   # Latest plain-English "what I'm doing"
 
+    def cancel(self) -> None:
+        """Cancel the agent loop immediately.
+
+        Sets the cancellation flag (checked at every loop iteration) AND cancels
+        any in-flight LLM asyncio Task so the agent stops within milliseconds
+        rather than waiting for a 60-90s API call to time out.
+        """
+        self._cancelled = True
+        if self._current_llm_task and not self._current_llm_task.done():
+            self._current_llm_task.cancel()
+        logger.info("🛑 AgentLoop cancelled")
+
+    def pause(self) -> None:
+        """Pause execution after the current step completes.
+
+        The loop stays alive but idles (checking every 0.3s) without making
+        any LLM calls or taking actions. Call resume() to continue.
+        """
+        self._paused = True
+        logger.info("⏸ AgentLoop paused")
+
+    def resume(self) -> None:
+        """Resume a paused agent loop."""
+        self._paused = False
+        logger.info("▶ AgentLoop resumed")
+
     def get_status(self) -> dict[str, Any]:
         """Returns the current status metadata for the dashboard."""
         elapsed = time.time() - self._run_start_time
@@ -221,6 +256,7 @@ class AgentLoop:
             "metrics": self.metrics,
             "elapsed_seconds": int(elapsed),
             "narrative": self._last_narrative,
+            "paused": self._paused,
         }
 
     def _save_checkpoint(self):
@@ -323,6 +359,16 @@ class AgentLoop:
         screen_lock.register_window(self._task_id, self._window_hint)
 
         while True:
+            # ── Check cancellation ──────────────────────────────────────────
+            if self._cancelled:
+                logger.info("🛑 Agent loop stopped — task cancelled by user")
+                self._save_checkpoint()
+                return "Task cancelled."
+
+            # ── Check pause ─────────────────────────────────────────────────
+            while self._paused:
+                await asyncio.sleep(0.3)
+
             # ── Check step budget ───────────────────────────────────────────
             if self.max_steps is not None and self.step_number >= self.max_steps:
                 logger.info(f"📊 Step budget ({self.max_steps}) reached — consulting EvaluationAgent...")
@@ -396,6 +442,12 @@ class AgentLoop:
                     elif signal == EvalSignal.PAUSE:
                         logger.info("⏸️ EvaluationAgent: PAUSE — waiting for user")
                         # Loop continues; frontend will surface the pending_auth alert
+
+            except asyncio.CancelledError:
+                # LLM task was cancelled via self.cancel() — exit cleanly
+                logger.info("🛑 Step interrupted by cancellation")
+                self._save_checkpoint()
+                return "Task cancelled."
 
             except Exception as e:
                 self._consecutive_step_errors += 1
@@ -900,16 +952,55 @@ class AgentLoop:
                     logger.debug("Gemini: system prompt routed via system_instruction (prefix caching enabled)")
 
         async def _do_call(current_args: dict) -> str:
-            resp = await self.llm_client.chat.completions.create(**current_args)
-            if not resp.choices:
-                raise ValueError(f"No choices returned by {current_args['model']}")
-            content = resp.choices[0].message.content
-            if not content or not content.strip():
-                finish = getattr(resp.choices[0], "finish_reason", "unknown")
-                raise ValueError(f"Empty content from {current_args['model']} (finish_reason={finish})")
-            return str(content)
+            # Wrap in a Task so cancel() can interrupt in-flight API calls
+            async def _inner():
+                resp = await self.llm_client.chat.completions.create(**current_args)
+                if not resp.choices:
+                    raise ValueError(f"No choices returned by {current_args['model']}")
+                content = resp.choices[0].message.content
+                if not content or not content.strip():
+                    finish = getattr(resp.choices[0], "finish_reason", "unknown")
+                    raise ValueError(f"Empty content from {current_args['model']} (finish_reason={finish})")
+                return str(content)
+
+            task = asyncio.create_task(_inner())
+            self._current_llm_task = task
+            try:
+                return await task
+            except asyncio.CancelledError:
+                logger.info("🛑 LLM call cancelled")
+                raise
+            finally:
+                self._current_llm_task = None
 
         last_error: Exception | None = None
+
+        # Fast-path: if this model is already known to not support vision, skip
+        # straight to text-only. Avoids 2 wasted 404 round-trips per step.
+        # A model is flagged after its first "No endpoints found that support image input"
+        # error so that all subsequent steps go text-only immediately.
+        _no_vision_key = f"_no_vision_{active_model}"
+        _model_no_vision = getattr(self, _no_vision_key, False)
+
+        # Also skip vision for models we know can't handle images
+        _TEXT_ONLY_MODELS = (
+            "deepseek", "llama", "mistral", "codestral", "qwen",
+            "o1-mini", "o1-preview", "command-r",
+        )
+        if not _model_no_vision and any(kw in active_model.lower() for kw in _TEXT_ONLY_MODELS):
+            _model_no_vision = True
+            setattr(self, _no_vision_key, True)
+            logger.info(f"Model '{active_model}' flagged as text-only — skipping vision attempts")
+
+        if _model_no_vision:
+            # Go straight to text-only, no wasted attempts
+            text_only_msgs = _strip_images_from_messages(messages)
+            text_only_args = {**args, "messages": text_only_msgs}
+            text_only_args.pop("response_format", None)
+            try:
+                return await _do_call(text_only_args)
+            except Exception as e:
+                raise e
 
         # Attempt 1: vision + JSON mode
         try:
@@ -917,6 +1008,10 @@ class AgentLoop:
         except Exception as e:
             last_error = e
             logger.warning(f"LLM attempt 1 ({self.model}): {e}")
+            # If the model says it doesn't support image input, flag it for future steps
+            if "image input" in str(e).lower() or "no endpoints found" in str(e).lower():
+                setattr(self, _no_vision_key, True)
+                logger.info(f"Model '{active_model}' auto-flagged as text-only after vision rejection")
 
         # Attempt 2: drop response_format.
         # OpenRouter and many models return 400 / empty / "unsupported" when JSON mode is
@@ -924,7 +1019,10 @@ class AgentLoop:
         # unless the error is clearly about billing/auth (401/403/429).
         err_lower = str(last_error).lower()
         _hard_errors = ("401", "403", "429", "insufficient_quota", "rate limit")
-        if not any(kw in err_lower for kw in _hard_errors):
+        # Also skip attempt 2 if we just learned the model doesn't support vision —
+        # go straight to attempt 3 (text-only) to avoid another wasted round-trip.
+        _just_flagged_no_vision = "image input" in err_lower or "no endpoints found" in err_lower
+        if not any(kw in err_lower for kw in _hard_errors) and not _just_flagged_no_vision:
             try:
                 no_format = {**args}
                 no_format.pop("response_format", None)
@@ -1174,7 +1272,6 @@ class AgentLoop:
                 break
 
             # Small delay between actions to mimic human behavior
-            import asyncio
             await asyncio.sleep(0.3)
 
         return results
@@ -1355,7 +1452,6 @@ class AgentLoop:
             logger.info(f"Clicked [{index}] <{element.tag_name}> '{text[:30]}'")
 
             # Check if page changed
-            import asyncio
             await asyncio.sleep(0.5)
             page_changed = self.page.url != browser_state.url
 

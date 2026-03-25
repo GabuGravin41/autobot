@@ -341,14 +341,37 @@ class AgentRunner:
             except Exception:
                 pass
 
+    def pause(self) -> None:
+        """Pause the running task after the current step completes."""
+        self.status = "paused"
+        if self._agent_loop:
+            self._agent_loop.pause()
+        if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
+            self._mission_agent.current_agent_loop.pause()
+        self.log("⏸ Task paused")
+
+    def resume(self) -> None:
+        """Resume a paused task."""
+        self.status = "running"
+        if self._agent_loop:
+            self._agent_loop.resume()
+        if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
+            self._mission_agent.current_agent_loop.resume()
+        self.log("▶ Task resumed")
+
     def cancel(self) -> None:
-        """Cancel the running task."""
+        """Cancel the running task immediately.
+
+        Calls AgentLoop.cancel() which both sets the cancellation flag AND
+        cancels any in-flight LLM asyncio Task, stopping execution within
+        milliseconds rather than waiting for the next loop iteration.
+        """
         self.status = "cancelled"
         if self._agent_loop:
-            self._agent_loop.max_steps = 0
+            self._agent_loop.cancel()
         # Also cancel mission agent's current loop
         if hasattr(self, '_mission_agent') and self._mission_agent and self._mission_agent.current_agent_loop:
-            self._mission_agent.current_agent_loop.max_steps = 0
+            self._mission_agent.current_agent_loop.cancel()
         self.log("⚠️ Task cancelled")
 
     @property
@@ -401,6 +424,7 @@ class AgentRunner:
             # Current browser URL (best-effort — page may be None if not yet launched)
             "browser_url": self._get_current_url(),
             # Evaluation + stop condition progress
+            "paused": loop_status.get("paused", False),
             "eval_signal": loop_status.get("eval_signal", "continue"),
             "stop_condition": loop_status.get("stop_condition"),
             "stop_progress": loop_status.get("stop_progress", ""),

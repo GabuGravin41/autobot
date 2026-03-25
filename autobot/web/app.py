@@ -5,6 +5,8 @@ to the new Agent architecture.
 API surface:
   POST /api/agent/run         → start the new agent loop
   GET  /api/agent/status      → get status of active agent
+  POST /api/agent/pause       → pause active agent (resumes from same step)
+  POST /api/agent/resume      → resume a paused agent
   POST /api/agent/cancel      → cancel active agent
   POST /api/mission/leetcode  → LeetCode multi-AI solving mission
   POST /api/task/background   → non-visual background task (parallel)
@@ -412,6 +414,24 @@ def start_background_task(req: BackgroundRunRequest):
     import threading
     threading.Thread(target=_run_bg, daemon=True, name=f"bg-{run_id}").start()
     return {"run_id": run_id, "status": "started", "goal": req.goal, "mode": "background"}
+
+
+@app.post("/api/agent/pause")
+def pause_agent():
+    """Pause the active agent run (it will idle after the current step)."""
+    if not _agent_runner or _agent_status not in ("running",):
+        raise HTTPException(status_code=400, detail="No active agent run to pause.")
+    _agent_runner.pause()
+    return {"status": "paused"}
+
+
+@app.post("/api/agent/resume")
+def resume_agent():
+    """Resume a paused agent run."""
+    if not _agent_runner or _agent_status not in ("paused", "running"):
+        raise HTTPException(status_code=400, detail="No paused agent run to resume.")
+    _agent_runner.resume()
+    return {"status": "running"}
 
 
 @app.post("/api/agent/cancel")
