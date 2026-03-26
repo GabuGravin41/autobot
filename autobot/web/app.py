@@ -159,6 +159,8 @@ class SettingsUpdate(BaseModel):
     openrouter_api_key: str | None = None
     openai_api_key: str | None = None
     google_api_key: str | None = None
+    vertex_api_key: str | None = None
+    xai_api_key: str | None = None
     browser_mode: str | None = None
     approval_mode: str | None = None   # "strict" | "balanced" | "trusted"
 
@@ -480,7 +482,7 @@ def get_settings():
     has_user_key = bool(
         os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or
         os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY") or
-        os.getenv("XAI_API_KEY")
+        os.getenv("XAI_API_KEY") or os.getenv("VERTEX_API_KEY")
     )
     using_default_key = bool(os.getenv("AUTOBOT_DEFAULT_API_KEY")) and not has_user_key
     return {
@@ -491,6 +493,7 @@ def get_settings():
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
         "has_google_key": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
         "has_xai_key": bool(os.getenv("XAI_API_KEY")),
+        "has_vertex_key": bool(os.getenv("VERTEX_API_KEY")),
         "llm_enabled": True,
         "cors_allow_all": os.getenv("AUTOBOT_CORS_ALLOW_ALL", "").lower() in ("1", "true", "yes"),
         "approval_mode": os.getenv("AUTOBOT_APPROVAL_MODE", "balanced"),
@@ -516,6 +519,14 @@ def update_settings(req: SettingsUpdate):
         updates["GOOGLE_API_KEY"] = req.google_api_key
         if not req.llm_provider:
             updates["AUTOBOT_LLM_PROVIDER"] = "google"
+    if req.vertex_api_key:
+        updates["VERTEX_API_KEY"] = req.vertex_api_key
+        if not req.llm_provider:
+            updates["AUTOBOT_LLM_PROVIDER"] = "vertex"
+    if req.xai_api_key:
+        updates["XAI_API_KEY"] = req.xai_api_key
+        if not req.llm_provider:
+            updates["AUTOBOT_LLM_PROVIDER"] = "xai"
     if req.approval_mode and req.approval_mode in ("strict", "balanced", "trusted"):
         updates["AUTOBOT_APPROVAL_MODE"] = req.approval_mode
 
@@ -1152,43 +1163,9 @@ Your job is to understand what the user wants to accomplish on their computer, a
 
 
 def _create_llm_client_for_chat():
-    """Create LLM client for the chat endpoint (reuses same logic as agent)."""
-    from openai import AsyncOpenAI
-    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter").lower()
-
-    if provider == "google":
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if api_key:
-            return AsyncOpenAI(
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=api_key,
-            )
-    elif provider == "openrouter":
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if api_key:
-            return AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
-    elif provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            return AsyncOpenAI(api_key=api_key)
-    elif provider == "xai":
-        api_key = os.getenv("XAI_API_KEY")
-        if api_key:
-            return AsyncOpenAI(base_url="https://api.x.ai/v1", api_key=api_key)
-
-    # Auto-detect
-    for env_key, base_url in [
-        ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
-    ]:
-        api_key = os.getenv(env_key)
-        if api_key:
-            return AsyncOpenAI(base_url=base_url, api_key=api_key)
-    api_key = os.getenv("OPENAI_API_KEY")
-    if api_key:
-        return AsyncOpenAI(api_key=api_key)
-    return None
+    """Create LLM client for the chat endpoint — mirrors _create_llm_client() in runner.py."""
+    from autobot.agent.runner import _create_llm_client
+    return _create_llm_client()
 
 
 # ── Ngrok Tunnel ─────────────────────────────────────────────────────────────

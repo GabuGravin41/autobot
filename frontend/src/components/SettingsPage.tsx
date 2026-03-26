@@ -76,6 +76,16 @@ const PROVIDERS: ProviderConfig[] = [
         ],
     },
     {
+        id: 'vertex', name: 'Google Vertex AI', description: 'Vertex AI Express — API key, $300 credit.',
+        envKey: 'VERTEX_API_KEY', baseUrl: 'https://aiplatform.googleapis.com/v1beta1/openai/',
+        models: [
+            { id: 'gemini-2.5-flash-lite-preview-05-20', name: 'Gemini 2.5 Flash Lite', tags: ['vision', 'fast', 'recommended'] },
+            { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash', tags: ['vision', 'fast'] },
+            { id: 'gemini-2.5-pro-preview-05-06', name: 'Gemini 2.5 Pro', tags: ['vision', 'powerful'] },
+            { id: 'gemini-2.0-flash-001', name: 'Gemini 2.0 Flash', tags: ['vision', 'fast'] },
+        ],
+    },
+    {
         id: 'openai', name: 'OpenAI', description: 'Direct OpenAI API.',
         envKey: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1',
         models: [
@@ -150,7 +160,7 @@ export default function SettingsPage({
             setCurrentConfig({
                 provider: settings.llm_provider || 'openrouter',
                 model: settings.llm_model || '',
-                hasKey: settings.has_google_key || settings.has_openrouter_key || settings.has_openai_key,
+                hasKey: settings.has_google_key || settings.has_openrouter_key || settings.has_openai_key || settings.has_vertex_key,
                 usingDefaultKey: settings.using_default_key || false,
             });
             setKeyStatus({
@@ -158,6 +168,7 @@ export default function SettingsPage({
                 google: settings.has_google_key || false,
                 openai: settings.has_openai_key || false,
                 xai: settings.has_xai_key || false,
+                vertex: settings.has_vertex_key || false,
             });
             // Set initial provider from saved config
             if (settings.llm_provider) setSelectedProvider(settings.llm_provider);
@@ -199,6 +210,8 @@ export default function SettingsPage({
                 if (selectedProvider === 'google') updates.google_api_key = apiKeyInput.trim();
                 else if (selectedProvider === 'openrouter') updates.openrouter_api_key = apiKeyInput.trim();
                 else if (selectedProvider === 'openai') updates.openai_api_key = apiKeyInput.trim();
+                else if (selectedProvider === 'vertex') updates.vertex_api_key = apiKeyInput.trim();
+                else if (selectedProvider === 'xai') updates.xai_api_key = apiKeyInput.trim();
             }
             await updateSettings(updates);
             setSaveSuccess(true);

@@ -228,6 +228,7 @@ export const sendChat = (
     apiFetch('/api/chat', {
         method: 'POST',
         body: JSON.stringify({ message, state: state || {}, history: history || [] }),
+        timeoutMs: 90_000,  // LLM responses can take 30-60s on slow models
     });
 
 // Alias for compatibility with any code that imported generatePlan
@@ -246,6 +247,7 @@ export interface BackendSettings {
     has_openai_key: boolean;
     has_google_key: boolean;
     has_xai_key: boolean;
+    has_vertex_key: boolean;
     approval_mode: 'strict' | 'balanced' | 'trusted';
     using_default_key: boolean;
 }
@@ -259,6 +261,9 @@ export const updateSettings = (settings: Partial<{
     browser_mode: string;
     openrouter_api_key: string;
     openai_api_key: string;
+    google_api_key: string;
+    vertex_api_key: string;
+    xai_api_key: string;
     approval_mode: string;
 }>): Promise<{ status: string; keys_changed: string[] }> =>
     apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(settings) });

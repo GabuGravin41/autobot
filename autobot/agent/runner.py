@@ -460,10 +460,11 @@ def _create_llm_client() -> Any | None:
 
     Supports:
     - google       → Google Gemini via OpenAI-compatible endpoint (GOOGLE_API_KEY)
+    - vertex       → Google Vertex AI Express via API key (VERTEX_API_KEY)
     - openrouter   → OpenRouter (OPENROUTER_API_KEY)
     - openai       → OpenAI directly (OPENAI_API_KEY)
     - xai          → Grok via x.ai (XAI_API_KEY)
-    - auto         → tries google → openrouter → openai in order
+    - auto         → tries vertex → google → openrouter → openai in order
 
     Default key: if no user key is set, falls back to AUTOBOT_DEFAULT_API_KEY
     (bundled in the distributed binary for zero-config first-run experience).
@@ -480,6 +481,16 @@ def _create_llm_client() -> Any | None:
         # Google exposes an OpenAI-compatible endpoint for Gemini models
         return AsyncOpenAI(
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=api_key,
+        )
+
+    elif provider == "vertex":
+        api_key = os.getenv("VERTEX_API_KEY")
+        if not api_key:
+            logger.error("VERTEX_API_KEY not set. Add it to your .env file.")
+            return None
+        return AsyncOpenAI(
+            base_url="https://aiplatform.googleapis.com/v1beta1/openai/",
             api_key=api_key,
         )
 
@@ -508,8 +519,9 @@ def _create_llm_client() -> Any | None:
         )
 
     else:
-        # Auto-detect: try in order google → openrouter → openai
+        # Auto-detect: try in order vertex → google → openrouter → openai
         for env_key, base_url in [
+            ("VERTEX_API_KEY", "https://aiplatform.googleapis.com/v1beta1/openai/"),
             ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
             ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
             ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),

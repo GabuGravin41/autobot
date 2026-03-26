@@ -80,9 +80,22 @@ export default function App() {
   const [selectedModelId, setSelectedModelId] = useState('google/gemini-2.0-flash-001');
 
   // ── Chat / planner ────────────────────────────────────────────────────────
-  const [chatMessages, setChatMessages] = useState<any[]>([
-    { role: 'bot', content: 'Hello! I am Autobot. How can I help you automate your computer today?' },
-  ]);
+  const _CHAT_KEY = 'autobot_chat_history';
+  const _initChat = () => {
+    try {
+      const saved = sessionStorage.getItem(_CHAT_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore parse errors */ }
+    return [{ role: 'bot', content: 'Hello! I am Autobot. How can I help you automate your computer today?' }];
+  };
+  const [chatMessages, _setChatMessages] = useState<any[]>(_initChat);
+  const setChatMessages = (updater: any[] | ((prev: any[]) => any[])) => {
+    _setChatMessages(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try { sessionStorage.setItem(_CHAT_KEY, JSON.stringify(next.slice(-100))); } catch { /* quota */ }
+      return next;
+    });
+  };
   const [chatInput, setChatInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [showReasoning, setShowReasoning] = useState<Record<number, boolean>>({});
@@ -213,9 +226,10 @@ export default function App() {
     setChatMessages(updatedMessages);
     setIsGenerating(true);
     try {
-      // Build history from previous messages (skip the initial bot greeting)
+      // Build history from previous messages (skip greeting + error messages)
       const history = updatedMessages
         .filter((m, i) => !(i === 0 && m.role === 'bot'))
+        .filter(m => !m.content?.startsWith("Sorry, I couldn't reach"))
         .map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.content }));
 
       const { reply, plan } = await sendChat(userMsg, {
