@@ -153,6 +153,14 @@ class StepPromptBuilder:
 </agent_state>"""
         parts.append(agent_state)
 
+        # First-step situational awareness nudge (~30 tokens, step 1 only)
+        if self.step_number == 0:
+            parts.append(
+                "<first_step_hint>This is your first observation. Assess what is on "
+                "screen before acting — if the current page is not relevant to the "
+                "task, navigate to your target.</first_step_hint>"
+            )
+
         # 3. Browser state
         browser_state_text = self._build_browser_state()
         parts.append(f"<browser_state>\n{browser_state_text}\n</browser_state>")

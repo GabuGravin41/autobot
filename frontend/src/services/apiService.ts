@@ -154,8 +154,14 @@ export const planFromText = (task: string): Promise<{ plan: BackendPlan }> =>
     apiFetch('/api/plan/text', { method: 'POST', body: JSON.stringify({ task }) });
 
 /** Execute a plan. Now routed to the NEW Agent architecture. */
-export const runPlan = (plan: BackendPlan): Promise<{ run_id: string; status: string }> =>
-    apiFetch('/api/agent/run', { method: 'POST', body: JSON.stringify({ goal: plan.description || plan.name || "Execute plan" }) });
+export const runPlan = (plan: BackendPlan): Promise<{ run_id: string; status: string }> => {
+    // Include the full step list so the agent has complete context, not just a one-liner.
+    const stepsText = plan.steps?.length
+        ? '\n\nStep-by-step plan:\n' + plan.steps.map((s, i) => `${i + 1}. ${s.description}`).join('\n')
+        : '';
+    const goal = (plan.description || plan.name || 'Execute plan') + stepsText;
+    return apiFetch('/api/agent/run', { method: 'POST', body: JSON.stringify({ goal }) });
+};
 
 /** Cancel a running plan */
 export const cancelRun = (runId: string): Promise<{ status: string }> =>
@@ -314,6 +320,8 @@ export function connectLogStream(
 
     // Track highest sequence number seen to deduplicate messages from multiple WS connections
     let highestSeq = -1;
+    // Track seen content to deduplicate historical replays (React StrictMode opens 2 connections)
+    const seenContent = new Set<string>();
 
     function tryConnect() {
         if (closed) return;
@@ -328,13 +336,18 @@ export function connectLogStream(
                 const prefix = raw.substring(0, pipeIdx);
                 const content = raw.substring(pipeIdx + 1);
                 if (prefix.startsWith('h')) {
-                    // Historical replay — always accept (only sent once per connection)
+                    // Historical replay — deduplicate by content
+                    if (seenContent.has(content)) return;
+                    seenContent.add(content);
+                    // Cap set size to prevent memory growth on very long runs
+                    if (seenContent.size > 2000) seenContent.clear();
                     onMessage(content);
                 } else {
                     const seq = parseInt(prefix, 10);
                     if (!isNaN(seq)) {
                         if (seq <= highestSeq) return; // Duplicate — skip
                         highestSeq = seq;
+                        seenContent.add(content); // Also track live msgs for cross-dedup
                         onMessage(content);
                     } else {
                         onMessage(raw); // Unknown format — pass through

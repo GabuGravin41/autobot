@@ -138,11 +138,15 @@ class AgentLoop:
         # Retry / failure tracking
         self._consecutive_failures = 0
         self._consecutive_step_errors = 0   # raw exception count
+        self._consecutive_llm_failures = 0  # circuit breaker: LLM failures across steps
         self._last_goal = ""
 
         # URL loop detection: counts how many times each URL has been the active page
         self._url_visit_counts: dict[str, int] = {}
         self._url_loop_alerted: set[str] = set()  # URLs we've already warned about
+
+        # Click coordinate tracking for drift detection
+        self._recent_clicks: list[tuple[int, int]] = []  # last N click coordinates
 
         # Watchdog: track last time the screen changed (action had effect)
         self._last_progress_time = time.time()
@@ -237,6 +241,13 @@ class AgentLoop:
         """Resume a paused agent loop."""
         self._paused = False
         logger.info("▶ AgentLoop resumed")
+
+    async def _wait_if_paused(self) -> None:
+        """Block until unpaused. Also respects cancellation."""
+        while self._paused:
+            if self._cancelled:
+                return
+            await asyncio.sleep(0.3)
 
     def get_status(self) -> dict[str, Any]:
         """Returns the current status metadata for the dashboard."""
@@ -366,11 +377,11 @@ class AgentLoop:
                 return "Task cancelled."
 
             # ── Check pause ─────────────────────────────────────────────────
-            while self._paused:
-                await asyncio.sleep(0.3)
+            await self._wait_if_paused()
 
             # ── Check step budget ───────────────────────────────────────────
             if self.max_steps is not None and self.step_number >= self.max_steps:
+                await self._wait_if_paused()
                 logger.info(f"📊 Step budget ({self.max_steps}) reached — consulting EvaluationAgent...")
                 signal = await self._run_evaluation()
                 if signal == EvalSignal.COMPLETE:
@@ -390,6 +401,7 @@ class AgentLoop:
             # ── Check stop condition ────────────────────────────────────────
             sc_ctx = self._build_sc_context()
             if self.stop_condition.is_met(sc_ctx):
+                await self._wait_if_paused()
                 logger.info(f"🏁 Stop condition met: {self.stop_condition.progress_text(sc_ctx)}")
                 signal = await self._run_evaluation()
                 if signal == EvalSignal.CONTINUE:
@@ -413,6 +425,7 @@ class AgentLoop:
                 self._last_progress_time = time.time()  # Reset to avoid spam
 
             # ── Execute step ────────────────────────────────────────────────
+            await self._wait_if_paused()
             try:
                 result = await self._execute_step()
 
@@ -435,6 +448,7 @@ class AgentLoop:
 
                 # Periodic EvaluationAgent check
                 if self.step_number > 0 and self.step_number % self._eval_interval == 0:
+                    await self._wait_if_paused()
                     signal = await self._run_evaluation()
                     if signal == EvalSignal.COMPLETE:
                         self._save_checkpoint()
@@ -653,24 +667,52 @@ class AgentLoop:
             *user_messages,
         ]
 
-        agent_output = await self._call_llm(messages)
+        # Retry LLM call up to 3 times with increasing backoff
+        agent_output = None
+        for _llm_attempt in range(1, 4):
+            agent_output = await self._call_llm(messages)
+            if agent_output is not None:
+                break
+            backoff = _llm_attempt * 5  # 5s, 10s, 15s
+            logger.warning(
+                f"Step {self.step_number + 1}: LLM attempt {_llm_attempt}/3 failed. "
+                f"Retrying in {backoff}s..."
+            )
+            await asyncio.sleep(backoff)
+
+        if agent_output is not None:
+            self._consecutive_llm_failures = 0  # Reset circuit breaker on success
 
         if agent_output is None:
-            # LLM failed or refused. 
-            # Stability: Wait before retrying (prevents spinning)
-            logger.error(f"Step {self.step_number + 1}: LLM returned no output or invalid JSON. Waiting 3s...")
-            await asyncio.sleep(3.0) 
-            
-            # Record a "Failed" entry in history so the user sees it
+            self._consecutive_llm_failures += 1
+            logger.error(
+                f"Step {self.step_number + 1}: All 3 LLM attempts failed. "
+                f"(Circuit breaker: {self._consecutive_llm_failures}/3 consecutive step failures)"
+            )
+
+            # Circuit breaker: if LLM fails 3 steps in a row, the service is likely down
+            if self._consecutive_llm_failures >= 3:
+                logger.error("🔌 CIRCUIT BREAKER: LLM failed 3 consecutive steps. Pausing for human review.")
+                self.pending_auth = {
+                    "url": getattr(self.page, "url", ""),
+                    "type": "escalate",
+                    "message": (
+                        "LLM service appears to be down — failed 3 consecutive steps. "
+                        "Check API key, model availability, and network connectivity. "
+                        "Resume when the issue is resolved."
+                    ),
+                }
+                self._paused = True
+                self._save_checkpoint()
             fallback_output = AgentOutput(
-                thinking="LLM call failed (possibly due to API limits or model error). Retrying...",
+                thinking="LLM call failed after 3 retries (API limits, model error, or network issue).",
                 next_goal="Retry current step",
                 action=[]
             )
             entry = StepHistoryEntry(
                 step_number=self.step_number,
                 agent_output=fallback_output,
-                action_results=[ActionResult(action_name="llm_call", success=False, error="API returned no valid response")],
+                action_results=[ActionResult(action_name="llm_call", success=False, error="All LLM retry attempts exhausted")],
                 url_before=url_before,
                 url_after=self.page.url,
             )
@@ -688,6 +730,11 @@ class AgentLoop:
             self._last_narrative = agent_output.narrative
         elif agent_output.next_goal:
             self._last_narrative = agent_output.next_goal
+
+        # Check pause again — LLM call may have taken 30s so the flag may have
+        # been set while we were waiting. This makes pause feel immediate.
+        while self._paused:
+            await asyncio.sleep(0.3)
 
         # ─── 3. ACT (hold ScreenLock so only one task touches the computer) ───
         logger.debug(f"Step {self.step_number + 1}: Acting...")
@@ -748,29 +795,89 @@ class AgentLoop:
         any_success = any(r.success for r in action_results)
         current_goal = agent_output.next_goal.strip().lower()[:50]
 
+        # Track click coordinates for drift detection
+        for action in agent_output.action:
+            if action.computer_call and "mouse.click" in (action.computer_call.call or ""):
+                import re as _re
+                _m = _re.search(r"x=(\d+).*?y=(\d+)", action.computer_call.call)
+                if _m:
+                    self._recent_clicks.append((int(_m.group(1)), int(_m.group(2))))
+                    if len(self._recent_clicks) > 8:
+                        self._recent_clicks = self._recent_clicks[-8:]
+
+        # Detect coordinate drift: clicking same small area repeatedly with slight adjustments
+        _click_drift = False
+        if len(self._recent_clicks) >= 4:
+            _last4 = self._recent_clicks[-4:]
+            _xs = [c[0] for c in _last4]
+            _ys = [c[1] for c in _last4]
+            _x_spread = max(_xs) - min(_xs)
+            _y_spread = max(_ys) - min(_ys)
+            if _x_spread < 80 and _y_spread < 80:
+                _click_drift = True
+
         if any_failed and current_goal == self._last_goal:
             self._consecutive_failures += 1
             logger.warning(f"Consecutive failure #{self._consecutive_failures} on goal: {current_goal}")
+        elif any_failed:
+            self._consecutive_failures = 1
+        else:
+            self._consecutive_failures = 0
+            self._recent_clicks.clear()  # reset click tracking on success
+        self._last_goal = current_goal
 
-            # Inject a structured fallback suggestion after each failure
-            _FALLBACK_STRATEGIES = [
-                "Try a keyboard shortcut instead of clicking (e.g. Tab to navigate, Enter to confirm).",
-                "Scroll down/up — the target element may be off-screen.",
-                "Take a fresh screenshot first to re-observe the current state before acting.",
-                "Try right-clicking to reveal context menu options.",
-                "Refresh the page (F5) and wait 3 seconds before retrying.",
-                "Open the target in a new tab (Ctrl+T) to avoid cached/broken state.",
-                "Use computer.terminal.run() to verify or manipulate files instead of the UI.",
-                "Try a completely different URL or entry point to reach the same destination.",
+        # Inject failure-specific recovery guidance
+        if self._consecutive_failures >= 1:
+            # Analyze WHAT failed to give specific advice
+            _failed_actions = [
+                (a, r) for a, r in zip(agent_output.action, action_results) if not r.success
             ]
-            _hint = _FALLBACK_STRATEGIES[self._consecutive_failures % len(_FALLBACK_STRATEGIES)]
-            _hint_key = f"[FALLBACK #{self._consecutive_failures}]"
-            if not any(_hint_key in s for s in self.scratchpad[-5:]):
-                self.scratchpad.append(
-                    f"{_hint_key} Stuck on '{current_goal[:60]}'. Suggestion: {_hint}"
-                )
+            _error_types = set()
+            for _a, _r in _failed_actions:
+                _err = (_r.error or "").lower()
+                if "timeout" in _err or "timed out" in _err:
+                    _error_types.add("timeout")
+                elif "not found" in _err or "404" in _err:
+                    _error_types.add("not_found")
+                elif "permission" in _err or "denied" in _err:
+                    _error_types.add("permission")
+                elif _a.computer_call and "mouse.click" in (_a.computer_call.call or ""):
+                    _error_types.add("click_failed")
+                else:
+                    _error_types.add("other")
 
-            # Auto-remember failed approaches after 2 consecutive failures on the same goal
+            # Build specific recovery hint based on what went wrong
+            if _click_drift and self._consecutive_failures >= 2:
+                _hint = (
+                    "COORDINATE DRIFT DETECTED: You've clicked the same small area 4+ times "
+                    "with slight adjustments — the target is likely not where you think. "
+                    "STOP clicking. Try: (1) Use a keyboard shortcut instead (Tab, Enter, arrows), "
+                    "(2) Check if there's a DOM element [N] you can target precisely, "
+                    "(3) Scroll to reveal the real target, or (4) Navigate to a different page."
+                )
+                self._recent_clicks.clear()
+            elif "timeout" in _error_types:
+                _hint = "TIMEOUT: The action timed out. The page may be loading slowly. Try wait(5) then retry, or refresh with F5."
+            elif "not_found" in _error_types:
+                _hint = "NOT FOUND: The target doesn't exist. Check the URL, verify the page loaded, or try a different path."
+            elif "permission" in _error_types:
+                _hint = "PERMISSION DENIED: You don't have access. Try a different approach or check if you need to log in first."
+            elif "click_failed" in _error_types:
+                _hint = "CLICK HAD NO EFFECT: The target may be off-screen, disabled, or covered by an overlay. Try scrolling, using keyboard shortcuts, or checking for popups."
+            else:
+                _FALLBACK_STRATEGIES = [
+                    "Try a keyboard shortcut instead of clicking (Tab, Enter, arrows).",
+                    "Scroll down/up — the target element may be off-screen.",
+                    "Refresh the page (F5) and wait 3 seconds before retrying.",
+                    "Try a completely different URL or approach to reach the same destination.",
+                ]
+                _hint = _FALLBACK_STRATEGIES[self._consecutive_failures % len(_FALLBACK_STRATEGIES)]
+
+            _hint_key = f"[RECOVERY #{self._consecutive_failures}]"
+            if not any(_hint_key in s for s in self.scratchpad[-5:]):
+                self.scratchpad.append(f"{_hint_key} {_hint}")
+
+            # Auto-remember failed approaches after 2 consecutive failures
             if self._consecutive_failures == 2:
                 import hashlib as _hl
                 key = "failed_" + _hl.md5(f"{self.goal[:40]}{current_goal[:40]}".encode()).hexdigest()[:8]
@@ -780,11 +887,27 @@ class AgentLoop:
                 ) or current_goal[:80]
                 self._memory_store.remember(key, f"FAILED 2x on '{current_goal[:60]}': {failed_actions}")
                 logger.info(f"🧠 Auto-remembered failure: {key}")
-        elif any_failed:
-            self._consecutive_failures = 1
-        else:
-            self._consecutive_failures = 0
-        self._last_goal = current_goal
+
+            # After 4 consecutive failures, FORCE a strategy change via strong scratchpad alert
+            if self._consecutive_failures >= 4:
+                self.scratchpad.append(
+                    "[FORCED STRATEGY CHANGE] You have failed 4+ times on the same goal. "
+                    "Your current approach is NOT working. You MUST try something completely "
+                    "different: a different tool, a different page, a different method. "
+                    "If you repeat the same action, you will continue to fail."
+                )
+
+        # Confidence tracking: low confidence → nudge agent to verify before next action
+        confidence = getattr(agent_output, "confidence", "high")
+        if confidence == "low" and self._consecutive_failures == 0:
+            # Agent is uncertain but hasn't failed yet — warn it to be careful
+            if not any("[LOW CONFIDENCE]" in s for s in self.scratchpad[-3:]):
+                self.scratchpad.append(
+                    "[LOW CONFIDENCE] You reported low confidence. Before your next action: "
+                    "(1) Take a screenshot to re-observe the current state, "
+                    "(2) Check if there's a DOM element you can target precisely, "
+                    "(3) Consider using a more reliable tool (navigate > click, keyboard > mouse)."
+                )
 
         # Watchdog: update last progress time when something meaningful happened
         page_changed = url_after != url_before
@@ -859,7 +982,10 @@ class AgentLoop:
         """
         for attempt in range(1, 3):
             try:
+                _t0 = time.time()
                 response = await self._make_llm_call(messages)
+                _elapsed = time.time() - _t0
+                logger.info(f"⏱️ LLM call took {_elapsed:.1f}s (step {self.step_number + 1}, attempt {attempt})")
                 if not response:
                     logger.warning(f"LLM outer attempt {attempt}: empty string returned")
                     await asyncio.sleep(5)
@@ -1018,7 +1144,14 @@ class AgentLoop:
         # requested for a model that doesn't support it. Broad trigger: retry without it
         # unless the error is clearly about billing/auth (401/403/429).
         err_lower = str(last_error).lower()
-        _hard_errors = ("401", "403", "429", "insufficient_quota", "rate limit")
+
+        # 429 / rate limit = transient — retry with backoff, don't skip fallback attempts
+        _is_rate_limited = "429" in err_lower or "rate limit" in err_lower or "resource_exhausted" in err_lower
+        if _is_rate_limited:
+            logger.warning("Rate limited — waiting 10s before retry...")
+            await asyncio.sleep(10)
+
+        _hard_errors = ("401", "403", "insufficient_quota")
         # Also skip attempt 2 if we just learned the model doesn't support vision —
         # go straight to attempt 3 (text-only) to avoid another wasted round-trip.
         _just_flagged_no_vision = "image input" in err_lower or "no endpoints found" in err_lower
@@ -1516,16 +1649,19 @@ class AgentLoop:
         the problem where the LLM estimates coordinates for a downscaled image
         but the mouse clicks at real-screen coordinates.
 
-        JPEG at quality 80 is ~75% smaller than PNG for typical screenshots.
+        JPEG quality is configurable via AUTOBOT_JPEG_QUALITY (default 50).
+        Lower quality = fewer tokens = faster LLM calls. 50 is still very
+        readable for LLMs while being ~60% smaller than quality 80.
         """
         import base64
         try:
             from PIL import Image
             from io import BytesIO
 
+            _quality = int(os.getenv("AUTOBOT_JPEG_QUALITY", "50"))
             img = Image.open(BytesIO(png_bytes))
             buf = BytesIO()
-            img.save(buf, format="JPEG", quality=80, optimize=True)
+            img.save(buf, format="JPEG", quality=_quality, optimize=True)
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
             logger.debug(f"Screenshot compressed: {len(png_bytes)//1024}KB PNG → "
                          f"{len(buf.getvalue())//1024}KB JPEG ({img.size[0]}x{img.size[1]})")

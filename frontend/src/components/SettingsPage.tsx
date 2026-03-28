@@ -77,12 +77,11 @@ const PROVIDERS: ProviderConfig[] = [
     },
     {
         id: 'vertex', name: 'Google Vertex AI', description: 'Vertex AI Express — API key, $300 credit.',
-        envKey: 'VERTEX_API_KEY', baseUrl: 'https://aiplatform.googleapis.com/v1beta1/openai/',
+        envKey: 'VERTEX_API_KEY', baseUrl: 'https://aiplatform.googleapis.com/v1/',
         models: [
-            { id: 'gemini-2.5-flash-lite-preview-05-20', name: 'Gemini 2.5 Flash Lite', tags: ['vision', 'fast', 'recommended'] },
-            { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash', tags: ['vision', 'fast'] },
-            { id: 'gemini-2.5-pro-preview-05-06', name: 'Gemini 2.5 Pro', tags: ['vision', 'powerful'] },
-            { id: 'gemini-2.0-flash-001', name: 'Gemini 2.0 Flash', tags: ['vision', 'fast'] },
+            { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', tags: ['vision', 'fast', 'recommended'] },
+            { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tags: ['vision', 'fast'] },
+            { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', tags: ['vision', 'powerful'] },
         ],
     },
     {
@@ -214,13 +213,27 @@ export default function SettingsPage({
                 else if (selectedProvider === 'xai') updates.xai_api_key = apiKeyInput.trim();
             }
             await updateSettings(updates);
-            setSaveSuccess(true);
             setApiKeyInput('');
-            setCurrentConfig(prev => ({ ...prev, provider: selectedProvider, model: modelInput.trim(), hasKey: true, usingDefaultKey: false }));
-            if (apiKeyInput.trim()) {
-                setKeyStatus(prev => ({ ...prev, [selectedProvider]: true }));
-            }
-            setTimeout(() => setSaveSuccess(false), 3000);
+            // Re-fetch from backend to confirm what's actually active
+            try {
+                const confirmed = await getSettings();
+                setCurrentConfig({
+                    provider: confirmed.llm_provider || selectedProvider,
+                    model: confirmed.llm_model || modelInput.trim(),
+                    hasKey: confirmed.has_google_key || confirmed.has_openrouter_key ||
+                            confirmed.has_openai_key || confirmed.has_xai_key || confirmed.has_vertex_key,
+                    usingDefaultKey: confirmed.using_default_key || false,
+                });
+                setKeyStatus({
+                    openrouter: confirmed.has_openrouter_key || false,
+                    google: confirmed.has_google_key || false,
+                    openai: confirmed.has_openai_key || false,
+                    xai: confirmed.has_xai_key || false,
+                    vertex: confirmed.has_vertex_key || false,
+                });
+            } catch { /* best-effort */ }
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 4000);
         } catch (e) {
             alert('Failed to save: ' + (e instanceof Error ? e.message : 'Unknown'));
         } finally {
@@ -267,17 +280,25 @@ export default function SettingsPage({
 
             {/* Current config banner */}
             {currentConfig.model && !currentConfig.usingDefaultKey && (
-                <div className="glass-panel p-4 rounded-2xl border border-[var(--brand-primary)]/20 flex items-center gap-4">
-                    <div className="w-10 h-10 rounded-xl bg-[var(--brand-primary)]/20 flex items-center justify-center">
-                        <Server size={18} className="text-[var(--brand-primary)]" />
+                <div className={`glass-panel p-4 rounded-2xl border flex items-center gap-4 transition-colors ${saveSuccess ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-[var(--brand-primary)]/20'}`}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${saveSuccess ? 'bg-emerald-500/20' : 'bg-[var(--brand-primary)]/20'}`}>
+                        {saveSuccess ? <CheckCircle2 size={18} className="text-emerald-400" /> : <Server size={18} className="text-[var(--brand-primary)]" />}
                     </div>
-                    <div className="flex-1">
-                        <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">Active Configuration</div>
-                        <div className="text-sm font-bold">
-                            {currentConfig.provider.toUpperCase()} / {currentConfig.model}
-                            {currentConfig.hasKey && <span className="ml-2 text-emerald-400 text-[10px]">Key configured</span>}
+                    <div className="flex-1 min-w-0">
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
+                            {saveSuccess ? 'Saved — Now Active' : 'Active Configuration'}
+                        </div>
+                        <div className="text-sm font-bold truncate">
+                            {PROVIDERS.find(p => p.id === currentConfig.provider)?.name || currentConfig.provider}
+                            <span className="text-[var(--base-text-muted)] font-normal mx-1">/</span>
+                            <span className="font-mono text-xs">{currentConfig.model}</span>
                         </div>
                     </div>
+                    {currentConfig.hasKey && (
+                        <span className="shrink-0 px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 text-[9px] font-bold uppercase tracking-widest border border-emerald-500/20">
+                            ✓ Key set
+                        </span>
+                    )}
                 </div>
             )}
 
@@ -288,11 +309,6 @@ export default function SettingsPage({
                         <h3 className="text-xl font-bold flex items-center gap-2">
                             <Sparkles size={20} className="text-[var(--brand-primary)]" /> AI Model Configuration
                         </h3>
-                        {saveSuccess && (
-                            <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
-                                <CheckCircle2 size={14} /> Saved
-                            </div>
-                        )}
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">

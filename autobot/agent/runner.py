@@ -454,6 +454,158 @@ class AgentRunner:
         return ""
 
 
+class _VertexNativeClient:
+    """
+    Minimal OpenAI-compatible wrapper for Vertex AI native REST API.
+
+    Vertex AI Express API keys (AQ.* format) work only with the native
+    generateContent endpoint, not the OpenAI-compatible proxy. This adapter
+    translates OpenAI chat.completions.create() calls to that endpoint so the
+    rest of the agent code stays unchanged.
+    """
+
+    _BASE = "https://aiplatform.googleapis.com/v1/publishers/google/models"
+
+    def __init__(self, api_key: str) -> None:
+        self._key = api_key
+        self.base_url = self._BASE
+        self.chat = self._Chat(self)
+
+    # ── Minimal response objects that mirror openai SDK types ─────────────
+
+    class _Message:
+        def __init__(self, content: str) -> None:
+            self.content = content
+            self.role = "assistant"
+
+    class _Choice:
+        def __init__(self, content: str) -> None:
+            self.message = _VertexNativeClient._Message(content)
+            self.index = 0
+            self.finish_reason = "stop"
+
+    class _Usage:
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+
+    class _Response:
+        def __init__(self, content: str, model: str) -> None:
+            self.choices = [_VertexNativeClient._Choice(content)]
+            self.usage = _VertexNativeClient._Usage()
+            self.model = model
+
+    # ── Chat completions ──────────────────────────────────────────────────
+
+    class _Completions:
+        def __init__(self, client: "_VertexNativeClient") -> None:
+            self._client = client
+
+        async def create(
+            self,
+            model: str,
+            messages: list,
+            max_tokens: int = 2048,
+            temperature: float = 1.0,
+            response_format: Any = None,
+            extra_body: dict | None = None,
+            **kwargs,
+        ) -> "_VertexNativeClient._Response":
+            import json, urllib.request, asyncio
+
+            # Convert OpenAI messages → Vertex contents
+            contents: list = []
+            system_text: str | None = None
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "system":
+                    # Accumulate system turns into system_instruction
+                    if isinstance(content, str):
+                        system_text = (system_text + "\n" + content) if system_text else content
+                    continue
+                vertex_role = "model" if role == "assistant" else "user"
+                if isinstance(content, str):
+                    parts = [{"text": content}]
+                elif isinstance(content, list):
+                    parts = []
+                    for block in content:
+                        if block.get("type") == "text":
+                            parts.append({"text": block["text"]})
+                        elif block.get("type") == "image_url":
+                            url = block["image_url"]["url"]
+                            if url.startswith("data:"):
+                                mime_and_rest = url[5:]  # strip "data:"
+                                mime_type, b64data = mime_and_rest.split(";base64,", 1)
+                                parts.append({"inline_data": {"mime_type": mime_type, "data": b64data}})
+                else:
+                    parts = [{"text": str(content)}]
+                if parts:
+                    contents.append({"role": vertex_role, "parts": parts})
+
+            gen_config: dict = {
+                "maxOutputTokens": max_tokens,
+                "temperature": temperature,
+            }
+            # JSON mode
+            if response_format and getattr(response_format, "type", None) == "json_object":
+                gen_config["responseMimeType"] = "application/json"
+            # Passthrough extra Gemini config (e.g. thinkingConfig)
+            if extra_body and "generationConfig" in extra_body:
+                gen_config.update(extra_body["generationConfig"])
+
+            body: dict = {"contents": contents, "generationConfig": gen_config}
+            if system_text:
+                body["system_instruction"] = {"parts": [{"text": system_text}]}
+
+            url = f"{_VertexNativeClient._BASE}/{model}:generateContent?key={self._client._key}"
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+
+            def _call() -> dict:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    return json.loads(r.read())
+
+            try:
+                resp = await asyncio.to_thread(_call)
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode(errors="replace")
+                raise RuntimeError(f"Vertex API error {e.code}: {err_body[:300]}") from e
+
+            # Extract text — handle thinking models that may have multiple parts
+            candidate = resp["candidates"][0]
+            parts = candidate.get("content", {}).get("parts", [])
+            text = ""
+            for part in parts:
+                if "text" in part:
+                    text += part["text"]
+            if not text:
+                # Fallback: blocked or empty response
+                finish = candidate.get("finishReason", "UNKNOWN")
+                raise RuntimeError(f"Vertex returned no text (finishReason={finish})")
+
+            # Log token usage for cost/performance monitoring
+            usage = resp.get("usageMetadata", {})
+            if usage:
+                _in = usage.get("promptTokenCount", 0)
+                _out = usage.get("candidatesTokenCount", 0)
+                _think = usage.get("thoughtsTokenCount", 0)
+                logger.info(
+                    f"📊 Tokens: {_in} in, {_out} out"
+                    + (f", {_think} thinking" if _think else "")
+                    + f" | Model: {model}"
+                )
+
+            return _VertexNativeClient._Response(text, model)
+
+    class _Chat:
+        def __init__(self, client: "_VertexNativeClient") -> None:
+            self.completions = _VertexNativeClient._Completions(client)
+
+
 def _create_llm_client() -> Any | None:
     """
     Create an async OpenAI-compatible client from environment variables.
@@ -489,10 +641,7 @@ def _create_llm_client() -> Any | None:
         if not api_key:
             logger.error("VERTEX_API_KEY not set. Add it to your .env file.")
             return None
-        return AsyncOpenAI(
-            base_url="https://aiplatform.googleapis.com/v1beta1/openai/",
-            api_key=api_key,
-        )
+        return _VertexNativeClient(api_key)
 
     elif provider == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
@@ -520,8 +669,9 @@ def _create_llm_client() -> Any | None:
 
     else:
         # Auto-detect: try in order vertex → google → openrouter → openai
+        if os.getenv("VERTEX_API_KEY"):
+            return _VertexNativeClient(os.getenv("VERTEX_API_KEY"))
         for env_key, base_url in [
-            ("VERTEX_API_KEY", "https://aiplatform.googleapis.com/v1beta1/openai/"),
             ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
             ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
             ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),

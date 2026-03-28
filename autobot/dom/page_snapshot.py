@@ -50,10 +50,23 @@ _JS_EXTRACT = """
 
         if (!text && !href) return; // skip completely unlabelled elements
 
+        // ── Element state flags ─────────────────────────────────────
+        const flags = [];
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') flags.push('DISABLED');
+        if (el.required || el.getAttribute('aria-required') === 'true') flags.push('required');
+        if (el.readOnly) flags.push('readonly');
+        if ((tag === 'input' || tag === 'textarea') && el.value && el.value.trim()) flags.push('has-value');
+        if (el.getAttribute('aria-expanded') === 'true') flags.push('expanded');
+        if (el.getAttribute('aria-checked') === 'true') flags.push('checked');
+        if (el.getAttribute('aria-busy') === 'true') flags.push('loading');
+        const placeholder = el.placeholder || '';
+
         let desc = `[${idx}] <${tag}`;
         if (type) desc += ` type="${type}"`;
         if (name) desc += ` name="${name}"`;
+        if (placeholder && !text.includes(placeholder)) desc += ` placeholder="${placeholder.slice(0, 40)}"`;
         desc += `>`;
+        if (flags.length) desc += ` [${flags.join(', ')}]`;
         if (text) desc += ` ${text}`;
         if (href && href !== '#' && !href.startsWith('javascript')) desc += ` → ${href.slice(0, 60)}`;
 
