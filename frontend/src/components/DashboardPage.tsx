@@ -7,7 +7,7 @@ import {
     Maximize2, Minimize2, X, Move, Brain, ExternalLink, Code2,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission, pauseRun, resumeRun } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission, runOrchestrated, getLearningStats, LearningStats, pauseRun, resumeRun } from '../services/apiService';
 import TaskQueuePanel from './TaskQueuePanel';
 
 interface DashboardPageProps {
@@ -41,6 +41,18 @@ export default function DashboardPage({
     const [isScreenPopout, setIsScreenPopout] = useState(false);
     const [leetcodeProblems, setLeetcodeProblems] = useState(5);
     const [leetcodeLaunching, setLeetcodeLaunching] = useState(false);
+    const [orchestratedGoal, setOrchestratedGoal] = useState('');
+    const [orchestratedLaunching, setOrchestratedLaunching] = useState(false);
+    const [learningStats, setLearningStats] = useState<LearningStats | null>(null);
+
+    // Fetch learning stats on mount and auto-refresh every 30s during active runs
+    React.useEffect(() => {
+        getLearningStats().then(setLearningStats).catch(() => {});
+        const interval = setInterval(() => {
+            getLearningStats().then(setLearningStats).catch(() => {});
+        }, 30_000);
+        return () => clearInterval(interval);
+    }, [activeRun?.id]);
     const [popoutPos, setPopoutPos] = useState({ x: 100, y: 100 });
     const [isDragging, setIsDragging] = useState(false);
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -496,6 +508,76 @@ export default function DashboardPage({
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+
+                    {/* Multi-Agent Orchestrator */}
+                    <div className="glass-panel rounded-2xl border border-[var(--base-border)] overflow-hidden">
+                        <div className="px-4 py-3 border-b border-[var(--base-border)] flex items-center gap-2">
+                            <Brain size={14} className="text-purple-400" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">Multi-Agent Orchestrator</span>
+                        </div>
+                        <div className="p-4 space-y-3">
+                            <p className="text-[10px] text-[var(--base-text-muted)]">
+                                Automatically routes complex tasks to specialist agents: WebNavigator, CodeExecutor, DataExtractor, FormFiller.
+                            </p>
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    value={orchestratedGoal}
+                                    onChange={e => setOrchestratedGoal(e.target.value)}
+                                    placeholder="Complex goal (e.g. 'find 3 LeetCode problems, solve them, then submit')"
+                                    className="flex-1 text-xs rounded-xl border border-[var(--base-border)] bg-[var(--base-bg)] px-3 py-2 focus:outline-none focus:border-[var(--brand-primary)] placeholder-[var(--base-text-muted)]"
+                                    onKeyDown={e => e.key === 'Enter' && !orchestratedLaunching && orchestratedGoal.trim() && (async () => {
+                                        setOrchestratedLaunching(true);
+                                        try { await runOrchestrated(orchestratedGoal); navigate('/history'); }
+                                        catch (err) { console.error('Orchestrated launch failed:', err); }
+                                        finally { setOrchestratedLaunching(false); }
+                                    })()}
+                                />
+                                <button
+                                    disabled={orchestratedLaunching || !backendOnline || !orchestratedGoal.trim()}
+                                    onClick={async () => {
+                                        setOrchestratedLaunching(true);
+                                        try { await runOrchestrated(orchestratedGoal); navigate('/history'); }
+                                        catch (err) { console.error('Orchestrated launch failed:', err); }
+                                        finally { setOrchestratedLaunching(false); }
+                                    }}
+                                    className="btn-primary py-2 px-4 text-[9px] uppercase tracking-widest flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                                >
+                                    {orchestratedLaunching ? <Activity size={10} className="animate-spin" /> : <Zap size={10} />}
+                                    {orchestratedLaunching ? 'Launching…' : 'Orchestrate'}
+                                </button>
+                            </div>
+
+                            {/* RL Learning stats */}
+                            {learningStats && learningStats.rl_enabled && (
+                                <div className="mt-2 pt-2 border-t border-[var(--base-border)] flex flex-wrap items-center gap-4 text-[9px] text-[var(--base-text-muted)]">
+                                    <span className="flex items-center gap-1">
+                                        <Activity size={9} className="text-green-400" />
+                                        {learningStats.total_experiences.toLocaleString()} experiences
+                                    </span>
+                                    <span className="flex items-center gap-1">
+                                        <Brain size={9} className="text-purple-400" />
+                                        {learningStats.learned_contexts} learned contexts
+                                    </span>
+                                    <span className="flex items-center gap-1">
+                                        <CheckCircle2 size={9} className="text-blue-400" />
+                                        {learningStats.total_policy_observations} policy obs
+                                    </span>
+                                    {learningStats.memory_entries !== undefined && (
+                                        <span className="flex items-center gap-1">
+                                            <FileText size={9} className="text-amber-400" />
+                                            {learningStats.memory_entries} memories
+                                            {(learningStats.memory_high_value ?? 0) > 0 && (
+                                                <span className="text-amber-400">
+                                                    ({learningStats.memory_high_value} high-value)
+                                                </span>
+                                            )}
+                                        </span>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
 

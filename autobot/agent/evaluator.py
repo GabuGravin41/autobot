@@ -66,19 +66,33 @@ class EvaluationAgent:
         """
         Evaluate the current state of the agent run.
 
+        Fast heuristic pre-check runs first — for obvious cases it avoids
+        an expensive LLM call. The LLM is only called for ambiguous situations.
+
         Returns an EvaluationResult with a signal and reasoning.
         Falls back to CONTINUE if the LLM call fails.
         """
-        # Build context for stop condition check
         sc_context = {
             "step_number": step_number,
             "metrics": metrics or {},
             "elapsed_seconds": elapsed_seconds,
         }
         stop_met = stop_condition.is_met(sc_context)
-        stop_progress = stop_condition.progress_text(sc_context)
 
-        # Build recent history summary for LLM
+        # ── Fast heuristic pre-check (avoids expensive LLM call) ─────────────
+        fast = self._fast_heuristic_check(
+            step_number=step_number,
+            consecutive_failures=consecutive_failures,
+            stop_met=stop_met,
+            history_entries=history_entries,
+            scratchpad=scratchpad,
+        )
+        if fast is not None:
+            logger.info(f"📊 EvaluationAgent [heuristic]: {fast.signal.value.upper()} — {fast.reasoning}")
+            return fast
+
+        # ── Full LLM evaluation ───────────────────────────────────────────────
+        stop_progress = stop_condition.progress_text(sc_context)
         recent = self._summarize_history(history_entries[-15:])
 
         prompt = self._build_prompt(
@@ -103,6 +117,85 @@ class EvaluationAgent:
                 signal=EvalSignal.CONTINUE,
                 reasoning=f"Evaluation skipped due to error: {e}",
             )
+
+    def _fast_heuristic_check(
+        self,
+        step_number: int,
+        consecutive_failures: int,
+        stop_met: bool,
+        history_entries: list[Any],
+        scratchpad: list[str],
+    ) -> EvaluationResult | None:
+        """
+        Heuristic evaluation — avoids LLM call for obvious decisions.
+
+        Returns an EvaluationResult if the decision is clear, or None to
+        proceed to full LLM evaluation.
+        """
+        # If stop condition is clearly met → COMPLETE
+        if stop_met:
+            return EvaluationResult(
+                signal=EvalSignal.COMPLETE,
+                reasoning="Stop condition metrics are satisfied.",
+                completion_summary=f"Goal achieved at step {step_number}.",
+            )
+
+        # If agent is catastrophically stuck → REPLAN immediately
+        if consecutive_failures >= 6:
+            return EvaluationResult(
+                signal=EvalSignal.REPLAN,
+                reasoning=f"Agent has failed {consecutive_failures} consecutive times — current approach is not working.",
+                new_plan="Stop the current approach entirely. Reassess from scratch: "
+                         "what is the goal, what tools are available, what have we NOT tried yet?",
+            )
+
+        # If very early in the run with no failures → CONTINUE (agent still exploring)
+        if step_number < 8 and consecutive_failures == 0:
+            return EvaluationResult(
+                signal=EvalSignal.CONTINUE,
+                reasoning=f"Early stage (step {step_number}), no failures — still making progress.",
+            )
+
+        # Check for goal loop in last 5 history entries
+        if len(history_entries) >= 5:
+            recent_goals = [
+                e.agent_output.next_goal.strip().lower()[:60]
+                for e in history_entries[-5:]
+            ]
+            if len(set(recent_goals)) == 1:
+                # All 5 recent goals are identical → hard loop
+                return EvaluationResult(
+                    signal=EvalSignal.REPLAN,
+                    reasoning=f"Agent has been stuck on the same goal for 5 steps: '{recent_goals[0][:50]}'",
+                    new_plan="The current approach has completely stalled. Choose a fundamentally "
+                             "different strategy — different URL, different tool, or a different sub-task order.",
+                )
+
+        # Check for circuit breaker signal in scratchpad
+        circuit_breaker = any(
+            "CIRCUIT BREAKER" in s or "LLM service appears to be down" in s
+            for s in scratchpad[-3:]
+        )
+        if circuit_breaker:
+            return EvaluationResult(
+                signal=EvalSignal.ESCALATE,
+                reasoning="LLM circuit breaker triggered — repeated API failures.",
+                alert_message="LLM service is experiencing failures. Check API key and model availability.",
+            )
+
+        # Check if agent already called done() — if so, COMPLETE immediately
+        if history_entries:
+            last_entry = history_entries[-1]
+            for result in last_entry.action_results:
+                if result.action_name == "done" and result.success:
+                    return EvaluationResult(
+                        signal=EvalSignal.COMPLETE,
+                        reasoning="Agent called done() — task completed.",
+                        completion_summary=result.extracted_content or "Task completed.",
+                    )
+
+        # No clear heuristic decision → defer to LLM
+        return None
 
     def _build_prompt(
         self,

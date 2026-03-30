@@ -145,7 +145,7 @@ if not _frontend_path.exists():
 
 class AgentRunRequest(BaseModel):
     goal: str
-    max_steps: int = 25
+    max_steps: int = 100   # Match AUTOBOT_MAX_STEPS default (was 25 — too low for real tasks)
     use_vision: bool = True
 
 
@@ -317,6 +317,138 @@ def start_mission_run(req: MissionRunRequest):
 
     threading.Thread(target=_run_mission_in_thread, daemon=True, name=f"mission-{run_id}").start()
     return {"run_id": run_id, "status": "started", "goal": req.goal, "mode": "mission"}
+
+
+# ── Orchestrated run ──────────────────────────────────────────────────────────
+
+@app.post("/api/orchestrate")
+def start_orchestrated_run(req: MissionRunRequest):
+    """
+    Start an orchestrated multi-agent run.
+
+    Automatically routes to the right specialist agents based on task type.
+    Simple tasks → single AgentLoop (no overhead).
+    Complex tasks → Orchestrator decomposes into sub-tasks for specialists.
+    """
+    global _agent_runner, _agent_status, _active_run_id, _run_log
+
+    run_id = f"orchestrated_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')[:-3]}"
+
+    with _agent_lock:
+        if _agent_status == "running":
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+        _active_run_id = run_id
+        _agent_status = "running"
+        _run_log.clear()
+        _agent_runner = AgentRunner.from_env(log_callback=_log)
+
+    def _run_in_thread():
+        global _agent_status
+        import asyncio
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                _agent_runner.run_orchestrated(goal=req.goal)
+            )
+            with _agent_lock:
+                _agent_status = "done"
+            _save_run_history(run_id, req.goal, True, result)
+        except Exception as ex:
+            with _agent_lock:
+                _agent_status = "failed"
+            _save_run_history(run_id, req.goal, False, str(ex))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run_in_thread, daemon=True, name=f"orchestrated-{run_id}").start()
+    return {"run_id": run_id, "status": "started", "goal": req.goal, "mode": "orchestrated"}
+
+
+@app.get("/api/orchestrate/plan")
+def get_orchestration_plan():
+    """Return the current orchestration plan status (tasks, progress, etc.)."""
+    if _agent_runner is None:
+        return {"plan": None}
+    try:
+        # The runner's orchestrated run stores the orchestrator as _orchestrator
+        orchestrator = getattr(_agent_runner, "_orchestrator", None)
+        if orchestrator is None:
+            # Try the run_orchestrated's orchestrator (set during run)
+            return {"plan": None}
+        return {"plan": orchestrator.get_plan_status()}
+    except Exception as e:
+        return {"plan": None, "error": str(e)}
+
+
+# ── RL stats endpoint ─────────────────────────────────────────────────────────
+
+@app.get("/api/learning/stats")
+def get_learning_stats():
+    """
+    Return RL pipeline stats — experiences accumulated, learned contexts, etc.
+    Useful for understanding how much the agent has learned across runs.
+    """
+    try:
+        from ..learning.rl_controller import rl_controller
+        from ..learning.policy_memory import policy_memory, wait_duration_memory
+        from ..memory.store import memory_store
+        stats = rl_controller.get_stats()
+        policy_summary = policy_memory.summary()
+        mem_stats = memory_store.stats()
+        wait_stats = wait_duration_memory.summary()
+        return {
+            "rl_enabled": stats.get("enabled", False),
+            "total_experiences": stats.get("total_experiences", 0),
+            "learned_contexts": policy_summary.get("contexts", 0),
+            "total_policy_observations": policy_summary.get("total_observations", 0),
+            "current_run_steps": stats.get("step_counter", 0),
+            "run_id": stats.get("run_id", ""),
+            "memory_entries": mem_stats.get("total", 0),
+            "memory_hits": mem_stats.get("total_hits", 0),
+            "memory_high_value": mem_stats.get("high_value_entries", 0),
+            "wait_url_patterns": wait_stats.get("url_patterns", 0),
+            "wait_observations": wait_stats.get("total_observations", 0),
+        }
+    except Exception as e:
+        return {"rl_enabled": False, "error": str(e)}
+
+
+@app.get("/api/memory/entries")
+def get_memory_entries():
+    """Return all stored memory entries (newest first, up to 200)."""
+    try:
+        from ..memory.store import memory_store
+        entries = memory_store.all_entries()[:200]
+        return {"entries": [{"key": k, "value": v} for k, v in entries], "total": len(memory_store)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/memory/prune")
+def prune_memory():
+    """Prune stale or zero-hit memory entries."""
+    try:
+        from ..memory.store import memory_store
+        removed = memory_store.prune(max_age_days=60, max_entries=500)
+        stats = memory_store.stats()
+        return {"removed": removed, "remaining": stats["total"], "stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/memory/entry/{key}")
+def delete_memory_entry(key: str):
+    """Delete a specific memory entry by key."""
+    try:
+        from ..memory.store import memory_store
+        memory_store.forget(key)
+        return {"deleted": key}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _get_human_approval_pending() -> dict | None:

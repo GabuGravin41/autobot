@@ -8,7 +8,9 @@
       "Bash(gh api:*)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(python -c \":*)",
-      "Bash(wmctrl -l)"
+      "Bash(wmctrl -l)",
+      "Bash(curl -s --max-time 120 http://localhost:11434/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"\"model\"\":\"\"gemma3:4b\"\",\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"Reply: {\\\\\"\"ok\\\\\"\":true}\"\"}],\"\"response_format\"\":{\"\"type\"\":\"\"json_object\"\"},\"\"max_tokens\"\":10,\"\"stream\"\":false}')",
+      "Bash(ollama pull:*)"
     ]
   }
 }

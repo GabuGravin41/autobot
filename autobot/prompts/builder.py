@@ -87,6 +87,7 @@ class StepPromptBuilder:
         click_zoom_b64: str | None = None,              # base64 JPEG crop around last click
         click_zoom_coords: tuple[int, int] | None = None,  # (x, y) of the click
         affordances: str | None = None,                 # per-step tool availability summary
+        evolution_hint: str | None = None,              # dynamic trajectory correction from PromptEvolver
     ):
         self.browser_state = browser_state
         self.task = task
@@ -99,6 +100,7 @@ class StepPromptBuilder:
         self.click_zoom_b64 = click_zoom_b64
         self.click_zoom_coords = click_zoom_coords
         self.affordances = affordances
+        self.evolution_hint = evolution_hint
 
     def _get_screen_size(self) -> tuple[int, int]:
         """Read screen resolution from the page title set by AgentLoop."""
@@ -202,7 +204,11 @@ class StepPromptBuilder:
         if self.affordances:
             parts.append(f"<affordances>\n{self.affordances}\n</affordances>")
 
-        # 7. Native OS state
+        # 7. Dynamic trajectory correction (high-urgency hint from PromptEvolver)
+        if self.evolution_hint:
+            parts.append(self.evolution_hint)
+
+        # 8. Native OS state
         if self.native_ui:
             parts.append(f"<native_os_state>\n{self.native_ui}\n</native_os_state>")
 

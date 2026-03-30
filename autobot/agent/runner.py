@@ -66,6 +66,7 @@ class AgentRunner:
         self.result: str = ""
         self._agent_loop: AgentLoop | None = None
         self._mission_agent: MissionAgent | None = None
+        self._orchestrator: Any | None = None
         self._max_steps_override: int | None = None
 
     @classmethod
@@ -215,7 +216,44 @@ class AgentRunner:
             self._agent_loop._execute_step = _tracked_execute_step
 
             loop_result = await self._agent_loop.run()
-            
+
+            # RL: record terminal reward signal
+            _task_success = "done" in loop_result.lower() or "success" in loop_result.lower()
+            try:
+                if getattr(self._agent_loop, "_rl", None) is not None:
+                    _steps = self._agent_loop.step_number
+                    _failures = sum(
+                        1 for e in self._agent_loop.history
+                        for r in e.action_results if not r.success
+                    )
+                    _failure_rate = _failures / max(_steps, 1)
+                    self._agent_loop._rl.record_run_end(
+                        goal=goal,
+                        steps=_steps,
+                        max_steps=steps or 100,
+                        success=_task_success,
+                        failure_rate=_failure_rate,
+                    )
+            except Exception as _rl_err:
+                logger.debug(f"RL run-end recording failed (non-fatal): {_rl_err}")
+
+            # Lesson extraction — persist cross-run learnings for next run
+            try:
+                from autobot.learning.lesson_extractor import LessonExtractor
+                from autobot.memory.store import memory_store
+                _extractor = LessonExtractor(memory_store)
+                _run_id = getattr(getattr(self._agent_loop, "_rl", None), "_run_id", "")
+                _lessons = _extractor.extract_and_store(
+                    goal=goal,
+                    history=self._agent_loop.history,
+                    success=_task_success,
+                    run_id=_run_id,
+                )
+                if _lessons:
+                    self.log(f"📚 Stored {len(_lessons)} cross-run lessons for future use")
+            except Exception as _le_err:
+                logger.debug(f"Lesson extraction failed (non-fatal): {_le_err}")
+
             # 4. Evaluate with Judge Agent
             self.log("⚖️ Judge Agent evaluating outcome...")
             from autobot.agent.judge import JudgeAgent
@@ -325,6 +363,25 @@ class AgentRunner:
 
             self.status = "done"
             self.result = result
+
+            # Lesson extraction for mission runs
+            try:
+                if self._agent_loop is not None and self._agent_loop.history:
+                    from autobot.learning.lesson_extractor import LessonExtractor
+                    from autobot.memory.store import memory_store
+                    _extractor = LessonExtractor(memory_store)
+                    _success = "failed" not in result.lower() and "error" not in result.lower()
+                    _lessons = _extractor.extract_and_store(
+                        goal=goal,
+                        history=self._agent_loop.history,
+                        success=_success,
+                        run_id="mission",
+                    )
+                    if _lessons:
+                        self.log(f"📚 Mission: stored {len(_lessons)} cross-run lessons")
+            except Exception as _le_err:
+                logger.debug(f"Mission lesson extraction failed (non-fatal): {_le_err}")
+
             self.log(f"🏁 Mission finished: {result[:200]}")
             return result
 
@@ -334,6 +391,70 @@ class AgentRunner:
             self.status = "failed"
             self.result = f"Error: {e}\n\n{tb}"
             self.log(f"❌ Mission failed: {e}")
+            raise
+        finally:
+            try:
+                await self.browser_launcher.stop()
+            except Exception:
+                pass
+
+    async def run_orchestrated(self, goal: str, max_steps_per_task: int = 50) -> str:
+        """
+        Run a task using the multi-agent Orchestrator.
+
+        Automatically detects complexity:
+          - Simple tasks → single AgentLoop (transparent pass-through)
+          - Complex multi-phase tasks → decomposes and routes to specialists
+
+        Use this for ambitious goals that may require coding + browsing + data extraction.
+        """
+        self.status = "starting"
+        self.current_goal = goal
+        self.current_step = 0
+        self.log(f"🎭 Orchestrated run: {goal}")
+
+        try:
+            if self.llm_client is None:
+                self.llm_client = _create_llm_client()
+                if self.llm_client is None:
+                    raise RuntimeError("No LLM API key found.")
+
+            # Launch browser
+            self.log("Initializing Human Mode...")
+            page = await self.browser_launcher.start()
+            self.log("✅ Human Mode active.")
+
+            # Create run directory
+            runs_dir = Path("runs")
+            runs_dir.mkdir(exist_ok=True)
+            run_dir = runs_dir / f"orchestrated_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+            run_dir.mkdir(exist_ok=True)
+            (run_dir / "about.txt").write_text(f"Goal: {goal}\nMode: orchestrated\nModel: {self.model}\n")
+
+            self.status = "running"
+
+            from autobot.agent.orchestrator import Orchestrator
+            orchestrator = Orchestrator(
+                page=page,
+                llm_client=self.llm_client,
+                model=self.model,
+                log_callback=self.log,
+            )
+            self._orchestrator = orchestrator  # expose for status API
+
+            result = await orchestrator.run(goal, max_steps_per_task=max_steps_per_task)
+
+            self.status = "done"
+            self.result = result
+            self.log(f"🏁 Orchestrated run finished: {result[:200]}")
+            return result
+
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self.status = "failed"
+            self.result = f"Error: {e}\n\n{tb}"
+            self.log(f"❌ Orchestrated run failed: {e}")
             raise
         finally:
             try:
@@ -665,6 +786,21 @@ def _create_llm_client() -> Any | None:
         return AsyncOpenAI(
             base_url="https://api.x.ai/v1",
             api_key=api_key,
+        )
+
+    elif provider == "ollama":
+        # Local Ollama server — no API key needed.
+        # Ollama exposes an OpenAI-compatible endpoint at localhost:11434/v1.
+        # CPU inference is slow — timeout is set high (10 min) to avoid premature failures.
+        # Set OLLAMA_TIMEOUT_SECONDS to override (default 600).
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        _timeout = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "600"))
+        from openai import AsyncOpenAI as _AsyncOpenAI
+        import httpx as _httpx
+        return _AsyncOpenAI(
+            base_url=base_url,
+            api_key="ollama",  # Ollama ignores this; AsyncOpenAI requires a non-empty value
+            http_client=_httpx.AsyncClient(timeout=_httpx.Timeout(_timeout, connect=10.0)),
         )
 
     else:

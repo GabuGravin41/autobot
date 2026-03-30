@@ -201,6 +201,23 @@ class AgentLoop:
         from autobot.memory.store import memory_store
         self._memory_store = memory_store
 
+        # RL pipeline — learn from step outcomes across runs
+        try:
+            from autobot.learning.rl_controller import rl_controller
+            self._rl = rl_controller
+            self._rl.new_run()
+        except Exception as _rl_err:
+            logger.debug(f"RL pipeline unavailable (non-fatal): {_rl_err}")
+            self._rl = None
+
+        # Prompt evolver — dynamic corrections based on trajectory
+        try:
+            from autobot.prompts.prompt_evolver import PromptEvolver
+            self._evolver = PromptEvolver(goal=goal)
+        except Exception as _pe_err:
+            logger.debug(f"PromptEvolver unavailable (non-fatal): {_pe_err}")
+            self._evolver = None
+
         # Computer API for OS-level tools
         self.computer = Computer()
 
@@ -559,6 +576,13 @@ class AgentLoop:
                     f"Vision skip: last actions={self._last_action_types}, screen unchanged"
                 )
         self._last_screenshot_hash = _curr_hash
+        # For local/Ollama models on CPU, vision is extremely slow (no GPU).
+        # If AUTOBOT_LOCAL_NO_VISION=1, disable vision entirely and rely on DOM snapshots.
+        # DOM snapshots are actually MORE precise for clicking (exact coordinates vs guessing).
+        _local_no_vision = os.getenv("AUTOBOT_LOCAL_NO_VISION", "0") == "1"
+        if _local_no_vision:
+            _skip_vision = True
+
         _use_vision_this_step = self.use_vision and not _skip_vision
 
         # Use real URL/title from DOM snapshot when available
@@ -641,6 +665,34 @@ class AgentLoop:
         # Recall relevant memories for this goal
         recalled = self._memory_store.recall(self.goal, top_k=6)
 
+        # Prompt evolution: get trajectory correction hint (if agent is drifting)
+        _evolution_hint = None
+        try:
+            if self._evolver is not None:
+                _recent_acts = [
+                    {
+                        "action_name": a.action_name,
+                        "success": r.success,
+                        "error": r.error or "",
+                    }
+                    for e in self.history[-5:]
+                    for a, r in zip(e.agent_output.action, e.action_results)
+                ]
+                _evo = self._evolver.get_evolution_hint(
+                    step_number=self.step_number,
+                    url=url_before,
+                    goal=self.goal,
+                    recent_actions=_recent_acts,
+                    consecutive_failures=self._consecutive_failures,
+                    history=self.history[-5:],
+                    max_steps=self.max_steps,
+                )
+                if _evo and _evo.type != "none":
+                    _evolution_hint = _evo.text
+                    logger.info(f"🧭 PromptEvolver [{_evo.type}] ({_evo.reason}): injecting correction")
+        except Exception as _pe_exc:
+            logger.debug(f"PromptEvolver error (non-fatal): {_pe_exc}")
+
         # Build the step prompt
         step_builder = StepPromptBuilder(
             browser_state=browser_state,
@@ -654,6 +706,7 @@ class AgentLoop:
             click_zoom_b64=self._last_click_zoom_b64,
             click_zoom_coords=self._last_click_coords,
             affordances=self._build_affordances(page_snapshot, native_ui),
+            evolution_hint=_evolution_hint,
         )
         # Click zoom is consumed once per step — clear after passing to builder
         self._last_click_zoom_b64 = None
@@ -966,6 +1019,47 @@ class AgentLoop:
 
         step_time = time.time() - step_start
         logger.debug(f"Step {self.step_number + 1} completed in {step_time:.1f}s")
+
+        # ─── RL: Record experience for every action taken this step ───
+        try:
+            if self._rl is not None and agent_output.action:
+                for action, result in zip(agent_output.action, action_results):
+                    _params: dict = {}
+                    if action.computer_call:
+                        _params = {"call": action.computer_call.call}
+                    elif action.navigate:
+                        _params = {"url": action.navigate.url}
+                    elif action.click:
+                        _params = {"index": action.click.index}
+                    elif action.input_text:
+                        _params = {"index": action.input_text.index}
+
+                    _task_done = action.done is not None
+                    _task_success = (action.done.success if action.done else None)
+
+                    self._rl.record_step(
+                        url=url_before,
+                        goal=self.goal,
+                        action_name=action.action_name,
+                        action_params=_params,
+                        success=result.success,
+                        error=result.error,
+                        step_number=self.step_number,
+                        url_before=url_before,
+                        url_after=url_after,
+                        current_goal=agent_output.next_goal,
+                        consecutive_failures=self._consecutive_failures,
+                        same_goal_count=sum(
+                            1 for e in self.history[-8:]
+                            if e.agent_output.next_goal.strip().lower()[:50] == current_goal
+                        ),
+                        coordinate_drift=_click_drift,
+                        llm_circuit_breaker=(self._consecutive_llm_failures >= 3),
+                        task_done=_task_done,
+                        task_success=_task_success,
+                    )
+        except Exception as _rl_exc:
+            logger.debug(f"RL record_step failed (non-fatal): {_rl_exc}")
 
         # Check if agent called "done"
         for action in agent_output.action:
@@ -1510,13 +1604,12 @@ class AgentLoop:
                 return ActionResult(action_name="close_tab", success=True, page_changed=True)
 
             elif action.wait is not None:
-                secs = action.wait.seconds
-                if secs >= 8:
-                    # Smart wait: watch for screen stability (AI done generating)
-                    await self._wait_for_stable(max_seconds=secs)
-                else:
-                    await asyncio.sleep(secs)
-                return ActionResult(action_name="wait", success=True)
+                actual = await self._smart_wait(hint_seconds=action.wait.seconds)
+                return ActionResult(
+                    action_name="wait",
+                    success=True,
+                    extracted_content=f"Waited {actual:.1f}s (adaptive)",
+                )
 
             elif action.screenshot is not None:
                 return ActionResult(action_name="screenshot", success=True)
@@ -1673,58 +1766,137 @@ class AgentLoop:
             logger.warning(f"Screenshot compress failed: {e} — using original PNG")
             return base64.b64encode(png_bytes).decode("utf-8")
 
-    async def _wait_for_stable(
-        self,
-        max_seconds: int = 45,
-        check_interval: float = 2.5,
-        stable_needed: int = 2,
-    ) -> None:
+    async def _smart_wait(self, hint_seconds: float = 5.0) -> float:
         """
-        Wait until the screen stops changing — signals that an AI model (Grok,
-        Claude, ChatGPT …) has finished generating its response.
+        Evidence-based adaptive wait — exits as soon as the process completes,
+        never sleeps for a fixed duration.
 
-        Algorithm:
-          - Take a screenshot every `check_interval` seconds
-          - Compare consecutive screenshots by MD5 hash
-          - When the hash is identical for `stable_needed` consecutive checks → done
-          - Abort after `max_seconds` regardless
+        The agent calls wait(seconds=N) as a *hint* about how long it thinks
+        something might take.  This method treats that hint as guidance, not
+        a command, and exits the moment it observes completion:
 
-        This replaces fixed-time waits and prevents the agent from interrupting
-        an AI mid-response.
+          - Screen stable:  2 consecutive identical MD5 hashes  → done
+          - URL changed:    page navigated to new location      → done (load finished)
+          - DOM stable:     element count unchanged for 2 polls  → done (content settled)
+
+        The effective max timeout is derived from:
+          1. Learned 90th-percentile for this URL from WaitDurationMemory (most accurate)
+          2. hint_seconds × 2  (generous fallback when no history yet)
+          3. Hard floor of 5s and hard ceiling of 180s
+
+        After exiting, records the actual duration so future waits for this URL
+        start with a better-calibrated max.
+
+        Returns actual seconds elapsed.
         """
         import hashlib
+        import re as _re
 
+        # ── Determine effective max ──────────────────────────────────────────
+        try:
+            from autobot.learning.policy_memory import wait_duration_memory
+            current_url = self.page.url if self.page else ""
+            # Extract domain+path prefix as URL pattern key
+            url_clean = _re.sub(r"^https?://", "", current_url).lower()
+            parts = url_clean.split("/")
+            domain = parts[0].replace("www.", "")
+            url_pattern = f"{domain}/{parts[1][:20]}" if len(parts) > 1 and parts[1] else domain[:40]
+            learned_max = wait_duration_memory.get_learned_max(url_pattern)
+        except Exception:
+            wait_duration_memory = None
+            url_pattern = ""
+            learned_max = None
+
+        if learned_max is not None:
+            # Use learned data: add 50% buffer over the 90th percentile
+            effective_max = max(learned_max * 1.5, hint_seconds, 5.0)
+            logger.info(
+                f"⏳ Smart wait: learned p90={learned_max:.1f}s for {url_pattern!r}, "
+                f"max={effective_max:.1f}s (hint={hint_seconds:.1f}s)"
+            )
+        else:
+            # No history yet — use hint × 2 as generous max
+            effective_max = max(hint_seconds * 2.0, 5.0)
+            logger.info(
+                f"⏳ Smart wait: no history for {url_pattern!r}, "
+                f"max={effective_max:.1f}s (hint×2, hint={hint_seconds:.1f}s)"
+            )
+        # Hard ceiling: never block longer than 3 minutes
+        effective_max = min(effective_max, 180.0)
+
+        # ── Poll for completion signals ──────────────────────────────────────
         prev_hash: str | None = None
         stable_count = 0
+        prev_dom_count: int | None = None
+        dom_stable_count = 0
+        start_url = self.page.url if self.page else ""
         start = time.time()
         elapsed = 0.0
+        check_interval = 1.0   # 1s poll — fast enough to catch quick loads
 
-        logger.info(f"⏳ Smart wait: watching for screen stability (up to {max_seconds}s)...")
-
-        while elapsed < max_seconds:
+        while elapsed < effective_max:
             await asyncio.sleep(check_interval)
             elapsed = time.time() - start
 
             try:
+                current_url_now = self.page.url if self.page else ""
+
+                # ── Signal 1: URL changed → navigation completed ──────────
+                if current_url_now != start_url:
+                    logger.info(
+                        f"✅ Smart wait: URL changed after {elapsed:.1f}s — navigation done"
+                    )
+                    break
+
+                # ── Signal 2: Screenshot hash stable ─────────────────────
                 shot = await self.page.screenshot()
                 curr_hash = hashlib.md5(shot).hexdigest()
-            except Exception:
+
+                if curr_hash == prev_hash:
+                    stable_count += 1
+                    if stable_count >= 2:
+                        logger.info(
+                            f"✅ Smart wait: screen stable after {elapsed:.1f}s"
+                        )
+                        break
+                else:
+                    stable_count = 0
+                prev_hash = curr_hash
+
+                # ── Signal 3: DOM element count stable ───────────────────
+                try:
+                    dom_count = await self.page.evaluate("document.querySelectorAll('*').length")
+                    if prev_dom_count is not None and dom_count == prev_dom_count:
+                        dom_stable_count += 1
+                        if dom_stable_count >= 2 and elapsed >= 1.5:
+                            logger.info(
+                                f"✅ Smart wait: DOM stable ({dom_count} elements) after {elapsed:.1f}s"
+                            )
+                            break
+                    else:
+                        dom_stable_count = 0
+                    prev_dom_count = dom_count
+                except Exception:
+                    pass  # DOM eval unavailable — rely on screen hash
+
+            except Exception as e:
+                logger.debug(f"Smart wait poll error: {e}")
                 break
 
-            if curr_hash == prev_hash:
-                stable_count += 1
-                logger.info(f"   Screen stable ×{stable_count} ({elapsed:.0f}s elapsed)")
-                if stable_count >= stable_needed:
-                    logger.info("✅ Screen stable — response complete")
-                    return
-            else:
-                if stable_count > 0:
-                    logger.info(f"   Screen changed again — resetting stable counter")
-                stable_count = 0
+        else:
+            logger.info(f"⏳ Smart wait: max timeout {effective_max:.0f}s reached — proceeding")
 
-            prev_hash = curr_hash
+        actual_seconds = time.time() - start
 
-        logger.info(f"⏳ Wait timeout ({max_seconds}s) — proceeding regardless")
+        # ── Record actual duration for future calibration ────────────────────
+        try:
+            if wait_duration_memory is not None and url_pattern:
+                wait_duration_memory.record(url_pattern, actual_seconds)
+                wait_duration_memory.save()
+        except Exception:
+            pass
+
+        return actual_seconds
 
     async def _execute_computer_call(self, call_action: ComputerCallAction) -> ActionResult:
         """
@@ -1904,6 +2076,26 @@ class AgentLoop:
         except Exception:
             pass
 
+        # Page type hint — tells agent which tools work best on this type of page
+        try:
+            if page_snapshot:
+                _page_type_hint = _infer_page_type_hint(page_snapshot)
+                if _page_type_hint:
+                    lines.append(_page_type_hint)
+        except Exception:
+            pass
+
+        # RL-learned tool preferences for this page context
+        try:
+            if self._rl is not None:
+                _rl_url = (page_snapshot.url if page_snapshot and page_snapshot.url else "")
+                _rl_hint = self._rl.get_affordances_hint(_rl_url, self.goal)
+                if _rl_hint:
+                    lines.append("")
+                    lines.append(_rl_hint)
+        except Exception:
+            pass
+
         return "\n".join(lines)
 
     def _build_history_text(self) -> str:
@@ -1930,14 +2122,31 @@ class AgentLoop:
                 f"this sub-task and move on.\n"
             )
 
-        for entry in self.history[-15:]:  # Last 15 steps for complex multi-phase tasks
-            text = entry.to_history_text()
-            # Include the agent's memory to help track conversation state
-            if entry.agent_output.memory:
-                text += f"\n  Memory: {entry.agent_output.memory}"
-            # Include confidence to track agent's self-assessment
-            if hasattr(entry.agent_output, 'confidence') and entry.agent_output.confidence != "high":
-                text += f"\n  Confidence: {entry.agent_output.confidence}"
+        # Show detailed recent steps + compact summary for older ones
+        recent_entries = self.history[-15:]
+        total = len(recent_entries)
+        for idx, entry in enumerate(recent_entries):
+            is_recent = idx >= total - 3   # Last 3 steps always get full detail
+            is_failed = any(not r.success for r in entry.action_results)
+            ao = entry.agent_output
+
+            if is_recent or is_failed:
+                # Full detail for recent/failed steps
+                text = entry.to_history_text()
+                if ao.memory:
+                    text += f"\n  Memory: {ao.memory[:200]}"
+                if hasattr(ao, 'confidence') and ao.confidence != "high":
+                    text += f"\n  Confidence: {ao.confidence}"
+            else:
+                # Compact summary for older succeeded steps — save tokens
+                results_summary = "; ".join(
+                    "✅" if r.success else f"❌ {(r.error or '')[:40]}"
+                    for r in entry.action_results
+                )
+                text = f"Step {entry.step_number + 1}: {ao.next_goal[:80]} [{results_summary}]"
+                if ao.memory and len(ao.memory) > 30:
+                    text += f" | Memory: {ao.memory[:80]}"
+
             lines.append(text)
 
         # --- Stall / Loop Detection (two strategies) ---
@@ -1977,10 +2186,14 @@ class AgentLoop:
 
     async def _compress_history(self) -> None:
         """
-        Compress old history entries into a summary to prevent context overflow.
+        Compress old history entries into a heuristic summary to prevent context overflow.
 
-        Keeps the last 10 steps verbatim. Summarises everything older into a
-        compact paragraph injected into the scratchpad as [HISTORY SUMMARY].
+        Keeps the last 10 steps verbatim. Older steps are compressed into:
+        - Distinct goals achieved (successes)
+        - Distinct failures encountered (for avoiding repetition)
+        - URL changes (navigation progress)
+
+        Uses heuristic compression (no LLM call) to avoid nested API latency.
         Called every AUTOBOT_COMPRESS_INTERVAL steps (default 25).
         """
         keep = 10
@@ -1988,50 +2201,140 @@ class AgentLoop:
         if not old_entries:
             return
 
-        # Build a compact text of the old entries
-        old_text = "\n".join(
-            f"Step {e.step_number + 1}: {e.agent_output.next_goal} → "
-            + (", ".join(r.extracted_content or r.error or "ok" for r in e.action_results[:2]))
-            for e in old_entries
-        )
+        # Extract key signals from old history
+        successes: list[str] = []
+        failures: list[str] = []
+        urls_visited: list[str] = []
+        seen_goals: set[str] = set()
 
-        summary = None
-        if self._evaluator:
-            try:
-                prompt = (
-                    f"Summarise these completed agent steps in 3-5 sentences, "
-                    f"focusing on what was accomplished and what failed:\n\n{old_text[:3000]}"
-                )
-                resp = await self.llm_client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=200,
-                )
-                summary = resp.choices[0].message.content.strip()
-            except Exception as compress_err:
-                logger.warning(f"History compression LLM call failed (using fallback): {compress_err}")
+        for e in old_entries:
+            goal_key = e.agent_output.next_goal.strip().lower()[:60]
+            if goal_key in seen_goals:
+                continue
+            seen_goals.add(goal_key)
 
-        if not summary:
-            # Fallback: just list key outcomes
-            summary = f"Steps 0-{old_entries[-1].step_number + 1}: " + "; ".join(
-                e.agent_output.next_goal[:50] for e in old_entries[-5:]
-            )
+            all_success = all(r.success for r in e.action_results)
+            any_nav = e.url_before != e.url_after and e.url_after
+
+            if any_nav and e.url_after not in urls_visited:
+                urls_visited.append(e.url_after.split("?")[0][:50])
+
+            if all_success:
+                successes.append(e.agent_output.next_goal[:60])
+            else:
+                first_error = next(
+                    (r.error for r in e.action_results if r.error), None
+                )
+                failures.append(f"{e.agent_output.next_goal[:50]}: {(first_error or 'failed')[:40]}")
+
+        # Build compact summary
+        parts = []
+        first_step = old_entries[0].step_number + 1
+        last_step = old_entries[-1].step_number + 1
+        parts.append(f"Steps {first_step}–{last_step} summary:")
+
+        if urls_visited:
+            parts.append(f"  Navigated to: {', '.join(urls_visited[-5:])}")
+        if successes:
+            parts.append(f"  Completed: {'; '.join(successes[-8:])}")
+        if failures:
+            parts.append(f"  Failed (don't repeat): {'; '.join(failures[-5:])}")
+
+        summary = "\n".join(parts)
 
         # Inject into scratchpad and trim old history
-        self.scratchpad.append(f"[HISTORY SUMMARY — steps 0–{old_entries[-1].step_number + 1}] {summary}")
+        self.scratchpad.append(f"[HISTORY SUMMARY]\n{summary}")
         self.history = self.history[-keep:]
-        logger.info(f"📜 History compressed: {len(old_entries)} entries → 1 summary. {len(self.history)} recent steps kept.")
+        logger.info(
+            f"📜 History compressed: {len(old_entries)} entries → summary. "
+            f"{len(successes)} successes, {len(failures)} failures, {len(urls_visited)} URLs."
+        )
 
     def _summarize_history(self) -> str:
-        """Generate a summary when the agent hits max steps."""
+        """Generate a comprehensive summary when the agent hits max steps."""
         if not self.history:
             return "No steps were executed."
 
-        steps_text = [entry.to_history_text() for entry in self.history[-3:]]
-        return (
-            f"Agent ran {len(self.history)} steps without calling 'done'.\n"
-            f"Last steps:\n" + "\n".join(steps_text)
-        )
+        total = len(self.history)
+        successes = sum(1 for e in self.history if all(r.success for r in e.action_results))
+        failures = total - successes
+
+        # Collect URLs visited (deduplicated)
+        urls = []
+        seen_urls = set()
+        for e in self.history:
+            u = (e.url_after or "").split("?")[0]
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                urls.append(u)
+
+        # Collect substantive scratchpad entries (skip generic filler)
+        key_findings = [
+            s for s in self.scratchpad
+            if len(s) > 30 and not any(
+                skip in s for skip in ("[RECOVERY", "[FORCED", "[RETRY ALERT", "[WATCHDOG"]
+            )
+        ][-6:]
+
+        # Last 3 steps for context
+        last_steps = [entry.to_history_text() for entry in self.history[-3:]]
+
+        lines = [
+            f"Agent completed {total} steps (budget exhausted): "
+            f"{successes} succeeded, {failures} failed.",
+        ]
+        if urls:
+            lines.append(f"Pages visited: {', '.join(urls[-5:])}")
+        if key_findings:
+            lines.append(f"Key findings:\n" + "\n".join(f"  {f}" for f in key_findings))
+        lines.append(f"Last 3 steps:\n" + "\n".join(last_steps))
+
+        return "\n".join(lines)
+
+def _infer_page_type_hint(page_snapshot: Any) -> str | None:
+    """
+    Classify the current page and return a tool recommendation hint.
+
+    Looks at the URL, title, and page text to identify common page types
+    (login, form, table/data, search results, code editor, error page)
+    and suggests the most effective tools for each.
+
+    Returns a concise one-line hint string, or None if no strong match.
+    """
+    url = (page_snapshot.url or "").lower()
+    title = (page_snapshot.title or "").lower()
+    text = (page_snapshot.text or "").lower()[:500]
+
+    # Login / auth page
+    if any(w in url + title + text for w in ("login", "sign in", "signin", "log in", "authenticate", "password")):
+        return "Page type: LOGIN — Use keyboard.type() for username/password fields. Click 'Sign in' button to submit."
+
+    # Registration / sign-up page
+    if any(w in url + title + text for w in ("register", "sign up", "signup", "create account", "join")):
+        return "Page type: REGISTRATION — Fill each field with keyboard.type() after clicking it. Use Tab to move between fields."
+
+    # Search results page
+    if any(w in url for w in ("search", "results", "q=", "query=")) or "search results" in title:
+        return "Page type: SEARCH RESULTS — Scan result titles in the DOM snapshot. Click the most relevant result by index."
+
+    # Data table / listing page
+    if any(w in title + text for w in ("table", "spreadsheet", "dataset", "leaderboard", "rankings")):
+        return "Page type: DATA TABLE — Use Ctrl+A then Ctrl+C to copy table data, or extract row-by-row using DOM indices."
+
+    # Code editor (VS Code, GitHub, Jupyter, CodePen)
+    if any(w in url + title for w in ("github.com", "vscode", "colab", "jupyter", "codepen", "replit", "leetcode")):
+        return "Page type: CODE EDITOR — Use keyboard shortcuts (Ctrl+A select all, Ctrl+C copy, Ctrl+V paste). Focus editor area first."
+
+    # Error page
+    if any(w in title + text for w in ("404", "not found", "error", "page not found", "403", "forbidden")):
+        return "Page type: ERROR PAGE — Navigate away using the `navigate` action. Do not interact with this page."
+
+    # File upload page
+    if any(w in title + text for w in ("upload", "drop file", "choose file", "browse file")):
+        return "Page type: FILE UPLOAD — Use computer.files to locate the file path, then interact with the file input."
+
+    return None
+
 
 # Alias for compatibility with the backend (app.py)
 AgentRunner = AgentLoop

@@ -25,8 +25,57 @@ class JudgeAgent:
         self.llm_client = llm_client
         self.model = model
 
+    def _fast_heuristic_check(
+        self, goal: str, result_text: str
+    ) -> JudgeOutput | None:
+        """
+        Instant heuristic pre-check — avoids LLM for obvious cases.
+        Returns a JudgeOutput if the verdict is clear, None if LLM is needed.
+        """
+        result_lower = result_text.lower()
+
+        # Clear failure signals
+        failure_signals = [
+            "error:", "exception:", "traceback", "task failed",
+            "could not complete", "unable to", "timed out",
+            "judge error:", "circuit breaker", "max steps reached",
+        ]
+        for sig in failure_signals:
+            if sig in result_lower:
+                return JudgeOutput(
+                    success=False,
+                    reasoning=f"Heuristic: result contains failure signal '{sig}'"
+                )
+
+        # Clear success signals paired with "done" or "success"
+        if "judge verification: success" in result_lower:
+            # Prior judge already confirmed success (re-evaluation shouldn't happen, but handle it)
+            return JudgeOutput(success=True, reasoning="Prior judge verification confirmed success")
+
+        # Very short results with no task content are suspicious
+        if len(result_text.strip()) < 20 and "done" not in result_lower:
+            return JudgeOutput(
+                success=False,
+                reasoning="Heuristic: result is too short to indicate task completion"
+            )
+
+        # If result contains explicit success markers, trust them
+        if any(s in result_lower for s in ["successfully completed", "task complete", "done(success=true"]):
+            return JudgeOutput(
+                success=True,
+                reasoning="Heuristic: result contains explicit success confirmation"
+            )
+
+        return None  # Proceed to LLM evaluation
+
     async def evaluate(self, goal: str, result_text: str, history_summary: str) -> JudgeOutput:
         """Evaluate the agent's performance."""
+        # Fast path — skip LLM for obvious outcomes
+        heuristic = self._fast_heuristic_check(goal, result_text)
+        if heuristic is not None:
+            logger.debug(f"Judge heuristic shortcut: success={heuristic.success}")
+            return heuristic
+
         prompt = (
             "You are an impartial Judge Agent evaluating if an autonomous browser agent "
             "successfully completed its task.\n\n"

@@ -205,6 +205,50 @@ export const runMission = (goal: string): Promise<{ run_id: string; status: stri
         body: JSON.stringify({ goal }),
     });
 
+/**
+ * Start an orchestrated multi-agent run.
+ * Automatically routes simple tasks to a single AgentLoop, and complex tasks
+ * to specialized sub-agents (WebNavigator, CodeExecutor, DataExtractor, etc.)
+ */
+export const runOrchestrated = (goal: string): Promise<{ run_id: string; status: string; goal: string; mode: string }> =>
+    apiFetch('/api/orchestrate', {
+        method: 'POST',
+        body: JSON.stringify({ goal }),
+    });
+
+// ── Learning / RL Stats ──────────────────────────────────────────────────────
+export interface LearningStats {
+    rl_enabled: boolean;
+    total_experiences: number;
+    learned_contexts: number;
+    total_policy_observations: number;
+    current_run_steps: number;
+    run_id: string;
+    memory_entries?: number;
+    memory_hits?: number;
+    memory_high_value?: number;
+    error?: string;
+}
+
+/** Get RL pipeline stats — how much the agent has learned from past runs. */
+export const getLearningStats = (): Promise<LearningStats> =>
+    apiFetch<LearningStats>('/api/learning/stats');
+
+// ── Memory API ──────────────────────────────────────────────────────────────
+export interface MemoryEntry {
+    key: string;
+    value: string;
+}
+
+export const getMemoryEntries = (): Promise<{ entries: MemoryEntry[]; total: number }> =>
+    apiFetch('/api/memory/entries');
+
+export const pruneMemory = (): Promise<{ removed: number; remaining: number; stats: Record<string, number> }> =>
+    apiFetch('/api/memory/prune', { method: 'POST' });
+
+export const deleteMemoryEntry = (key: string): Promise<{ deleted: string }> =>
+    apiFetch(`/api/memory/entry/${encodeURIComponent(key)}`, { method: 'DELETE' });
+
 /** Start the LeetCode multi-AI solving mission. */
 export const runLeetCodeMission = (
     num_problems: number = 5,

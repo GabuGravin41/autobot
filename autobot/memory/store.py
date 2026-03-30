@@ -119,6 +119,67 @@ class MemoryStore:
         )
         return [(k, v["value"]) for k, v in sorted_items]
 
+    def prune(
+        self,
+        max_age_days: int = 60,
+        max_entries: int = 500,
+        min_hits_for_old: int = 1,
+    ) -> int:
+        """
+        Remove stale or low-value entries to keep memory lean.
+
+        Pruning rules (applied in order):
+          1. Entries older than max_age_days AND never recalled (hits=0) → remove
+          2. If still over max_entries, remove oldest zero-hit entries first,
+             then oldest low-hit entries, until under the limit.
+
+        Returns the number of entries removed.
+        """
+        from datetime import timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        removed = 0
+
+        with self._lock:
+            # Rule 1: prune old zero-hit entries
+            stale = [
+                k for k, v in self._data.items()
+                if v.get("hits", 0) < min_hits_for_old
+                and _parse_dt(v.get("updated", "")) < cutoff
+            ]
+            for k in stale:
+                del self._data[k]
+                removed += 1
+
+            # Rule 2: enforce max_entries cap
+            if len(self._data) > max_entries:
+                # Sort by (hits asc, updated asc) — remove least useful entries first
+                sortable = sorted(
+                    self._data.items(),
+                    key=lambda x: (x[1].get("hits", 0), x[1].get("updated", "")),
+                )
+                excess = len(self._data) - max_entries
+                for k, _ in sortable[:excess]:
+                    del self._data[k]
+                    removed += 1
+
+            if removed:
+                self._save()
+
+        if removed:
+            logger.info(f"🧹 Memory pruned: {removed} stale entries removed ({len(self._data)} remain)")
+        return removed
+
+    def stats(self) -> dict:
+        """Return memory statistics."""
+        hits = [v.get("hits", 0) for v in self._data.values()]
+        return {
+            "total": len(self._data),
+            "total_hits": sum(hits),
+            "zero_hit_entries": sum(1 for h in hits if h == 0),
+            "high_value_entries": sum(1 for h in hits if h >= 5),
+        }
+
     def __len__(self) -> int:
         return len(self._data)
 
@@ -128,5 +189,18 @@ def _normalise_key(key: str) -> str:
     return re.sub(r"\s+", "_", key.strip().lower())
 
 
+def _parse_dt(iso: str) -> datetime:
+    """Parse ISO timestamp string, returning epoch on failure."""
+    try:
+        return datetime.fromisoformat(iso)
+    except Exception:
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 # Module-level singleton — shared across the process
 memory_store = MemoryStore()
+# Prune stale entries on startup (silent, non-fatal)
+try:
+    memory_store.prune(max_age_days=60, max_entries=500)
+except Exception:
+    pass
