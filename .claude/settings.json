@@ -10,7 +10,28 @@
       "Bash(python -c \":*)",
       "Bash(wmctrl -l)",
       "Bash(curl -s --max-time 120 http://localhost:11434/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"\"model\"\":\"\"gemma3:4b\"\",\"\"messages\"\":[{\"\"role\"\":\"\"user\"\",\"\"content\"\":\"\"Reply: {\\\\\"\"ok\\\\\"\":true}\"\"}],\"\"response_format\"\":{\"\"type\"\":\"\"json_object\"\"},\"\"max_tokens\"\":10,\"\"stream\"\":false}')",
-      "Bash(ollama pull:*)"
+      "Bash(ollama pull:*)",
+      "Bash(grep -r \"AI Planner\\\\|Hello! I am Autobot\" '/home/lindah/Desktop/projects/coding/visual studio/django website tutorials/autobot' --include=*.py --include=*.tsx --include=*.ts --include=*.js --include=*.jsx)",
+      "Bash(grep -r \"system_prompt\\\\|system_instruction\\\\|SYSTEM\" '/home/lindah/Desktop/projects/coding/visual studio/django website tutorials/autobot/autobot' --include=*.py)",
+      "Bash(lscpu)",
+      "Bash(ps aux:*)",
+      "Bash(systemctl list-units:*)",
+      "Bash(sudo systemctl:*)",
+      "Bash(apt-cache search:*)",
+      "Bash(curl -s https://api.github.com/repos/ggerganov/llama.cpp/releases/latest)",
+      "Bash(curl -s \"https://api.github.com/repos/ggerganov/llama.cpp/releases/latest\")",
+      "Bash(glslangValidator --version)",
+      "Bash(snap find:*)",
+      "Read(//usr/**)",
+      "Bash(dpkg -L libvulkan-dev)",
+      "Bash(dpkg -L libvulkan1)",
+      "Bash(chmod +x /home/lindah/llama-server-start.sh)",
+      "Bash(chmod +x /home/lindah/benchmark-llm.sh)",
+      "Bash(rm -rf build)",
+      "Bash(cmake -B build -DGGML_VULKAN=OFF -DCMAKE_BUILD_TYPE=Release)"
+    ],
+    "additionalDirectories": [
+      "/home/lindah"
     ]
   }
 }
