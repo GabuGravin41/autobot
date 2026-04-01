@@ -1336,7 +1336,12 @@ class AgentLoop:
 
         def _try_build(data: dict) -> AgentOutput | None:
             try:
-                return AgentOutput(**self._normalize_agent_data(data))
+                result = AgentOutput(**self._normalize_agent_data(data))
+                # Log if all actions came back unknown — model used wrong format
+                if result.action and all(a.action_name == "unknown" for a in result.action):
+                    logger.warning(f"Model output parsed but all actions are unknown. "
+                                   f"Raw action data: {data.get('action')}")
+                return result
             except (ValidationError, TypeError) as e:
                 logger.debug(f"AgentOutput build failed: {e}")
                 return None
@@ -1386,7 +1391,7 @@ class AgentLoop:
                     action=[{"computer_call": {"call": cc_match.group(0)}}],
                 )
 
-            logger.error(f"All JSON parse attempts failed. Raw[:300]: {raw[:300]}")
+            logger.error(f"All JSON parse attempts failed. Raw[:500]: {raw[:500]}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error during agent output parsing: {e}")
