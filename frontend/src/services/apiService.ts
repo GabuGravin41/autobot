@@ -278,7 +278,7 @@ export const sendChat = (
     apiFetch('/api/chat', {
         method: 'POST',
         body: JSON.stringify({ message, state: state || {}, history: history || [] }),
-        timeoutMs: 90_000,  // LLM responses can take 30-60s on slow models
+        timeoutMs: 300_000,  // 5 min — slow local models (Ollama) can take 2-3min
     });
 
 // Alias for compatibility with any code that imported generatePlan

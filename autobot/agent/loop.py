@@ -720,6 +720,16 @@ class AgentLoop:
             *user_messages,
         ]
 
+        # Estimate prompt size and warn user on first step (cold prompt processing is slow)
+        prompt_tokens_est = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        if self.step_number == 0:
+            logger.info(
+                f"🧠 Step 1: processing prompt (~{prompt_tokens_est} tokens) — "
+                f"first step takes longer as the model loads context. Please wait..."
+            )
+        else:
+            logger.info(f"🧠 Step {self.step_number + 1}: thinking (~{prompt_tokens_est} tokens)...")
+
         # Retry LLM call up to 3 times with increasing backoff
         agent_output = None
         for _llm_attempt in range(1, 4):
@@ -2269,11 +2279,10 @@ class AgentLoop:
                 urls.append(u)
 
         # Collect substantive scratchpad entries (skip generic filler)
+        _skip_prefixes = ("[RECOVERY", "[FORCED", "[RETRY ALERT", "[WATCHDOG")
         key_findings = [
             s for s in self.scratchpad
-            if len(s) > 30 and not any(
-                skip in s for skip in ("[RECOVERY", "[FORCED", "[RETRY ALERT", "[WATCHDOG"]
-            )
+            if len(s) > 30 and not any(skip in s for skip in _skip_prefixes)
         ][-6:]
 
         # Last 3 steps for context

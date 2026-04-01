@@ -1188,17 +1188,12 @@ def chat(req: ChatRequest):
     try:
         return _chat_with_llm(req)
     except Exception as e:
-        logger.warning(f"LLM chat failed ({e}), falling back to direct plan")
-        plan = {
-            "id": f"plan_{int(time.time())}",
-            "name": "Auto Task",
-            "description": req.message,
-            "steps": [{"action": "auto_execute", "args": {}, "description": f"Autonomously execute: {req.message}"}]
-        }
-        return {
-            "reply": "I have created a direct automation plan for your task. Click Execute to begin.",
-            "plan": plan
-        }
+        logger.error(f"LLM chat failed: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail=f"The AI model is unavailable: {e}. Please check that llama-server (or your configured LLM provider) is running and try again."
+        )
 
 
 def _chat_with_llm(req: ChatRequest) -> dict:
@@ -1211,37 +1206,60 @@ def _chat_with_llm(req: ChatRequest) -> dict:
 
     model = os.getenv("AUTOBOT_LLM_MODEL", "gpt-4o")
 
-    system_prompt = """You are the Autobot AI Planner — a helpful assistant that plans computer automation tasks.
+    system_prompt = """You are the brain of Autobot — a sovereign digital agent that controls the user's entire computer. You can see the screen, move the mouse, type on the keyboard, switch between applications, and use any software installed on the machine, exactly like a human sitting at the desk.
 
-Your job is to understand what the user wants to accomplish on their computer, ask clarifying questions if needed, and then create a clear execution plan.
+## Who you are
 
-## How to respond:
+You are intelligent and conversational. You understand complex requests, ask thoughtful clarifying questions, discuss tradeoffs, and help the user think through their goals. You are like ChatGPT or Grok in your ability to understand — but unlike them, you have hands and legs. You can actually DO things on the computer.
 
-1. **If the user's request is UNCLEAR or AMBIGUOUS**: Ask 1-2 specific clarifying questions. Keep your response conversational and brief.
+## What you can do (your capabilities)
 
-2. **If you have ENOUGH INFORMATION to create a plan**: Respond with a helpful message AND include a JSON plan block at the end of your response, wrapped in ```plan``` markers.
+When executing a plan, Autobot physically controls the computer:
+- **Browser:** Navigate to any website, click, type, scroll, manage tabs, read page content
+- **Desktop apps:** Switch between any application (VS Code, terminal, file manager, etc.) using Alt+Tab, mouse, and keyboard
+- **Clipboard:** Copy and paste between any applications
+- **AI platforms as tools:** Navigate to Grok, ChatGPT, Claude, Perplexity, Google AI Studio — type questions, wait for responses, copy the answers. These are your research and thinking tools.
+- **Terminal:** Run shell commands, scripts, git operations
+- **File management:** Create, edit, move, upload, download files
+- **Keyboard shortcuts:** Any shortcut in any application
 
-## Plan format (only include when ready):
+## How you think about planning
+
+Your superpower is that you delegate the actual intellectual work to the right tool:
+- Need research? → Navigate to Grok or Perplexity, type the question, read and use the response
+- Need code? → Ask ChatGPT/Claude/Grok to write it, or open VS Code with Copilot
+- Need a document? → Open Google Docs or a text editor and compose it there
+- Need data? → Navigate to the source website and extract it
+
+Every step in your plan is something that physically happens on screen — navigating, clicking, typing, waiting, copying. The plan is a sequence of real computer actions that Autobot will execute autonomously.
+
+## Conversation flow
+
+1. **Understand the request.** Have a real conversation. If the task is complex, discuss it — ask about preferences (which AI platform? which browser? where to save results?), suggest approaches, help the user refine their goal.
+
+2. **When you understand enough, propose a plan.** The plan is a sequence of concrete steps that Autobot will execute on the computer. Include a ```plan``` block in your response.
+
+3. **For simple, clear requests** (like "go to youtube and search for lofi music"), propose the plan immediately — no need for back-and-forth.
+
+## Plan format
+
+When you're ready to propose a plan, include this block in your response:
 
 ```plan
 {
-  "name": "Short plan name",
-  "description": "Full description of what Autobot will do",
+  "name": "Brief plan name",
+  "description": "Detailed description of the full task — this is what Autobot receives as its goal, so be specific about what to do, which sites to visit, what to type, and what the end result should look like",
   "steps": [
-    {"description": "Step 1 description"},
-    {"description": "Step 2 description"}
+    {"description": "Step 1: what physically happens on screen"},
+    {"description": "Step 2: what physically happens on screen"},
+    {"description": "Step 3: what physically happens on screen"}
   ]
 }
 ```
 
-## Guidelines:
-- Be conversational and friendly, but concise
-- Ask questions like: "Which browser tab?", "What specific content?", "Where should I save it?"
-- When the task is clear enough (even if simple), go ahead and propose a plan
-- For simple, unambiguous tasks (e.g., "go to google.com"), propose the plan immediately
-- The plan description is what the agent will receive as its goal — make it detailed and actionable
-- Include step-by-step breakdown so the user can review before executing
-- Never include code or technical implementation details — just describe what will happen"""
+The description field is critical — it becomes the agent's goal. Make it rich and detailed: include URLs, app names, the exact queries to type, where to save results, and what success looks like.
+
+Each step should describe a real action on the computer (navigate, click, type, wait, copy, switch app, run command). Keep steps concrete enough that someone watching the screen would see each one happen."""
 
     # Build conversation history
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -1256,7 +1274,7 @@ Your job is to understand what the user wants to accomplish on their computer, a
             llm_client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=1024,
+                max_tokens=2048,
                 temperature=0.7,
             )
         )
@@ -1271,25 +1289,74 @@ Your job is to understand what the user wants to accomplish on their computer, a
     plan = None
     import re
     plan_match = re.search(r'```plan\s*\n(.*?)\n```', reply_text, re.DOTALL)
+    if not plan_match:
+        # Also try ```json blocks — small models sometimes use json instead of plan
+        plan_match = re.search(r'```json\s*\n(.*?)\n```', reply_text, re.DOTALL)
+        # Only accept json blocks that look like plans (have "steps" key)
+        if plan_match and '"steps"' not in plan_match.group(1):
+            plan_match = None
+
     if plan_match:
         try:
             plan_data = json.loads(plan_match.group(1))
-            plan = {
-                "id": f"plan_{int(time.time())}",
-                "name": plan_data.get("name", "Auto Task"),
-                "description": plan_data.get("description", req.message),
-                "steps": [
-                    {"action": "auto_execute", "args": {}, "description": s.get("description", str(s))}
-                    for s in plan_data.get("steps", [])
-                ],
-            }
+            raw_steps = plan_data.get("steps", [])
+            steps = [
+                {"action": "auto_execute", "args": {}, "description": s.get("description", str(s))}
+                for s in raw_steps
+            ]
+
+            # ── Validate: is this actually an executable plan? ────────────
+            # Small models sometimes stuff clarifying questions or abstract
+            # tasks into the plan block.  Detect and discard those.
+            if steps:
+                step_texts = " ".join(s["description"].lower() for s in steps)
+                question_count = sum(1 for s in steps if "?" in s["description"])
+                has_action_verbs = any(v in step_texts for v in (
+                    "navigate", "open", "click", "type", "press", "go to",
+                    "search", "scroll", "copy", "paste", "switch", "wait",
+                    "run ", "download", "upload", "save", "enter",
+                ))
+                # Reject if: majority of steps are questions, or no action verbs at all
+                is_garbage = (
+                    question_count > len(steps) // 2
+                    or (not has_action_verbs and len(steps) > 0)
+                )
+            else:
+                is_garbage = True
+
+            if not is_garbage:
+                plan = {
+                    "id": f"plan_{int(time.time())}",
+                    "name": plan_data.get("name", "Auto Task"),
+                    "description": plan_data.get("description", req.message),
+                    "steps": steps,
+                }
+            else:
+                logger.debug("Plan block discarded — steps are questions or non-actionable")
+
         except json.JSONDecodeError:
             pass  # Plan JSON was malformed — just return the text
 
-        # Strip the plan block from the visible reply
+        # Strip the plan/json block from the visible reply
         reply_text = reply_text[:plan_match.start()].strip()
-        if not reply_text:
-            reply_text = "Here's the plan I've prepared for you:"
+
+        if plan:
+            # Valid plan extracted — use default intro if LLM didn't write one
+            if not reply_text:
+                reply_text = "Here's the plan I've prepared for you:"
+        else:
+            # Plan was garbage — restore the original text as conversation
+            # The LLM's "steps" were really questions or discussion, so put
+            # them back into the reply as natural text
+            raw_text_after = reply_text
+            full_text = resp.choices[0].message.content if resp.choices else ""
+            # Remove only the ```plan``` markers, keep the content as text
+            reply_text = re.sub(r'```(?:plan|json)\s*\n', '', full_text)
+            reply_text = reply_text.replace('```', '').strip()
+            # Clean up any raw JSON artifacts for readability
+            reply_text = re.sub(r'[{}\[\]"]+', '', reply_text).strip()
+            if not reply_text:
+                reply_text = "Hello! I'm Autobot. What would you like me to help you with today?"
 
     return {"reply": reply_text, "plan": plan}
 

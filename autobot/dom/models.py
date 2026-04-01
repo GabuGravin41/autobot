@@ -195,7 +195,7 @@ class DOMSerializedState:
     # Index → element mapping for action execution
     selector_map: SelectorMap
 
-    def llm_representation(self, include_attributes: list[str] | None = None) -> str:
+    def llm_representation(self, include_attributes: list[str] | None = None, max_elements: int = 40) -> str:
         """
         Convert the DOM tree into the compact text format the LLM reads.
 
@@ -204,13 +204,18 @@ class DOMSerializedState:
                 [2] <input> "Search..." (placeholder=Search, type=text)
             [3] <a> "My Profile" (href=/profile)
             *[4] <div> "New popup" (role=dialog)   ← new since last step
+
+        max_elements caps interactive elements shown to avoid huge prompts on busy pages.
         """
         if not self.element_tree:
             return "empty page"
 
         attrs_to_include = include_attributes or INCLUDE_ATTRIBUTES
         lines: list[str] = []
-        self._serialize_node(self.element_tree, lines, attrs_to_include)
+        interactive_count = [0]
+        self._serialize_node(self.element_tree, lines, attrs_to_include, interactive_count, max_elements)
+        if interactive_count[0] >= max_elements:
+            lines.append(f"... (capped at {max_elements} interactive elements)")
         return "\n".join(lines)
 
     def _serialize_node(
@@ -218,8 +223,13 @@ class DOMSerializedState:
         node: DOMElementNode,
         lines: list[str],
         include_attributes: list[str],
+        interactive_count: list[int],
+        max_elements: int,
     ) -> None:
         """Recursively serialize a DOM node and its children."""
+        if interactive_count[0] >= max_elements:
+            return
+
         indent = "\t" * node.depth
 
         if node.is_interactive and node.index is not None:
@@ -233,6 +243,7 @@ class DOMSerializedState:
             lines.append(
                 f"{indent}{scroll_prefix}{new_marker}[{node.index}] <{node.tag_name}>{text_part}{attr_str}"
             )
+            interactive_count[0] += 1
         elif node.text and node.text.strip():
             # Pure text node — no index
             text_preview = _cap_text(node.text.strip(), 120)
@@ -243,7 +254,7 @@ class DOMSerializedState:
 
         # Recurse into children
         for child in node.children:
-            self._serialize_node(child, lines, include_attributes)
+            self._serialize_node(child, lines, include_attributes, interactive_count, max_elements)
 
     @staticmethod
     def _format_attributes(node: DOMElementNode, include: list[str]) -> str:
