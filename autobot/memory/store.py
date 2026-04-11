@@ -80,10 +80,11 @@ class MemoryStore:
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
-    def recall(self, query: str, top_k: int = 8) -> list[tuple[str, str]]:
+    def recall(self, query: str, top_k: int = 4) -> list[tuple[str, str]]:
         """
         Return up to top_k (key, value) pairs most relevant to query.
         Relevance = number of query words that appear in key or value.
+        Tie-broken by hit count (most-used memories preferred).
         """
         if not self._data:
             return []
@@ -92,17 +93,19 @@ class MemoryStore:
         if not query_words:
             return []
 
-        scored: list[tuple[int, str]] = []
+        scored: list[tuple[int, int, str]] = []
         for key, entry in self._data.items():
             haystack = f"{key} {entry['value']}".lower()
             score = sum(1 for w in query_words if w in haystack)
             if score > 0:
-                scored.append((score, key))
+                hits = entry.get("hits", 0)
+                scored.append((score, hits, key))
 
-        scored.sort(reverse=True)
+        # Sort by relevance score DESC, then hits DESC (most-used memories break ties)
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
         results = []
         with self._lock:
-            for _, key in scored[:top_k]:
+            for _, _hits, key in scored[:top_k]:
                 entry = self._data[key]
                 entry["hits"] = entry.get("hits", 0) + 1
                 results.append((key, entry["value"]))

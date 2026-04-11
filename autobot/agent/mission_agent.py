@@ -65,7 +65,7 @@ class MissionAgent:
         """
         self.log(f"🚀 Starting Mission: {self.mission_goal}")
 
-        # 1. PLAN
+        # 1. PLAN (2-stage: analysis then decomposition)
         await self._plan_mission()
 
         if self.mission.status == MissionStatus.FAILED:
@@ -73,7 +73,8 @@ class MissionAgent:
 
         self.log(f"📋 Mission planned with {len(self.mission.objectives)} objectives:")
         for i, obj in enumerate(self.mission.objectives, 1):
-            self.log(f"  {i}. {obj.description}")
+            criteria = f" (done when: {obj.success_criteria})" if obj.success_criteria else ""
+            self.log(f"  {i}. {obj.description}{criteria}")
 
         # 2. EXECUTE each objective
         failed_count = 0
@@ -88,17 +89,27 @@ class MissionAgent:
             self.log(f"🎯 Objective {obj_index}/{total}: {objective.description}")
             objective.status = ObjectiveStatus.IN_PROGRESS
 
-            # Build mission context so the agent knows the bigger picture
-            custom_instructions = self._build_context_for_objective(objective)
+            # Full context injected once at step 0 (big-picture orientation)
+            full_context = self._build_context_for_objective(objective)
+            # Brief reminder baked into system prompt (every step — kept tight)
+            brief_context = (
+                f"MISSION: {self.mission_goal}\n"
+                f"CURRENT OBJECTIVE: {objective.description}\n"
+                + (f"SUCCESS WHEN: {objective.success_criteria}\n" if objective.success_criteria else "")
+                + "Focus ONLY on this objective."
+            )
 
             # Run AgentLoop for this objective
+            # Use planner-estimated step budget if available
+            step_budget = objective.max_steps or self.max_steps_per_objective
             agent = AgentLoop(
                 page=self.page,
                 llm_client=self.llm_client,
                 goal=objective.description,
                 model=self.model,
-                max_steps=self.max_steps_per_objective,
-                custom_instructions=custom_instructions,
+                max_steps=step_budget,
+                custom_instructions=brief_context,
+                first_step_context=full_context,
             )
             agent._run_dir = self._run_dir
             self.current_agent_loop = agent
@@ -173,37 +184,70 @@ class MissionAgent:
         return "\n".join(lines)
 
     async def _plan_mission(self):
-        """Use LLM to break the mission goal into objectives."""
-        logger.debug("Planning mission objectives...")
+        """
+        Use LLM to break the mission goal into objectives — 2-stage approach.
 
-        prompt = f"""You are a Mission Strategist for a desktop automation agent called Autobot.
+        Stage 1 (analysis): Understand intent, state assumptions, define done.
+        Stage 2 (planning): Produce concrete objectives with success criteria and step budgets.
+        """
+        logger.debug("Planning mission: Stage 1 — goal analysis...")
 
-Autobot can:
-- Control the browser (navigate, click, type, scroll, manage tabs)
-- Control any desktop application (VS Code, terminal, file manager, etc.) via Alt+Tab and mouse/keyboard
-- Copy/paste between applications using the clipboard
-- Upload and download files
-- Interact with AI chatbots (ChatGPT, Grok, Claude) to generate code or get information
-- Read screenshots to understand what's on screen
+        # ── Stage 1: Goal Analysis (small call, max 300 tokens) ──────────────────
+        analysis_prompt = (
+            f"You are analyzing a task for a desktop automation agent.\n\n"
+            f"Task: {self.mission_goal}\n\n"
+            f"Answer in 2-4 sentences:\n"
+            f"1. What is the user actually trying to achieve?\n"
+            f"2. What assumptions cover any ambiguous parts?\n"
+            f"3. What would clearly signal the task is complete?\n\n"
+            f"Be brief and factual."
+        )
 
-Break the following mission into 3-7 sequential objectives. Each objective should be:
-- A concrete, verifiable action (not vague)
-- Achievable in ~20-50 agent steps
-- Ordered logically (dependencies flow forward)
+        analysis = ""
+        try:
+            resp1 = await self.llm_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": analysis_prompt}],
+                temperature=0.1,
+                max_tokens=300,
+            )
+            analysis = (resp1.choices[0].message.content or "").strip()
+            logger.info(f"📋 Mission analysis: {analysis}")
+        except Exception as e:
+            logger.warning(f"Goal analysis call failed (non-fatal, continuing to plan): {e}")
+            analysis = f"Goal: {self.mission_goal}"
 
-Mission: {self.mission_goal}
+        # ── Stage 2: Planning (produces objectives with success criteria) ──────────
+        logger.debug("Planning mission: Stage 2 — objective decomposition...")
 
-Respond with ONLY a JSON object like:
-{{"objectives": [{{"id": "obj1", "description": "Navigate to kaggle.com and log in using saved credentials"}}, ...]}}"""
+        plan_prompt = (
+            f"You are a Mission Strategist for Autobot, a desktop automation agent.\n\n"
+            f"Autobot capabilities:\n"
+            f"- Browser: navigate, click, type, scroll, manage tabs\n"
+            f"- Desktop: any app via Alt+Tab + mouse/keyboard, clipboard copy/paste\n"
+            f"- Files: upload, download, read/write via terminal\n"
+            f"- AI chatbots: ChatGPT, Claude, Grok for code/info generation\n\n"
+            f"Goal Analysis:\n{analysis}\n\n"
+            f"Original Mission: {self.mission_goal}\n\n"
+            f"Break this into 3-7 sequential objectives. Each must be:\n"
+            f"- A concrete, verifiable action (not vague)\n"
+            f"- Achievable in 20-50 agent steps\n"
+            f"- Ordered so dependencies flow forward\n\n"
+            f'Respond with ONLY valid JSON:\n'
+            f'{{"objectives": [\n'
+            f'  {{"id": "obj1", "description": "...", "success_criteria": "Done when: ...", "max_steps": 40}},\n'
+            f'  ...\n'
+            f']}}'
+        )
 
         try:
-            response = await self.llm_client.chat.completions.create(
+            resp2 = await self.llm_client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": plan_prompt}],
                 temperature=0.2,
-                max_tokens=2048,
+                max_tokens=1024,
             )
-            raw = response.choices[0].message.content or ""
+            raw = (resp2.choices[0].message.content or "").strip()
 
             # Parse JSON (handle markdown code blocks)
             if "```" in raw:
@@ -213,7 +257,6 @@ Respond with ONLY a JSON object like:
                 raw = raw.strip()
 
             data = json.loads(raw)
-
             objectives_data = data if isinstance(data, list) else data.get("objectives", [])
             if not objectives_data:
                 raise ValueError("No objectives returned from planner")
@@ -223,7 +266,13 @@ Respond with ONLY a JSON object like:
                     obj_data = {"id": f"obj{len(self.mission.objectives)+1}", "description": obj_data}
                 if "id" not in obj_data:
                     obj_data["id"] = f"obj{len(self.mission.objectives)+1}"
-                self.mission.objectives.append(Objective(**obj_data))
+                # Build Objective — only pass known fields to avoid pydantic errors
+                self.mission.objectives.append(Objective(
+                    id=obj_data["id"],
+                    description=obj_data.get("description", ""),
+                    success_criteria=obj_data.get("success_criteria"),
+                    max_steps=obj_data.get("max_steps"),
+                ))
 
             self.mission.status = MissionStatus.EXECUTING
             self.mission.add_log(f"Mission planned with {len(self.mission.objectives)} objectives.")

@@ -200,6 +200,16 @@ class AgentOutput(BaseModel):
         default="high",
         description="'high', 'medium', or 'low'."
     )
+    hypotheses: list[str] | None = Field(
+        default=None,
+        description=(
+            "2-3 candidate approaches considered this step, ranked by likelihood of success. "
+            "First item = the approach you chose to execute. "
+            "Example: ['Click Submit button via DOM element [3]', "
+            "'Press Ctrl+Enter keyboard shortcut instead', "
+            "'Fill all required fields first then submit']"
+        )
+    )
     action: list[ActionModel] = Field(
         default_factory=list,
         description="List of actions to execute sequentially."
@@ -287,5 +297,11 @@ class StepHistoryEntry(BaseModel):
 
         if self.url_before != self.url_after:
             lines.append(f"  URL changed: {self.url_before[:50]} → {self.url_after[:50]}")
+
+        # Show hypotheses — chosen approach and alternatives considered
+        if self.agent_output.hypotheses:
+            lines.append(f"  Chosen approach: {self.agent_output.hypotheses[0]}")
+            if len(self.agent_output.hypotheses) > 1:
+                lines.append(f"  Alternatives considered: {'; '.join(self.agent_output.hypotheses[1:])}")
 
         return "\n".join(lines)

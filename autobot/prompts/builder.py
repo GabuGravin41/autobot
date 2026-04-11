@@ -88,6 +88,7 @@ class StepPromptBuilder:
         click_zoom_coords: tuple[int, int] | None = None,  # (x, y) of the click
         affordances: str | None = None,                 # per-step tool availability summary
         evolution_hint: str | None = None,              # dynamic trajectory correction from PromptEvolver
+        remaining_hypotheses: list[str] | None = None,  # alternatives from previous failed step
     ):
         self.browser_state = browser_state
         self.task = task
@@ -101,6 +102,7 @@ class StepPromptBuilder:
         self.click_zoom_coords = click_zoom_coords
         self.affordances = affordances
         self.evolution_hint = evolution_hint
+        self.remaining_hypotheses = remaining_hypotheses or []
 
     def _get_screen_size(self) -> tuple[int, int]:
         """Read screen resolution from the page title set by AgentLoop."""
@@ -204,6 +206,17 @@ class StepPromptBuilder:
         if self.affordances:
             parts.append(f"<affordances>\n{self.affordances}\n</affordances>")
 
+        # 6b. Hypothesis options — alternatives from previous failed step still available
+        if self.remaining_hypotheses:
+            opts = "\n".join(f"  {i+1}. {h}" for i, h in enumerate(self.remaining_hypotheses))
+            parts.append(
+                f"<hypothesis_options>\n"
+                f"The previous step's chosen approach failed. These alternatives were NOT yet tried:\n"
+                f"{opts}\n"
+                f"Consider starting with option 1 unless you have a specific reason to choose differently.\n"
+                f"</hypothesis_options>"
+            )
+
         # 7. Dynamic trajectory correction (high-urgency hint from PromptEvolver)
         if self.evolution_hint:
             parts.append(self.evolution_hint)
@@ -248,7 +261,13 @@ class StepPromptBuilder:
             pages_below = pi.pages_below
             sections.append(f"<page_info>{pages_above:.1f} pages above, {pages_below:.1f} pages below</page_info>")
 
-        # Interactive elements (the DOM tree)
+        # If a DOM snapshot (Chrome DevTools) is available, skip DOMSerializedState to
+        # avoid sending the same element list twice (~600-1000 duplicate tokens per step).
+        # The <dom_snapshot> block in build_text() is the single source of truth.
+        if self.page_snapshot and self.page_snapshot.elements:
+            return "\n".join(sections)
+
+        # Fallback: no CDP snapshot — use Playwright element tree
         serialized = DOMSerializedState(
             element_tree=bs.element_tree,
             selector_map=bs.selector_map,

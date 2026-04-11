@@ -156,6 +156,15 @@ class AgentRunner:
             # 5. Create and run agent loop with dynamic stop condition
             self.status = "running"
             self.current_step = 1
+
+            # Archetype matching — inject proven procedure template for known task types
+            from autobot.agent.archetypes import archetype_library as _arch_lib
+            _archetype = _arch_lib.match(goal)
+            _first_step_context = None
+            if _archetype:
+                _first_step_context = _arch_lib.format_for_prompt(_archetype)
+                self.log(f"📚 Archetype match: '{_archetype['name']}' — procedure guide injected at step 0")
+
             self._agent_loop = AgentLoop(
                 page=page,
                 llm_client=self.llm_client,
@@ -166,6 +175,8 @@ class AgentRunner:
                 use_vision=self.use_vision,
                 stop_condition=estimate.stop_condition,
                 task_id=self.task_id,
+                first_step_context=_first_step_context,
+                scout_steps=int(os.getenv("AUTOBOT_SCOUT_STEPS", "1")),
             )
             self._agent_loop._run_dir = run_dir  # Enable checkpointing
 

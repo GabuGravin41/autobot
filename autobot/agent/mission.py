@@ -22,6 +22,9 @@ class Objective(BaseModel):
     """A high-level objective within a Mission."""
     id: str
     description: str
+    # Planner-set fields (from 2-stage analysis)
+    success_criteria: Optional[str] = None   # "Done when: X is visible / Y is downloaded"
+    max_steps: Optional[int] = None          # Planner's step budget estimate
     status: ObjectiveStatus = ObjectiveStatus.PENDING
     result: Optional[str] = None
     started_at: Optional[datetime] = None

@@ -36,6 +36,8 @@ class EvaluationResult(BaseModel):
     signal: EvalSignal
     reasoning: str
     new_plan: str | None = None          # Filled in when signal == REPLAN
+    failed_because: str | None = None    # Root cause when signal == REPLAN
+    alternatives: list[str] | None = None  # Ranked strategies when signal == REPLAN
     completion_summary: str | None = None  # Filled in when signal == COMPLETE
     alert_message: str | None = None     # Filled in when signal == ESCALATE/PAUSE
 
@@ -145,8 +147,13 @@ class EvaluationAgent:
             return EvaluationResult(
                 signal=EvalSignal.REPLAN,
                 reasoning=f"Agent has failed {consecutive_failures} consecutive times — current approach is not working.",
-                new_plan="Stop the current approach entirely. Reassess from scratch: "
-                         "what is the goal, what tools are available, what have we NOT tried yet?",
+                new_plan="Stop the current approach entirely. Reassess from scratch.",
+                failed_because=f"Same action/goal failed {consecutive_failures} consecutive times without progress.",
+                alternatives=[
+                    "Reassess the goal from scratch — what is the minimal path to completion?",
+                    "Try a completely different tool or URL to reach the same destination",
+                    "Skip this sub-task and continue with the next part of the goal",
+                ],
             )
 
         # If very early in the run with no failures → CONTINUE (agent still exploring)
@@ -167,8 +174,13 @@ class EvaluationAgent:
                 return EvaluationResult(
                     signal=EvalSignal.REPLAN,
                     reasoning=f"Agent has been stuck on the same goal for 5 steps: '{recent_goals[0][:50]}'",
-                    new_plan="The current approach has completely stalled. Choose a fundamentally "
-                             "different strategy — different URL, different tool, or a different sub-task order.",
+                    new_plan="The current approach has completely stalled. Choose a fundamentally different strategy.",
+                    failed_because=f"Repeated the same goal 5 times without progress: '{recent_goals[0][:60]}'",
+                    alternatives=[
+                        "Navigate to a different URL or section of the page",
+                        "Use keyboard shortcuts or a different interaction method",
+                        "Skip this sub-task and continue with the next part of the goal",
+                    ],
                 )
 
         # Check for circuit breaker signal in scratchpad
@@ -258,7 +270,9 @@ Respond with ONLY valid JSON:
 {{
   "signal": "continue" | "replan" | "complete" | "pause" | "escalate",
   "reasoning": "1-3 sentence explanation",
-  "new_plan": "only if signal=replan: describe the new approach in 2-3 sentences",
+  "new_plan": "only if signal=replan: brief new direction in 1-2 sentences",
+  "failed_because": "only if signal=replan: root cause in one sentence — WHY the current approach failed",
+  "alternatives": ["only if signal=replan: most reliable alternative approach", "second option", "last resort fallback"],
   "completion_summary": "only if signal=complete: what was accomplished",
   "alert_message": "only if signal=pause or escalate: what the user needs to know"
 }}"""
@@ -324,10 +338,20 @@ Respond with ONLY valid JSON:
         except ValueError:
             signal = EvalSignal.CONTINUE
 
+        # Extract alternatives — ensure it's a list of strings
+        raw_alts = data.get("alternatives")
+        alternatives: list[str] | None = None
+        if isinstance(raw_alts, list):
+            alternatives = [str(a) for a in raw_alts if a]
+        elif isinstance(raw_alts, str) and raw_alts.strip():
+            alternatives = [raw_alts]
+
         return EvaluationResult(
             signal=signal,
             reasoning=str(data.get("reasoning", "")),
             new_plan=data.get("new_plan"),
+            failed_because=data.get("failed_because"),
+            alternatives=alternatives if alternatives else None,
             completion_summary=data.get("completion_summary"),
             alert_message=data.get("alert_message"),
         )

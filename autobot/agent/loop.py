@@ -94,6 +94,8 @@ class AgentLoop:
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         custom_instructions: str | None = None,
+        first_step_context: str | None = None,  # Injected once at step 0 (full mission context)
+        scout_steps: int | None = None,          # Number of observation-only steps before acting
         stop_condition: StopCondition | None = None,
         task_id: str | None = None,    # For ScreenLock identification
     ):
@@ -107,6 +109,18 @@ class AgentLoop:
         self.max_actions_per_step = max_actions_per_step
         self.use_vision = use_vision
         self.custom_instructions = custom_instructions
+        # first_step_context: full context injected only at step 0 (avoids bloating every step)
+        self.first_step_context = first_step_context
+
+        # Scout phase: observation-only steps before any irreversible action is taken.
+        # Default 1 (one observation step). Set AUTOBOT_SCOUT_STEPS=0 to disable.
+        _scout_env = os.getenv("AUTOBOT_SCOUT_STEPS")
+        if scout_steps is not None:
+            self._scout_steps = scout_steps
+        elif _scout_env is not None:
+            self._scout_steps = int(_scout_env)
+        else:
+            self._scout_steps = 1  # default: one observation step before acting
 
         # Stop condition — governs when the run should halt.
         # Env override: AUTOBOT_MAX_STEPS=0 means perpetual.
@@ -161,6 +175,11 @@ class AgentLoop:
         self._evaluator: EvaluationAgent | None = (
             EvaluationAgent(llm_client=llm_client, model=model) if llm_client else None
         )
+
+        # Structured REPLAN state — ranked alternatives from EvaluationAgent
+        self._replan_alternatives: list[str] = []
+        self._replan_failed_because: str = ""
+        self._replan_alternatives_tried: set[int] = set()
 
         # Checkpointing
         self._checkpoint_interval = int(os.getenv("AUTOBOT_CHECKPOINT_INTERVAL", "5"))
@@ -348,10 +367,27 @@ class AgentLoop:
             self._last_eval_signal = result.signal.value
             logger.info(f"📊 EvaluationAgent: {result.signal.value.upper()} — {result.reasoning}")
 
-            if result.signal == EvalSignal.REPLAN and result.new_plan:
-                # Inject new plan into scratchpad so agent sees it next step
-                self.scratchpad.append(f"[REPLAN] {result.new_plan}")
-                logger.info(f"🔄 New plan injected: {result.new_plan}")
+            if result.signal == EvalSignal.REPLAN:
+                # Store structured alternatives for history display and prompt injection
+                if result.alternatives:
+                    self._replan_alternatives = result.alternatives
+                    self._replan_failed_because = result.failed_because or ""
+                    self._replan_alternatives_tried = set()
+                    alt_text = "\n".join(
+                        f"  [{i+1}] {a}" for i, a in enumerate(result.alternatives)
+                    )
+                    replan_msg = (
+                        f"[REPLAN] Root cause: {result.failed_because or 'Unknown'}\n"
+                        f"Ranked alternatives — work through these in order:\n"
+                        f"{alt_text}\n"
+                        f"Mark each tried in your memory field."
+                    )
+                    self.scratchpad.append(replan_msg)
+                    logger.info(f"🔄 REPLAN with {len(result.alternatives)} alternatives. Root cause: {result.failed_because}")
+                elif result.new_plan:
+                    # Fallback: no structured alternatives, use free-form plan
+                    self.scratchpad.append(f"[REPLAN] {result.new_plan}")
+                    logger.info(f"🔄 New plan injected: {result.new_plan}")
 
             if result.signal in (EvalSignal.PAUSE, EvalSignal.ESCALATE):
                 # Surface to frontend
@@ -458,9 +494,9 @@ class AgentLoop:
                 if self.step_number % self._checkpoint_interval == 0:
                     self._save_checkpoint()
 
-                # Periodic history compression (every 25 steps, when history > 15 entries)
-                _compress_interval = int(os.getenv("AUTOBOT_COMPRESS_INTERVAL", "25"))
-                if self.step_number > 0 and self.step_number % _compress_interval == 0 and len(self.history) > 15:
+                # Periodic history compression (every 15 steps, when history > 10 entries)
+                _compress_interval = int(os.getenv("AUTOBOT_COMPRESS_INTERVAL", "15"))
+                if self.step_number > 0 and self.step_number % _compress_interval == 0 and len(self.history) > 10:
                     await self._compress_history()
 
                 # Periodic EvaluationAgent check
@@ -584,6 +620,9 @@ class AgentLoop:
             _skip_vision = True
 
         _use_vision_this_step = self.use_vision and not _skip_vision
+        # When vision is skipped (non-visual action + unchanged screen), the DOM snapshot is
+        # equally unnecessary — the agent is mid-task (e.g. typing) and doesn't need element lists.
+        _skip_dom_snapshot = _skip_vision
 
         # Use real URL/title from DOM snapshot when available
         page_url = (page_snapshot.url if page_snapshot and page_snapshot.url else self.page.url)
@@ -663,7 +702,7 @@ class AgentLoop:
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
 
         # Recall relevant memories for this goal
-        recalled = self._memory_store.recall(self.goal, top_k=6)
+        recalled = self._memory_store.recall(self.goal, top_k=4)
 
         # Prompt evolution: get trajectory correction hint (if agent is drifting)
         _evolution_hint = None
@@ -693,6 +732,37 @@ class AgentLoop:
         except Exception as _pe_exc:
             logger.debug(f"PromptEvolver error (non-fatal): {_pe_exc}")
 
+        # Scout phase: observation-only steps before any irreversible action is taken.
+        # During scout steps, the agent builds a structured situation report.
+        # This takes priority over other first-step injections.
+        _scout_mode = (self.step_number < self._scout_steps)
+        if _scout_mode:
+            _evolution_hint = (
+                "<scout_mode>\n"
+                "SCOUT STEP — observe and plan. Do NOT click, type, submit, or modify anything.\n"
+                "Only allowed actions: screenshot, wait, navigate (to get to the right starting page).\n\n"
+                "Write a complete situation report in your memory field:\n"
+                "  1. Task type: what category is this? (login / form / search / download / code / other)\n"
+                "  2. Current state: what page or app are you on? What is visible?\n"
+                "  3. Available elements: what interactive elements exist? (summarize DOM snapshot)\n"
+                "  4. Planned approach: step-by-step strategy for the actual task\n"
+                "  5. Risks: what could go wrong and how will you handle it?\n"
+                "</scout_mode>"
+            )
+            logger.info(f"🔍 Scout mode active (step {self.step_number + 1} of {self._scout_steps})")
+        # First-step mission context: inject full context once at step 0 if no evolver hint or scout
+        elif self.step_number == 0 and self.first_step_context and not _evolution_hint:
+            _evolution_hint = f"<mission_context>\n{self.first_step_context}\n</mission_context>"
+
+        # Hypothesis carry-forward: if last step failed and had alternative hypotheses,
+        # surface them to the agent so it knows what to try next
+        _remaining_hypotheses: list[str] | None = None
+        if self.history:
+            _last = self.history[-1]
+            _last_failed = any(not r.success for r in _last.action_results)
+            if _last_failed and _last.agent_output.hypotheses and len(_last.agent_output.hypotheses) > 1:
+                _remaining_hypotheses = _last.agent_output.hypotheses[1:]
+
         # Build the step prompt
         step_builder = StepPromptBuilder(
             browser_state=browser_state,
@@ -701,12 +771,13 @@ class AgentLoop:
             max_steps=self.max_steps,
             agent_history=self._build_history_text(),
             native_ui=native_ui,
-            page_snapshot=page_snapshot,
+            page_snapshot=page_snapshot if not _skip_dom_snapshot else None,
             memories=recalled,
             click_zoom_b64=self._last_click_zoom_b64,
             click_zoom_coords=self._last_click_coords,
             affordances=self._build_affordances(page_snapshot, native_ui),
             evolution_hint=_evolution_hint,
+            remaining_hypotheses=_remaining_hypotheses,
         )
         # Click zoom is consumed once per step — clear after passing to builder
         self._last_click_zoom_b64 = None
@@ -719,6 +790,9 @@ class AgentLoop:
             {"role": "system", "content": self.system_prompt},
             *user_messages,
         ]
+
+        # Token budget guard — progressively strip low-value context if over limit
+        messages = self._enforce_token_budget(messages)
 
         # Estimate prompt size and warn user on first step (cold prompt processing is slow)
         prompt_tokens_est = sum(len(str(m.get("content", ""))) // 4 for m in messages)
@@ -821,6 +895,7 @@ class AgentLoop:
             action_results = await self._execute_actions(
                 agent_output.action,
                 browser_state,
+                scout_mode=_scout_mode,
             )
 
         # Record what action types were taken — used by smart vision skip next step
@@ -940,6 +1015,37 @@ class AgentLoop:
             if not any(_hint_key in s for s in self.scratchpad[-5:]):
                 self.scratchpad.append(f"{_hint_key} {_hint}")
 
+            # Mark current REPLAN alternative as tried after 2 consecutive failures on it
+            if self._replan_alternatives and self._consecutive_failures >= 2:
+                _untried = [
+                    i for i in range(len(self._replan_alternatives))
+                    if i not in self._replan_alternatives_tried
+                ]
+                if _untried:
+                    _current_alt_idx = _untried[0]
+                    if _current_alt_idx not in self._replan_alternatives_tried:
+                        self._replan_alternatives_tried.add(_current_alt_idx)
+                        logger.info(
+                            f"🔄 REPLAN alternative [{_current_alt_idx+1}] marked as tried: "
+                            f"{self._replan_alternatives[_current_alt_idx][:60]}"
+                        )
+                        # Advance to next alternative via scratchpad prompt
+                        _remaining = [
+                            i for i in range(len(self._replan_alternatives))
+                            if i not in self._replan_alternatives_tried
+                        ]
+                        if _remaining:
+                            _next = self._replan_alternatives[_remaining[0]]
+                            self.scratchpad.append(
+                                f"[REPLAN ADVANCE] Alternative [{_current_alt_idx+1}] exhausted. "
+                                f"Move to alternative [{_remaining[0]+1}]: {_next}"
+                            )
+                        else:
+                            self.scratchpad.append(
+                                "[REPLAN EXHAUSTED] All ranked alternatives have been tried. "
+                                "Assess what partial progress exists and call done() with your findings."
+                            )
+
             # Auto-remember failed approaches after 2 consecutive failures
             if self._consecutive_failures == 2:
                 import hashlib as _hl
@@ -1011,8 +1117,8 @@ class AgentLoop:
             if not _is_pure_filler:
                 self.scratchpad.append(f"[Step {self.step_number + 1}] {agent_output.memory}")
                 # Keep scratchpad manageable
-                if len(self.scratchpad) > 20:
-                    self.scratchpad = self.scratchpad[-15:]
+                if len(self.scratchpad) > 15:
+                    self.scratchpad = self.scratchpad[-10:]
 
         # Detect login/auth situations from agent's output
         thinking_lower = agent_output.thinking.lower()
@@ -1431,16 +1537,40 @@ class AgentLoop:
         self,
         actions: list[ActionModel],
         browser_state: BrowserState,
+        scout_mode: bool = False,
     ) -> list[ActionResult]:
         """
         Execute a list of actions sequentially.
 
         Adapted from Browser Use: if an action changes the page
         (navigation, click on link), remaining actions are SKIPPED.
+
+        scout_mode=True: only screenshot, wait, navigate, and done are permitted.
+        All other actions are blocked and returned as failed ActionResults.
         """
+        _SCOUT_ALLOWED = {"screenshot", "wait", "navigate", "done"}
+
         results: list[ActionResult] = []
 
         for i, action in enumerate(actions):
+            # Scout mode action filter — block irreversible actions
+            if scout_mode:
+                action_name = next(
+                    (k for k in action.model_dump(exclude_none=True) if k != "done"),
+                    None
+                )
+                if action.done is None and action_name not in _SCOUT_ALLOWED:
+                    logger.warning(
+                        f"Scout mode: blocked action '{action_name}' — "
+                        "only screenshot/wait/navigate allowed during observation step."
+                    )
+                    results.append(ActionResult(
+                        action_name=action_name or "unknown",
+                        success=False,
+                        error="Blocked: scout mode only allows screenshot, wait, navigate.",
+                    ))
+                    continue
+
             # Check if this is a "done" action — don't actually execute, just record
             if action.done is not None:
                 results.append(ActionResult(
@@ -2123,7 +2253,7 @@ class AgentLoop:
         # Include accumulated scratchpad (persistent context across the run)
         if self.scratchpad:
             lines.append("=== SCRATCHPAD (accumulated findings) ===")
-            for note in self.scratchpad[-15:]:  # Last 15 entries
+            for note in self.scratchpad[-10:]:  # Last 10 entries
                 lines.append(f"  {note}")
             lines.append("=== END SCRATCHPAD ===\n")
 
@@ -2137,8 +2267,25 @@ class AgentLoop:
                 f"this sub-task and move on.\n"
             )
 
+        # Show REPLAN alternatives with tried/untried status
+        if self._replan_alternatives:
+            lines.append("=== REPLAN ALTERNATIVES ===")
+            if self._replan_failed_because:
+                lines.append(f"  Root cause: {self._replan_failed_because}")
+            for i, alt in enumerate(self._replan_alternatives):
+                if i in self._replan_alternatives_tried:
+                    prefix = "~~tried~~"
+                else:
+                    _untried_indices = [
+                        j for j in range(len(self._replan_alternatives))
+                        if j not in self._replan_alternatives_tried
+                    ]
+                    prefix = "→ try next" if (_untried_indices and i == _untried_indices[0]) else "  pending"
+                lines.append(f"  [{i+1}] {prefix}: {alt}")
+            lines.append("=== Work through these in order. Mark each tried in your memory field. ===")
+
         # Show detailed recent steps + compact summary for older ones
-        recent_entries = self.history[-15:]
+        recent_entries = self.history[-10:]
         total = len(recent_entries)
         for idx, entry in enumerate(recent_entries):
             is_recent = idx >= total - 3   # Last 3 steps always get full detail
@@ -2152,6 +2299,12 @@ class AgentLoop:
                     text += f"\n  Memory: {ao.memory[:200]}"
                 if hasattr(ao, 'confidence') and ao.confidence != "high":
                     text += f"\n  Confidence: {ao.confidence}"
+                # Hypothesis tracking: when a step failed, show which hypothesis was tried
+                # and which alternatives are still available for subsequent steps to try
+                if is_failed and ao.hypotheses and len(ao.hypotheses) >= 1:
+                    text += f"\n  [HYPOTHESIS FAILED] Tried: {ao.hypotheses[0]}"
+                    if len(ao.hypotheses) > 1:
+                        text += f"\n  [STILL AVAILABLE] {'; '.join(ao.hypotheses[1:])}"
             else:
                 # Compact summary for older succeeded steps — save tokens
                 results_summary = "; ".join(
@@ -2198,6 +2351,131 @@ class AgentLoop:
                 )
 
         return "\n".join(lines)
+
+    def _enforce_token_budget(self, messages: list[dict]) -> list[dict]:
+        """
+        Progressively strip low-value context if estimated token count exceeds the budget.
+
+        Stripping order (lowest value first):
+          1. Click zoom image (second image_url — nice-to-have verification)
+          2. Compact agent_history to only the last 3 full steps
+          3. Drop <memory> block (recalled facts; key ones are already in scratchpad)
+          4. Drop <affordances> block
+
+        Budget is configurable via AUTOBOT_TOKEN_BUDGET (default: 7000).
+        """
+        import copy
+        import re as _re
+
+        budget = int(os.getenv("AUTOBOT_TOKEN_BUDGET", "7000"))
+
+        def _est(msgs: list[dict]) -> int:
+            total = 0
+            for m in msgs:
+                c = m.get("content", "")
+                if isinstance(c, list):
+                    for part in c:
+                        total += len(str(part)) // 4
+                else:
+                    total += len(str(c)) // 4
+            return total
+
+        if _est(messages) <= budget:
+            return messages
+
+        msgs = copy.deepcopy(messages)
+        logger.warning(
+            f"⚠️ Token budget: ~{_est(msgs)} tokens > {budget} limit at step "
+            f"{self.step_number + 1}. Stripping context to fit."
+        )
+
+        # Strip 1: Remove click zoom image (keep only the first image_url per message)
+        for msg in msgs:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            first_img_seen = False
+            new_parts = []
+            for part in content:
+                if part.get("type") == "image_url":
+                    if not first_img_seen:
+                        first_img_seen = True
+                        new_parts.append(part)
+                    # else: drop click zoom (second+ image)
+                else:
+                    new_parts.append(part)
+            msg["content"] = new_parts
+
+        if _est(msgs) <= budget:
+            logger.info("Token budget: click zoom stripped — within budget.")
+            return msgs
+
+        # Strip 2: Compact agent_history to last 3 full steps only
+        compact_hist = ""
+        if self.history:
+            entries = self.history[-3:]
+            compact_lines = []
+            for entry in entries:
+                compact_lines.append(entry.to_history_text())
+            compact_hist = "\n".join(compact_lines)
+
+        for msg in msgs:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if part.get("type") == "text" and "<agent_history>" in part["text"]:
+                        part["text"] = _re.sub(
+                            r"<agent_history>.*?</agent_history>",
+                            f"<agent_history>\n{compact_hist}\n</agent_history>",
+                            part["text"],
+                            flags=_re.DOTALL,
+                        )
+            elif isinstance(content, str) and "<agent_history>" in content:
+                msg["content"] = _re.sub(
+                    r"<agent_history>.*?</agent_history>",
+                    f"<agent_history>\n{compact_hist}\n</agent_history>",
+                    content,
+                    flags=_re.DOTALL,
+                )
+
+        if _est(msgs) <= budget:
+            logger.info("Token budget: history compacted to 3 steps — within budget.")
+            return msgs
+
+        # Strip 3: Drop <memory> block
+        for msg in msgs:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if part.get("type") == "text" and "<memory>" in part["text"]:
+                        part["text"] = _re.sub(
+                            r"<memory>.*?</memory>", "", part["text"], flags=_re.DOTALL
+                        ).strip()
+            elif isinstance(content, str) and "<memory>" in content:
+                msg["content"] = _re.sub(
+                    r"<memory>.*?</memory>", "", content, flags=_re.DOTALL
+                ).strip()
+
+        if _est(msgs) <= budget:
+            logger.info("Token budget: memory block dropped — within budget.")
+            return msgs
+
+        # Strip 4: Drop <affordances> block
+        for msg in msgs:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if part.get("type") == "text" and "<affordances>" in part["text"]:
+                        part["text"] = _re.sub(
+                            r"<affordances>.*?</affordances>", "", part["text"], flags=_re.DOTALL
+                        ).strip()
+            elif isinstance(content, str) and "<affordances>" in content:
+                msg["content"] = _re.sub(
+                    r"<affordances>.*?</affordances>", "", content, flags=_re.DOTALL
+                ).strip()
+
+        logger.warning(f"Token budget: after all strips, ~{_est(msgs)} tokens remain.")
+        return msgs
 
     async def _compress_history(self) -> None:
         """
