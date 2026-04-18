@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import shutil
+import socket
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -30,64 +34,176 @@ _CHROME_BINARIES = [
     "/usr/bin/chromium-browser",
 ]
 
-
-def _chrome_is_running() -> bool:
-    """Return True if a Chrome/Chromium process is already running."""
-    for name in ("chrome", "chromium", "Google Chrome"):
-        try:
-            r = subprocess.run(
-                ["pgrep", "-fi", name],
-                capture_output=True, timeout=2,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                return True
-        except Exception:
-            pass
-    return False
+_CDP_PORT = 9222
 
 
-def _launch_chrome() -> None:
+def _cdp_port_open(host: str = "127.0.0.1", port: int = _CDP_PORT, timeout: float = 0.5) -> bool:
+    """Return True if Chrome's remote-debugging port is actually reachable.
+
+    This is the ONLY reliable check — the presence of a chrome process means
+    nothing if the user launched Chrome without --remote-debugging-port.
     """
-    Launch Chrome with the user's default profile and remote-debugging port.
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ConnectionRefusedError):
+        return False
 
-    Remote-debugging on 9222 is needed for CDP DOM snapshots.
-    The user's real profile is used so all logins/cookies are available.
-    If Chrome is already running, this is a no-op.
-    """
-    if _chrome_is_running():
-        return
 
-    logger.info("Chrome not detected — launching with user profile...")
-
-    # Find available Chrome binary
-    chrome_bin = None
+def _find_chrome_binary() -> str | None:
+    """Return the path to a Chrome/Chromium binary, or None if not found."""
+    explicit = os.getenv("AUTOBOT_CHROME_EXECUTABLE")
+    if explicit and Path(explicit).exists():
+        return explicit
     for binary in _CHROME_BINARIES:
         try:
             r = subprocess.run(["which", binary], capture_output=True, timeout=2)
             if r.returncode == 0:
-                chrome_bin = binary
-                break
+                return r.stdout.decode().strip() or binary
         except Exception:
             pass
+    return None
 
-    if not chrome_bin:
+
+def _bootstrap_debug_profile(
+    source_user_data_dir: Path,
+    source_profile: str,
+    debug_user_data_dir: Path,
+    debug_profile: str,
+) -> bool:
+    """Create a standalone Chrome user-data-dir that copies one profile.
+
+    Chrome 136+ refuses --remote-debugging-port on the real profile, so we
+    build a dedicated dir containing only the profile we want to drive.
+    Returns True if the debug profile is usable after this call.
+    """
+    debug_user_data_dir = debug_user_data_dir.expanduser()
+    target_profile = debug_user_data_dir / debug_profile
+    if target_profile.exists():
+        return True  # already bootstrapped
+
+    source_user_data_dir = source_user_data_dir.expanduser()
+    src_profile = source_user_data_dir / source_profile
+    if not src_profile.exists():
         logger.warning(
-            "Chrome not found. Please install Google Chrome and make sure it's on PATH. "
-            "Continuing anyway — the agent will control whatever browser is on screen."
+            f"Cannot bootstrap debug profile: source profile '{src_profile}' does not exist. "
+            f"Chrome will launch with a fresh profile (you will need to log in)."
+        )
+        debug_user_data_dir.mkdir(parents=True, exist_ok=True)
+        return False
+
+    logger.info(
+        f"Bootstrapping Chrome debug profile: copying '{src_profile}' → '{target_profile}' "
+        f"(one-time copy, ~1-2 min depending on profile size)..."
+    )
+    debug_user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy the profile folder itself
+    try:
+        shutil.copytree(src_profile, target_profile, symlinks=False, ignore_dangling_symlinks=True)
+    except Exception as e:
+        logger.error(f"Profile copy failed: {e}")
+        return False
+
+    # Copy the small top-level files Chrome expects (Local State, First Run)
+    for fname in ("Local State", "First Run"):
+        src_file = source_user_data_dir / fname
+        if src_file.exists() and src_file.is_file():
+            try:
+                shutil.copy2(src_file, debug_user_data_dir / fname)
+            except Exception as e:
+                logger.debug(f"Skipped copying '{fname}': {e}")
+
+    logger.info(f"✅ Debug profile ready at {debug_user_data_dir}")
+    return True
+
+
+def _launch_chrome() -> None:
+    """Ensure a Chrome instance with remote-debugging is running.
+
+    Behaviour:
+      - If port 9222 already accepts connections → do nothing
+      - Else, launch Chrome with --remote-debugging-port=9222 using a
+        dedicated user-data-dir (Chrome 136+ forbids the default profile).
+      - The profile to drive is taken from AUTOBOT_CHROME_SOURCE_PROFILE_DIR
+        (copied once into AUTOBOT_CHROME_USER_DATA_DIR on first run).
+
+    Relevant env vars (see .env):
+      AUTOBOT_CHROME_USER_DATA_DIR        target debug dir (default: ~/.config/chrome-debug-profile)
+      AUTOBOT_CHROME_PROFILE_DIR          profile name inside debug dir (default: Default)
+      AUTOBOT_CHROME_SOURCE_USER_DATA_DIR source real Chrome dir (default: ~/.config/google-chrome)
+      AUTOBOT_CHROME_SOURCE_PROFILE_DIR   source profile to clone (default: same as target)
+      AUTOBOT_CHROME_EXECUTABLE           path to Chrome binary
+      AUTOBOT_CHROME_LAUNCH_TIMEOUT_MS    how long to wait for CDP port (default: 15000)
+    """
+    if _cdp_port_open():
+        logger.info(f"✅ Chrome CDP already live on port {_CDP_PORT} — reusing.")
+        return
+
+    # Detect any existing Chrome without debug port so we can warn the user.
+    # We do NOT kill it — that would trash their session — but we must warn
+    # because Chrome on Linux typically only allows one instance per profile.
+    try:
+        pg = subprocess.run(["pgrep", "-fi", "chrome"], capture_output=True, timeout=2)
+        if pg.returncode == 0 and pg.stdout.strip():
+            logger.warning(
+                "Chrome is running but WITHOUT remote-debugging. Autobot will launch a "
+                "separate Chrome instance using its own user-data-dir. Your original "
+                "Chrome windows stay untouched."
+            )
+    except Exception:
+        pass
+
+    chrome_bin = _find_chrome_binary()
+    if not chrome_bin:
+        logger.error(
+            "Chrome not found on PATH. Install google-chrome-stable or set "
+            "AUTOBOT_CHROME_EXECUTABLE in .env."
         )
         return
 
+    # Resolve profile config
+    home = Path.home()
+    debug_dir = Path(
+        os.getenv("AUTOBOT_CHROME_USER_DATA_DIR") or (home / ".config/chrome-debug-profile")
+    ).expanduser()
+    debug_profile = os.getenv("AUTOBOT_CHROME_PROFILE_DIR") or "Default"
+    src_dir = Path(
+        os.getenv("AUTOBOT_CHROME_SOURCE_USER_DATA_DIR") or (home / ".config/google-chrome")
+    ).expanduser()
+    src_profile = os.getenv("AUTOBOT_CHROME_SOURCE_PROFILE_DIR") or debug_profile
+
+    _bootstrap_debug_profile(src_dir, src_profile, debug_dir, debug_profile)
+
+    cmd = [
+        chrome_bin,
+        f"--remote-debugging-port={_CDP_PORT}",
+        f"--user-data-dir={debug_dir}",
+        f"--profile-directory={debug_profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        "about:blank",
+    ]
+    logger.info(f"Launching Chrome: {' '.join(cmd)}")
     try:
-        subprocess.Popen([
-            chrome_bin,
-            "--new-window",
-            "--remote-debugging-port=9222",
-            "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2.5)  # give Chrome time to open
-        logger.info(f"✅ Chrome launched ({chrome_bin})")
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        logger.warning(f"Chrome launch failed: {e} — continuing anyway")
+        logger.error(f"Chrome launch failed: {e}")
+        return
+
+    # Wait for the CDP port to come up
+    timeout_ms = int(os.getenv("AUTOBOT_CHROME_LAUNCH_TIMEOUT_MS", "15000"))
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        if _cdp_port_open():
+            logger.info(f"✅ Chrome CDP ready on port {_CDP_PORT} (profile='{debug_profile}')")
+            return
+        time.sleep(0.3)
+    logger.warning(
+        f"Chrome launched but CDP port {_CDP_PORT} did not open within {timeout_ms}ms. "
+        "The agent will rely on screenshots only."
+    )
 
 
 def _query_cdp_url() -> str | None:
@@ -297,6 +413,55 @@ class HumanModeEmulator:
         self._url = url
         await asyncio.sleep(3.0)
 
+        # Wait for the page to actually render. Modern SPAs (Grok, ChatGPT,
+        # Overleaf) show a blank skeleton for 2-8s after the HTML finishes
+        # loading. We check via CDP when available; otherwise we just wait
+        # a fixed fallback period so the caller doesn't observe a blank page.
+        _MIN_SPA_WAIT = 4.0   # always wait at least this long after navigation
+        _MAX_SPA_WAIT = 8.0   # upper bound if CDP keeps saying "not ready"
+        _CHECK_JS = (
+            "JSON.stringify({"
+            "  ready: document.readyState,"
+            "  len: (document.body ? document.body.innerText.length : 0)"
+            "})"
+        )
+        _cdp_ok = False
+        _start = asyncio.get_event_loop().time()
+        try:
+            from autobot.dom.page_snapshot import _get_active_tab_ws_url, CDPClient
+            for _i in range(int(_MAX_SPA_WAIT)):
+                await asyncio.sleep(1.0)
+                elapsed = asyncio.get_event_loop().time() - _start
+                try:
+                    ws = await asyncio.wait_for(_get_active_tab_ws_url(url_hint=url), timeout=1.0)
+                    if not ws:
+                        continue  # CDP not available yet — keep waiting, do not bail
+                    _cdp_ok = True
+                    cdp = CDPClient(ws)
+                    await asyncio.wait_for(cdp.connect(), timeout=2.0)
+                    try:
+                        res = await asyncio.wait_for(
+                            cdp.call("Runtime.evaluate", {"expression": _CHECK_JS, "returnByValue": True}),
+                            timeout=3.0,
+                        )
+                    finally:
+                        await cdp.close()
+                    import json as _json
+                    data = _json.loads(res.get("result", {}).get("value", "{}"))
+                    if (
+                        data.get("ready") == "complete"
+                        and data.get("len", 0) > 200
+                        and elapsed >= _MIN_SPA_WAIT
+                    ):
+                        logger.info(f"Page ready after {3 + _i + 1}s ({data['len']} chars): {url}")
+                        break
+                except Exception:
+                    pass
+        except Exception as _e:
+            logger.debug(f"SPA readiness check setup failed (non-fatal): {_e}")
+        if not _cdp_ok:
+            logger.debug(f"CDP not reachable — used fixed {_MAX_SPA_WAIT}s wait after navigation to {url}")
+
     async def go_back(self, **kwargs) -> None:
         await self._context_obj.switch_to(self)
         import pyautogui
@@ -320,19 +485,23 @@ class HumanModeEmulator:
 
     # ── Observation ─────────────────────────────────────────────────────────
 
-    async def screenshot(self, **kwargs) -> bytes:
-        """Capture the full screen without changing focus.
+    async def screenshot(self, focus: bool = True, **kwargs) -> bytes:
+        """Capture the screen. Focuses Chrome by default so the agent actually sees it.
 
-        Intentionally does NOT call switch_to()/focus_chrome() — pyautogui
-        captures whatever is currently on screen, which is exactly what the
-        agent needs for desktop/terminal tasks and background monitoring.
-        Chrome is already in focus when it matters because navigate/click/goto
-        all call switch_to() before sending keyboard/mouse events.
+        focus=True (default): bring Chrome to front before capture. Use this for
+            any browser-context observation. Without this, another window (IDE,
+            terminal) may cover Chrome and the agent sees the wrong thing.
+        focus=False: capture whatever is on screen right now. Use for monitoring
+            desktop apps, terminals, or verifying window-switch results.
         """
         import pyautogui
         from io import BytesIO
 
-        await asyncio.sleep(0.2)
+        if focus:
+            await asyncio.to_thread(_focus_chrome)
+            await asyncio.sleep(0.35)  # window manager needs a moment to repaint
+        else:
+            await asyncio.sleep(0.2)
         img = pyautogui.screenshot()
         buf = BytesIO()
         img.save(buf, format="PNG")

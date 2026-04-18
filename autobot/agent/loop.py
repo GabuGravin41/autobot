@@ -549,10 +549,19 @@ class AgentLoop:
         import base64
         from autobot.dom.page_snapshot import get_page_snapshot
 
-        # Run screenshot + DOM snapshot in parallel to save time
+        # Current URL hint helps CDP find the right tab in multi-tab Chrome sessions.
+        _url_hint = self.page.url if self.page else None
+
+        # Focus Chrome before screenshot IF the agent is currently driving the browser.
+        # For desktop-app tasks (terminal, VS Code) the window_hint is different and
+        # we do NOT want to steal focus away from whatever the agent is operating.
+        _focus_browser = "chrome" in (self._window_hint or "").lower()
+
+        # Run screenshot + DOM snapshot in parallel to save time.
+        # DOM snapshot (CDP) is cheap and precise; screenshot provides visual context.
         screenshot_bytes, page_snapshot = await asyncio.gather(
-            self.page.screenshot(),
-            get_page_snapshot(),
+            self.page.screenshot(focus=_focus_browser),
+            get_page_snapshot(url_hint=_url_hint),
             return_exceptions=True,
         )
 
@@ -563,6 +572,47 @@ class AgentLoop:
         if isinstance(page_snapshot, Exception):
             logger.debug(f"Page snapshot failed: {page_snapshot}")
             page_snapshot = None
+
+        # ── Content-readiness retry ────────────────────────────────────────────
+        # If the page has no DOM content (SPA still rendering, page loading),
+        # wait and retry up to 3 times before giving up.  This prevents the
+        # agent from planning based on a blank observation.
+        _snapshot_empty = (
+            page_snapshot is None
+            or (not page_snapshot.text.strip() and not page_snapshot.elements)
+        )
+        if _snapshot_empty:
+            for _wait_attempt in range(3):
+                _wait_s = 2.0 + _wait_attempt * 1.0  # 2s, 3s, 4s
+                logger.info(
+                    f"Page appears empty — waiting {_wait_s:.0f}s for content to render "
+                    f"(attempt {_wait_attempt + 1}/3)..."
+                )
+                await asyncio.sleep(_wait_s)
+                page_snapshot = await get_page_snapshot(url_hint=_url_hint)
+                if page_snapshot and (page_snapshot.text.strip() or page_snapshot.elements):
+                    logger.info(
+                        f"Page content loaded after {_wait_s:.0f}s wait — "
+                        f"{page_snapshot.num_interactive} elements, {len(page_snapshot.text)} chars"
+                    )
+                    # Re-take screenshot now that page has content
+                    try:
+                        screenshot_bytes = await self.page.screenshot(focus=_focus_browser)
+                    except Exception:
+                        pass
+                    break
+            else:
+                logger.warning(
+                    "Page still empty after 3 retries — proceeding with blank observation. "
+                    "The page may need authentication, be behind a paywall, or be very slow."
+                )
+                # Tell the agent what to do when it can't see the page.
+                self.scratchpad.append(
+                    "[PAGE BLANK] The page has no readable content after waiting. "
+                    "Try: (1) computer.keyboard.press('F5') to reload and wait, "
+                    "(2) take a screenshot with action screenshot to inspect visually, "
+                    "(3) check if a login/cookie-consent dialog is blocking the page."
+                )
 
         if page_snapshot:
             logger.debug(
@@ -616,20 +666,24 @@ class AgentLoop:
         # If AUTOBOT_LOCAL_NO_VISION=1, disable vision entirely and rely on DOM snapshots.
         # DOM snapshots are actually MORE precise for clicking (exact coordinates vs guessing).
         _local_no_vision = os.getenv("AUTOBOT_LOCAL_NO_VISION", "0") == "1"
+        # Track whether vision was skipped only due to non-visual action (not due to LOCAL_NO_VISION).
+        # DOM snapshot must NOT be skipped when LOCAL_NO_VISION=1 — DOM is the agent's only
+        # source of page state on CPU (no screenshot). Skipping it leaves the agent blind on SPAs.
+        _skip_vision_nonvisual = _skip_vision  # True only if non-visual action + unchanged screen
         if _local_no_vision:
             _skip_vision = True
 
         _use_vision_this_step = self.use_vision and not _skip_vision
-        # When vision is skipped (non-visual action + unchanged screen), the DOM snapshot is
-        # equally unnecessary — the agent is mid-task (e.g. typing) and doesn't need element lists.
-        _skip_dom_snapshot = _skip_vision
+        # Skip DOM only for non-visual mid-task actions (typing, clipboard) where the page hasn't
+        # changed. NEVER skip DOM due to LOCAL_NO_VISION — it's the agent's only eyes on CPU.
+        _skip_dom_snapshot = _skip_vision_nonvisual
 
         # Use real URL/title from DOM snapshot when available
         page_url = (page_snapshot.url if page_snapshot and page_snapshot.url else self.page.url)
         page_title = (
             page_snapshot.title
             if page_snapshot and page_snapshot.title
-            else f"Human Mode | Screen: {screen_w}×{screen_h}"
+            else f"(title unavailable — CDP snapshot failed for {page_url})"
         )
 
         # Build tab list from open HumanMode pages (tab_index = Chrome tab number)

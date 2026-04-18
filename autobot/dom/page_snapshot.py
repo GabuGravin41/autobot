@@ -194,16 +194,39 @@ class CDPClient:
         return {}
 
 
-async def _get_active_tab_ws_url() -> str | None:
-    """Find the WebSocket URL for the active/focused Chrome tab."""
+async def _get_active_tab_ws_url(url_hint: str | None = None) -> str | None:
+    """Find the WebSocket URL for the active/focused Chrome tab.
+
+    If url_hint is provided, prefer the tab whose URL matches it.
+    This is critical in multi-tab scenarios where the first CDP tab
+    may not be the one the agent just navigated to.
+    """
     try:
-        url = f"http://{_CDP_HOST}:{_CDP_PORT}/json"
-        req = urllib.request.urlopen(url, timeout=1)
+        req = urllib.request.urlopen(f"http://{_CDP_HOST}:{_CDP_PORT}/json", timeout=1)
         tabs = json.loads(req.read())
-        # Prefer the first 'page' type tab (active tab is usually first)
-        for tab in tabs:
-            if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
-                return tab["webSocketDebuggerUrl"]
+        page_tabs = [t for t in tabs if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+        if not page_tabs:
+            return None
+
+        if url_hint and url_hint not in ("about:blank", ""):
+            hint_stripped = url_hint.rstrip("/")
+            # Exact or prefix match first
+            for tab in page_tabs:
+                tab_url = tab.get("url", "").rstrip("/")
+                if tab_url == hint_stripped or tab_url.startswith(hint_stripped):
+                    return tab["webSocketDebuggerUrl"]
+            # Hostname match fallback
+            try:
+                from urllib.parse import urlparse
+                hint_host = urlparse(url_hint).netloc
+                for tab in page_tabs:
+                    if hint_host and hint_host in tab.get("url", ""):
+                        return tab["webSocketDebuggerUrl"]
+            except Exception:
+                pass
+
+        # Default: first page tab
+        return page_tabs[0]["webSocketDebuggerUrl"]
     except Exception:
         pass
     return None
@@ -232,18 +255,21 @@ def _get_current_url_sync() -> str | None:
     return None
 
 
-async def get_page_snapshot(timeout: float = 4.0) -> PageSnapshot | None:
+async def get_page_snapshot(timeout: float = 4.0, url_hint: str | None = None) -> PageSnapshot | None:
     """
     Extract a structured snapshot of the current browser page via CDP.
 
     Returns None if Chrome DevTools is unavailable or the call times out.
     Never raises — always safe to call and ignore the result.
     Retries up to 2 times with short backoff for transient connection failures.
+
+    url_hint: the URL the agent expects to be on. Used to pick the correct
+    tab in multi-tab Chrome sessions instead of blindly using the first tab.
     """
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(), timeout=1.0)
+            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(url_hint=url_hint), timeout=1.0)
             if not ws_url:
                 return None  # Chrome not running — no point retrying
 
