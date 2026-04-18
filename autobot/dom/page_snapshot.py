@@ -34,7 +34,9 @@ _JS_EXTRACT = """
     const MAX_ELEMENTS = 80;
 
     // ── 1. Interactive elements ──────────────────────────────────────────────
-    const INTERACTIVE = 'a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"]';
+    // contenteditable="true" covers rich-text editors like Grok, ChatGPT, Overleaf
+    // which do NOT use <textarea> — their .value is always empty.
+    const INTERACTIVE = 'a[href], button, input:not([type="hidden"]), select, textarea, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"]';
     const elements = [];
     let idx = 1;
 
@@ -44,7 +46,18 @@ _JS_EXTRACT = """
 
         const tag = el.tagName.toLowerCase();
         const type = el.getAttribute('type') || '';
-        const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().slice(0, 80);
+        const isContentEditable = el.getAttribute('contenteditable') === 'true';
+        const isInput = (tag === 'input' || tag === 'textarea') && !isContentEditable;
+        // For inputs/textareas: read .value. For contenteditable rich-text editors
+        // (Grok, ChatGPT, Overleaf, etc.): read innerText — .value is always ''.
+        // We MUST report the actual length or the agent will re-type content already there.
+        const rawValue = isInput
+            ? (el.value || '')
+            : (isContentEditable ? (el.innerText || el.textContent || '') : '');
+        const valueLen = rawValue.length;
+        const rawText = (el.innerText || rawValue || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+        const text = rawText.slice(0, 80);
+        const textTruncated = rawText.length > 80;
         const href = el.getAttribute('href') || '';
         const name = el.getAttribute('name') || el.getAttribute('id') || '';
 
@@ -55,19 +68,30 @@ _JS_EXTRACT = """
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') flags.push('DISABLED');
         if (el.required || el.getAttribute('aria-required') === 'true') flags.push('required');
         if (el.readOnly) flags.push('readonly');
-        if ((tag === 'input' || tag === 'textarea') && el.value && el.value.trim()) flags.push('has-value');
+        if ((isInput || isContentEditable) && rawValue.trim()) flags.push(`filled:${valueLen}ch`);
+        if (isContentEditable) flags.push('richtext');
         if (el.getAttribute('aria-expanded') === 'true') flags.push('expanded');
         if (el.getAttribute('aria-checked') === 'true') flags.push('checked');
         if (el.getAttribute('aria-busy') === 'true') flags.push('loading');
-        const placeholder = el.placeholder || '';
+        const placeholder = el.placeholder || el.getAttribute('data-placeholder') || '';
+
+        // Screen coordinates — agent uses these directly for mouse.click(x, y)
+        const r = el.getBoundingClientRect();
+        const cx = Math.round(r.left + r.width / 2);
+        const cy = Math.round(r.top + r.height / 2 + window.scrollY);
 
         let desc = `[${idx}] <${tag}`;
         if (type) desc += ` type="${type}"`;
         if (name) desc += ` name="${name}"`;
         if (placeholder && !text.includes(placeholder)) desc += ` placeholder="${placeholder.slice(0, 40)}"`;
         desc += `>`;
+        // Append click coordinates so agent never has to guess
+        desc += ` @(${cx},${cy})`;
         if (flags.length) desc += ` [${flags.join(', ')}]`;
-        if (text) desc += ` ${text}`;
+        if (text) {
+            desc += ` ${text}`;
+            if (textTruncated) desc += `…(truncated from ${rawText.length}ch)`;
+        }
         if (href && href !== '#' && !href.startsWith('javascript')) desc += ` → ${href.slice(0, 60)}`;
 
         elements.push(desc);

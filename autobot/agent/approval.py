@@ -43,33 +43,30 @@ class RiskTier(str, Enum):
 # ── Keyword sets for risk classification ──────────────────────────────────────
 
 _DANGER_PATTERNS = [
-    # File deletion
-    r"\brm\b", r"\brmdir\b", r"shutil\.rmtree", r"os\.remove", r"os\.unlink",
-    r"\.delete\(", r"\.remove\(",
+    # File deletion (shell commands only — not Python method calls in typed text)
+    r"\brm\s+-\w*r\w*\b", r"\brmdir\b", r"shutil\.rmtree", r"os\.remove", r"os\.unlink",
     # Shell execution that can be destructive
     r"subprocess", r"os\.system", r"shell=True",
     # Payment / purchase
-    r"\bpurchase\b", r"\bpay\b", r"\bcheckout\b", r"\bbuy now\b",
-    r"credit.?card", r"payment", r"stripe", r"paypal",
+    r"\bpurchase\b", r"\bcheckout\b", r"\bbuy now\b",
+    r"credit.?card", r"stripe", r"paypal",
     # Database destruction
     r"\bdrop\b.*\btable\b", r"\btruncate\b", r"\bdelete from\b",
-    # Disk-level
-    r"\bformat\b", r"\bmkfs\b", r"\bdd\b.*\bof=\b",
+    # Disk-level (specific — not "format" alone which matches "LaTeX format", "file format", etc.)
+    r"\bmkfs\b", r"\bdd\b.*\bof=\b",
     # Account-level
-    r"delete.?account", r"close.?account", r"deactivate",
+    r"delete.?account", r"close.?account",
 ]
 
 _CAUTION_PATTERNS = [
-    # Sending messages
+    # Sending messages / emails
     r"\bsend\b", r"\bsubmit\b", r"\.send\(", r"\.submit\(",
     r"\bemail\b", r"\bslack\b", r"\bwhatsapp\b", r"\btelegram\b",
-    r"\btweet\b", r"\bpost\b",
+    r"\btweet\b",
     # File write (to home/docs but not temp)
     r"open\(.*['\"]w['\"]", r"\.write\(",
     # Git push / publish
     r"\bgit push\b", r"\bgit commit\b", r"\bnpm publish\b",
-    # Form submission keywords in UI
-    r"confirm", r"agree", r"accept", r"approve",
 ]
 
 _DANGER_RE = re.compile("|".join(_DANGER_PATTERNS), re.IGNORECASE)
@@ -77,10 +74,23 @@ _CAUTION_RE = re.compile("|".join(_CAUTION_PATTERNS), re.IGNORECASE)
 
 
 def _action_text(action: "ActionModel") -> str:
-    """Extract the human-readable text of an action for risk classification."""
+    """Extract the human-readable text of an action for risk classification.
+
+    For keyboard.type() and clipboard.set() calls, we strip out the typed
+    content before classification — the danger patterns should evaluate what
+    the agent is *doing*, not the arbitrary text it was asked to type.
+    For terminal.run() and other shell-level calls, the full text is kept.
+    """
     parts: list[str] = []
     if action.computer_call:
-        parts.append(action.computer_call.call)
+        call = action.computer_call.call
+        # Strip content of typing/clipboard actions — content is user-directed text,
+        # not an agent action, so scanning it for "format", "rm", etc. causes false positives.
+        if re.match(r"computer\.(keyboard\.type|clipboard\.set)\(", call):
+            # Keep only the method name for classification
+            parts.append(call.split("(")[0])
+        else:
+            parts.append(call)
     if action.navigate:
         parts.append(f"navigate to {action.navigate.url}")
     if action.input_text:

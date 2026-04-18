@@ -25,6 +25,7 @@ from autobot.computer.mouse import Mouse
 from autobot.computer.keyboard import Keyboard
 from autobot.computer.display import Display
 from autobot.computer.clipboard import Clipboard
+from autobot.computer.browser import Browser
 from autobot.computer.files import Files
 from autobot.computer.terminal import Terminal
 from autobot.computer.kaggle_tool import Kaggle
@@ -55,6 +56,7 @@ class Computer:
         self.keyboard = Keyboard()
         self.display = Display()
         self.clipboard = Clipboard()
+        self.browser = Browser()
         self.files = Files()
         self.terminal = Terminal()
         self.kaggle = Kaggle()
@@ -71,6 +73,7 @@ class Computer:
             self.keyboard,
             self.display,
             self.clipboard,
+            self.browser,
             self.files,
             self.terminal,
             self.vault,

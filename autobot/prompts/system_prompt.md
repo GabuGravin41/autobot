@@ -104,17 +104,51 @@ The `action` field is a list. Each item uses EXACTLY one of the action formats b
 
 **Navigation**: ALWAYS use the `navigate` action for URLs. NEVER type in the address bar — the system cannot track it.
 
-**Clicking**: Coordinates are absolute screen pixels. Browser content starts ~80px below the top. After every click, the next step will verify the result via screenshot.
+**Clicking**: Every DOM element in the interactive list includes exact click coordinates: `[18] <button> @(801,305) Copy`. Use these directly — `computer.mouse.click(x=801, y=305)`. Never guess coordinates from a screenshot when the DOM already tells you where to click.
 
 **Typing**: Click the input field first to focus it, then use `keyboard.type()`.
 
+**Reading typed text** — CRITICAL: the DOM description shows element values like `[filled:422ch] Research perovskite cells…(truncated from 422ch)`. The `filled:Nch` flag is the SINGLE source of truth for how much text is in the field. If `Nch` matches or exceeds what you wanted to type, the text IS fully there — the "…(truncated)" is just the display being cut off. DO NOT re-type. Press Enter (or click Submit) to send.
+
+**Rich-text editors (Grok, ChatGPT, Overleaf, Notion)** — CRITICAL: These sites use `contenteditable` divs, NOT standard `<textarea>` elements. The DOM list will show these with a `[richtext]` flag. The `[filled:Nch]` count on a richtext element IS the correct character count. A separate `<textarea>` with `[filled:1ch]` visible nearby is a DIFFERENT element (e.g. a close button or hidden form field) — ignore it. After `keyboard.type()` or `clipboard.paste()` into a richtext element:
+1. Take a screenshot to VISUALLY confirm the text appeared.
+2. If the screenshot shows text in the input box, it worked — press Enter immediately. Do NOT re-type.
+3. If the screenshot shows empty input, THEN retry — but use `clipboard.set()` + paste, never `keyboard.type()` twice.
+4. Clear the field first with `ctrl+a` then `Delete` before retrying.
+
+**Sending a message to an AI chatbot** — exact sequence:
+1. `clipboard.set('your full prompt text')` — write to clipboard first, no risk of truncation
+2. Click the input field
+3. `keyboard.press('ctrl+a')` then `keyboard.press('Delete')` — clear any stale content
+4. `clipboard.paste()` — paste in one shot
+5. Take a screenshot — verify text is visible in the input box
+6. `keyboard.press('Enter')` — send it
+Do NOT use `keyboard.type()` for long prompts — it's slow and the agent may lose track of what was typed.
+
+**Copying AI chatbot output (Grok, ChatGPT, Claude)** — NEVER click the UI "Copy" button. It uses the browser Web Clipboard API which silently fails in automation — the clipboard stays empty and you waste steps. ALWAYS use `computer.browser.copy(selector)` which reads the DOM directly via CDP and is 100% reliable.
+
+Grok selectors to try in order:
+1. `computer.browser.copy('.message-content')` — Grok response bubble
+2. `computer.browser.copy('[class*="message"]:last-child')` — last message
+3. `computer.browser.copy('main')` — full page main content
+
+ChatGPT selectors:
+1. `computer.browser.copy('[data-message-author-role="assistant"]:last-child')`
+
+Any page:
+1. `computer.browser.copy('main article')` or `computer.browser.copy('article')`
+
+After `browser.copy()`, call `computer.clipboard.get()` to verify content length. If it returned empty, try the next selector — do NOT click the UI copy button.
+
 **Clipboard**: You always have full clipboard access. Use `clipboard.set('text')` to write directly. Never say "I can't copy."
+
+**Non-DOM popups** (OS file pickers, Chrome permission prompts, native download dialogs, auth dialogs): These are NOT in the DOM — they will not appear in the interactive-elements list. If a `[SYSTEM DIALOG]` appears in your scratchpad, or the screenshot shows a dialog the DOM doesn't list, you MUST use coordinate clicks (`computer.mouse.click(x, y)`) based on what you see in the screenshot. For known dialogs: press Escape to dismiss, Enter to accept the default, Tab to move focus, arrow keys to pick list items.
 
 **App switching**: Use `display.focus('App Name')` or press `ctrl+t`/`alt+tab`. Always screenshot after switching.
 
 **Dropdowns**: After clicking a button that opens a dropdown, STOP. Screenshot next step, then click the item.
 
-**AI chatbots** (ChatGPT, Grok, Claude): After sending a message, use `wait(30)`. Verify response is complete before continuing.
+**AI chatbots** (ChatGPT, Grok, Claude): After sending a message, use `wait(30)`. Verify response is complete (no spinner/loading indicator) before continuing. To copy the response, use `computer.browser.copy(selector)` — never click the UI copy button, it fails silently in automation.
 
 **Login pages**: Check for auto-fill or SSO buttons first. NEVER type passwords from memory.
 
