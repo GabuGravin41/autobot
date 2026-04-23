@@ -58,10 +58,12 @@ _agent_runner: AgentRunner | None = None
 _agent_status: str = "idle"  # idle | running | done | failed | cancelled
 _active_run_id: str | None = None
 _run_log: list[str] = []          # timestamped lines, cleared per run
-_ws_clients: set[WebSocket] = set()
+_ws_clients: set[WebSocket] = set()       # /ws/logs clients (log text stream)
+_ws_event_clients: set[WebSocket] = set() # /ws/events clients (JSON state sync)
 _event_loop: asyncio.AbstractEventLoop | None = None
 _agent_lock = threading.Lock()
 _log_seq: int = 0                 # monotonic counter for dedup by frontend
+_screenshot_ts: int = 0           # timestamp of last screenshot save
 
 
 # ── Logging + WebSocket broadcast ────────────────────────────────────────────
@@ -69,15 +71,18 @@ _log_seq: int = 0                 # monotonic counter for dedup by frontend
 def _log(msg: str) -> None:
     global _log_seq
     ts = datetime.now().strftime("%H:%M:%S")
-    # Prefix with a unique sequence number so the frontend can deduplicate
-    # when multiple WebSocket connections are open (e.g. React StrictMode).
     _log_seq += 1
     line = f"[{ts}] {msg}"
     _run_log.append(line)
-    # Send seq|line so clients can drop duplicates by tracking the highest seq seen
     payload = f"{_log_seq}|{line}"
     if _event_loop and not _event_loop.is_closed():
+        # Broadcast to log-text clients
         asyncio.run_coroutine_threadsafe(_broadcast(payload), _event_loop)
+        # Also push a log event to event-stream clients (so they only need one WS connection)
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_event({"type": "log", "seq": _log_seq, "line": line}),
+            _event_loop,
+        )
 
 
 async def _broadcast(msg: str) -> None:
@@ -89,6 +94,50 @@ async def _broadcast(msg: str) -> None:
             dead.append(ws)
     for ws in dead:
         _ws_clients.discard(ws)
+
+
+async def _broadcast_event(event: dict) -> None:
+    """Push a JSON event to every /ws/events client simultaneously."""
+    if not _ws_event_clients:
+        return
+    msg = json.dumps(event)
+    dead = []
+    for ws in list(_ws_event_clients):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _ws_event_clients.discard(ws)
+
+
+def _push_event(event: dict) -> None:
+    """Thread-safe: schedule a JSON event broadcast from any thread."""
+    if _event_loop and not _event_loop.is_closed():
+        asyncio.run_coroutine_threadsafe(_broadcast_event(event), _event_loop)
+
+
+def _push_status_event() -> None:
+    """Broadcast current run status to all event clients."""
+    _push_event({
+        "type": "status",
+        "run_status": _agent_status,
+        "active_run_id": _active_run_id,
+    })
+
+
+def _push_screenshot_event() -> None:
+    """Broadcast a screenshot-ready notification so all clients refresh simultaneously."""
+    global _screenshot_ts
+    _screenshot_ts = int(time.time() * 1000)
+    _push_event({"type": "screenshot", "ts": _screenshot_ts})
+
+
+# Module-level hook: loop.py calls this after every screenshot save so all
+# connected clients (laptop + phone + tablet) update simultaneously.
+def notify_screenshot_saved() -> None:
+    """Called by AgentLoop after each screenshot is written to disk."""
+    _push_screenshot_event()
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -186,6 +235,8 @@ def start_agent_run(req: AgentRunRequest):
         _run_log.clear()
         _agent_runner = AgentRunner.from_env(log_callback=_log)
 
+    _push_status_event()  # notify all clients: run started
+
     def _run_in_thread():
         global _agent_status
         import asyncio
@@ -195,11 +246,12 @@ def start_agent_run(req: AgentRunRequest):
             result = loop.run_until_complete(_agent_runner.run(goal=req.goal, max_steps=req.max_steps))
             with _agent_lock:
                 _agent_status = "done"
-            # Dump history into runs folder for later retrieval
+            _push_status_event()
             _save_run_history(run_id, req.goal, True, result)
         except Exception as ex:
             with _agent_lock:
                 _agent_status = "failed"
+            _push_status_event()
             _save_run_history(run_id, req.goal, False, str(ex))
         finally:
             try:
@@ -568,6 +620,59 @@ def resume_agent():
     return {"status": "running"}
 
 
+class UserMessageRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/agent/message")
+def send_user_message(req: UserMessageRequest):
+    """
+    Inject a user instruction into the running agent mid-task.
+
+    The message is picked up at the start of the agent's next step and
+    added to its scratchpad as a [USER INSTRUCTION] so it can adjust its plan.
+    Works whether the agent is running or paused. If paused, also resumes it.
+    """
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Message text cannot be empty.")
+    from ..agent.human_gate import inject_user_message
+    inject_user_message(req.text.strip())
+    _log(f"💬 User message injected: {req.text[:100]}")
+    # If paused, auto-resume so the agent picks up the message
+    if _agent_runner and _agent_status in ("paused", "running"):
+        _agent_runner.resume()
+    return {"status": "queued", "text": req.text.strip()}
+
+
+@app.get("/api/agent/messages")
+def get_agent_messages(since: float = 0.0):
+    """
+    Return agent narrative messages since the given timestamp (epoch seconds).
+
+    The frontend polls this to show what the agent is thinking / doing in real time.
+    Pass the ts of the last message received as `since` to get only new ones.
+    """
+    from ..agent.human_gate import get_agent_messages
+    msgs = get_agent_messages(since_ts=since)
+    return {"messages": msgs}
+
+
+@app.get("/api/agent/checkpoint")
+def get_checkpoint():
+    """Return the latest saved checkpoint for the active run."""
+    if not _active_run_id:
+        return {"checkpoint": None}
+    try:
+        runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
+        cp_path = runs_root / _active_run_id / "checkpoint.json"
+        if cp_path.exists():
+            import json as _json
+            return {"checkpoint": _json.loads(cp_path.read_text())}
+    except Exception as e:
+        logger.debug(f"Checkpoint read failed: {e}")
+    return {"checkpoint": None}
+
+
 @app.post("/api/agent/cancel")
 @app.post("/api/run/{run_id}/cancel")  # Backwards compat
 def cancel_agent(run_id: str = ""):
@@ -788,8 +893,6 @@ def get_run(run_id: str):
 async def ws_logs(websocket: WebSocket):
     await websocket.accept()
     _ws_clients.add(websocket)
-    # Replay existing log; use negative seq IDs so frontend ignores them
-    # as "historical" and doesn't duplicate with live broadcasts
     for i, line in enumerate(list(_run_log)):
         try:
             await websocket.send_text(f"h{i}|{line}")
@@ -810,6 +913,55 @@ async def ws_logs(websocket: WebSocket):
         pass
     finally:
         _ws_clients.discard(websocket)
+
+
+@app.websocket("/ws/events")
+async def ws_events(websocket: WebSocket):
+    """
+    Unified real-time state sync for ALL connected clients (laptop, phone, tablet).
+
+    On connect: sends a snapshot of current state so the client is immediately in sync.
+    While connected: pushes JSON events whenever anything changes:
+      {"type": "log",        "seq": N, "line": "..."}
+      {"type": "status",     "run_status": "...", "active_run_id": "..."}
+      {"type": "screenshot", "ts": N}
+      {"type": "narrative",  "text": "...", "step": N}
+      {"type": "ping"}
+
+    All clients connected to this endpoint see the same events at the same time —
+    no independent polling, no drift between laptop and phone.
+    """
+    await websocket.accept()
+    _ws_event_clients.add(websocket)
+
+    # Send immediate snapshot so this client is in sync from the first frame
+    try:
+        snapshot = {
+            "type": "snapshot",
+            "run_status": _agent_status,
+            "active_run_id": _active_run_id,
+            "screenshot_ts": _screenshot_ts,
+            "logs": [f"h{i}|{line}" for i, line in enumerate(list(_run_log)[-100:])],
+        }
+        # Include agent narrative if runner is active
+        if _agent_runner and hasattr(_agent_runner, '_loop') and _agent_runner._loop:
+            snapshot["narrative"] = getattr(_agent_runner._loop, '_last_narrative', '')
+            snapshot["step"] = getattr(_agent_runner._loop, 'step_number', 0)
+        await websocket.send_text(json.dumps(snapshot))
+    except Exception:
+        pass
+
+    try:
+        while True:
+            await asyncio.sleep(15)
+            try:
+                await websocket.send_text(json.dumps({"type": "ping"}))
+            except Exception:
+                break
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _ws_event_clients.discard(websocket)
 
 
 # ── Utility Endpoints ─────────────────────────────────────────────────────────
@@ -1446,12 +1598,37 @@ def health_check():
     }
 
 
-# ── Static Files mount — MUST be last so it doesn't shadow API/WS routes ─────
-# Mounting at "/" is a catch-all; it must come after every @app route and
-# @app.websocket declaration to avoid intercepting /api/* and /ws/* traffic.
+# ── Static Files + SPA catch-all — MUST be last ───────────────────────────────
+# Mount /assets so the browser can fetch JS/CSS bundles.
+# A catch-all GET route returns index.html for every other path so that
+# React Router handles the route client-side — page reloads no longer 404.
+from fastapi.responses import FileResponse
+
+_assets_path = _frontend_path / "assets"
+if _assets_path.exists():
+    app.mount("/assets", StaticFiles(directory=str(_assets_path)), name="assets")
+
+# Serve other root-level static files (favicon, manifest, etc.)
 if _frontend_path.exists():
-    app.mount("/", StaticFiles(directory=str(_frontend_path), html=True), name="static")
-else:
-    @app.get("/")
-    async def root_fallback():
-        return {"status": "backend running", "frontend": "not built (use npm run build)"}
+    for _static_file in _frontend_path.glob("*"):
+        if _static_file.is_file() and _static_file.name != "index.html":
+            _fname = _static_file.name
+            _fpath = str(_static_file)
+            # Use a closure to capture the loop variable
+            def _make_file_route(path: str):
+                async def _serve():
+                    return FileResponse(path)
+                return _serve
+            app.add_api_route(f"/{_fname}", _make_file_route(_fpath), methods=["GET"], include_in_schema=False)
+
+# SPA catch-all: any path not matched above returns index.html
+# React Router takes over client-side — reloading /dashboard, /history, etc. all work.
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_spa(full_path: str):
+    index = _frontend_path / "index.html"
+    if index.exists():
+        return FileResponse(str(index))
+    return JSONResponse(
+        {"status": "backend running", "frontend": "not built — run: cd frontend && npm run build"},
+        status_code=503,
+    )

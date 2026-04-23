@@ -31,7 +31,7 @@ _CDP_PORT = 9222
 _JS_EXTRACT = """
 (function() {
     const MAX_TEXT = 3000;
-    const MAX_ELEMENTS = 80;
+    const MAX_ELEMENTS = 120;
 
     // ── 1. Interactive elements ──────────────────────────────────────────────
     // contenteditable="true" covers rich-text editors like Grok, ChatGPT, Overleaf
@@ -42,7 +42,9 @@ _JS_EXTRACT = """
 
     document.querySelectorAll(INTERACTIVE).forEach(el => {
         if (idx > MAX_ELEMENTS) return;
-        if (!el.offsetParent && el.tagName !== 'BODY') return; // skip hidden
+        // Skip truly hidden elements (not just position:fixed which has no offsetParent)
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
 
         const tag = el.tagName.toLowerCase();
         const type = el.getAttribute('type') || '';

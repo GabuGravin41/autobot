@@ -326,6 +326,71 @@ export interface LogsResponse {
 export const getLogs = (limit: number = 500): Promise<LogsResponse> =>
     apiFetch(`/api/logs?limit=${limit}`).then((r: any) => ({ logs: r.logs || [] }));
 
+// ── WebSocket event stream — unified real-time sync for all clients ──────────
+//
+// Connects to /ws/events which pushes JSON events whenever anything changes.
+// All clients (laptop, phone, tablet) see the same events at the same time.
+//
+// Event shapes:
+//   { type: "snapshot",  run_status, active_run_id, screenshot_ts, logs, narrative, step }
+//   { type: "status",    run_status, active_run_id }
+//   { type: "log",       seq, line }
+//   { type: "screenshot",ts }
+//   { type: "narrative", text, step }
+//   { type: "ping" }
+
+export interface AutobotEvent {
+    type: 'snapshot' | 'status' | 'log' | 'screenshot' | 'narrative' | 'ping';
+    run_status?: string;
+    active_run_id?: string | null;
+    screenshot_ts?: number;
+    ts?: number;
+    logs?: string[];
+    narrative?: string;
+    text?: string;
+    step?: number;
+    seq?: number;
+    line?: string;
+}
+
+export function connectEventStream(
+    onEvent: (event: AutobotEvent) => void,
+    onClose?: () => void,
+): () => void {
+    let closed = false;
+    let reconnectAttempt = 0;
+    const wsUrl = (WS_BASE || 'ws://127.0.0.1:8000').replace(/\/?$/, '') + '/ws/events';
+
+    function tryConnect() {
+        if (closed) return;
+        const ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            reconnectAttempt = 0;
+        };
+
+        ws.onmessage = (e) => {
+            try {
+                const event = JSON.parse(e.data) as AutobotEvent;
+                if (event.type !== 'ping') onEvent(event);
+            } catch { /* ignore malformed */ }
+        };
+
+        ws.onerror = () => ws.close();
+
+        ws.onclose = () => {
+            onClose?.();
+            if (closed) return;
+            reconnectAttempt++;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempt - 1), 10000);
+            setTimeout(tryConnect, delay);
+        };
+    }
+
+    tryConnect();
+    return () => { closed = true; };
+}
+
 // ── WebSocket log streaming (with exponential backoff and optional polling fallback) ─
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 10000;  // max 10s between retries (was 30s)

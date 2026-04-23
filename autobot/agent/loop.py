@@ -112,15 +112,16 @@ class AgentLoop:
         # first_step_context: full context injected only at step 0 (avoids bloating every step)
         self.first_step_context = first_step_context
 
-        # Scout phase: observation-only steps before any irreversible action is taken.
-        # Default 1 (one observation step). Set AUTOBOT_SCOUT_STEPS=0 to disable.
+        # Scout phase: disabled by default. Set AUTOBOT_SCOUT_STEPS=1 to force an
+        # observation-only first step (useful for very complex multi-screen tasks).
+        # Default 0 = agent can act immediately at step 0 (faster, avoids wasted steps).
         _scout_env = os.getenv("AUTOBOT_SCOUT_STEPS")
         if scout_steps is not None:
             self._scout_steps = scout_steps
         elif _scout_env is not None:
             self._scout_steps = int(_scout_env)
         else:
-            self._scout_steps = 1  # default: one observation step before acting
+            self._scout_steps = 0  # default: act immediately
 
         # Stop condition — governs when the run should halt.
         # Env override: AUTOBOT_MAX_STEPS=0 means perpetual.
@@ -477,6 +478,18 @@ class AgentLoop:
                 )
                 self._last_progress_time = time.time()  # Reset to avoid spam
 
+            # ── Drain user message queue ────────────────────────────────────
+            # User may have injected instructions via the dashboard mid-run.
+            # Inject them into the scratchpad so the agent sees them next step.
+            try:
+                from autobot.agent.human_gate import pop_user_messages
+                _pending_msgs = pop_user_messages()
+                for _msg in _pending_msgs:
+                    self.scratchpad.append(f"[USER INSTRUCTION]: {_msg}")
+                    logger.info(f"💬 User message injected into context: {_msg[:100]}")
+            except Exception:
+                pass
+
             # ── Execute step ────────────────────────────────────────────────
             await self._wait_if_paused()
             try:
@@ -634,6 +647,12 @@ class AgentLoop:
             screenshot_path = screenshot_dir / "latest.png"
             screenshot_path.write_bytes(screenshot_bytes)
             self.last_screenshot_path = str(screenshot_path.absolute())
+            # Notify all connected clients (laptop, phone, tablet) that a new screenshot is ready
+            try:
+                from autobot.web.app import notify_screenshot_saved
+                notify_screenshot_saved()
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"Failed to save agent screenshot: {e}")
 
@@ -650,7 +669,7 @@ class AgentLoop:
             "keyboard.", "terminal.run", "terminal.start",
             "clipboard.set", "clipboard.copy", "wait",
         )
-        if os.getenv("AUTOBOT_SMART_VISION", "1") == "1" and self._last_action_types:
+        if os.getenv("AUTOBOT_SMART_VISION", "0") == "1" and self._last_action_types:
             _last_nonvisual = all(
                 any(a.startswith(pfx) for pfx in _NON_VISUAL_PREFIXES)
                 for a in self._last_action_types
@@ -739,11 +758,20 @@ class AgentLoop:
                 self.scratchpad.append(alert)
                 logger.info(f"🔔 Popup detected: {popup_info}")
 
-        # URL loop detection — if visiting the same URL too many times, push agent to try something different
+        # URL loop detection — if visiting the same URL too many times, push agent to try something different.
+        # AI chat pages (DeepSeek, ChatGPT, Grok, Claude, Gemini) legitimately stay on the same URL
+        # for 10-30+ steps while waiting for generation — exempt them from low thresholds.
+        _CHAT_DOMAINS = (
+            "chat.deepseek.com", "chat.openai.com", "x.com/i/grok", "x.com/grok",
+            "claude.ai", "gemini.google.com", "aistudio.google.com",
+            "chat.mistral.ai", "perplexity.ai", "poe.com",
+        )
         _url_key = page_url.split("?")[0].rstrip("/")  # normalise (strip query params & trailing slash)
         self._url_visit_counts[_url_key] = self._url_visit_counts.get(_url_key, 0) + 1
         _url_visits = self._url_visit_counts[_url_key]
-        if _url_visits >= 4 and _url_key not in self._url_loop_alerted:
+        _is_chat_page = any(d in _url_key for d in _CHAT_DOMAINS)
+        _loop_threshold = 20 if _is_chat_page else 10  # chat: 20, others: 10 (was 4 — too low for paginated/multi-step flows)
+        if _url_visits >= _loop_threshold and _url_key not in self._url_loop_alerted:
             self._url_loop_alerted.add(_url_key)
             self.scratchpad.append(
                 f"[URL LOOP] You have been on '{_url_key}' {_url_visits} times without completing the goal. "
@@ -786,24 +814,25 @@ class AgentLoop:
         except Exception as _pe_exc:
             logger.debug(f"PromptEvolver error (non-fatal): {_pe_exc}")
 
-        # Scout phase: observation-only steps before any irreversible action is taken.
-        # During scout steps, the agent builds a structured situation report.
-        # This takes priority over other first-step injections.
+        # Scout phase (opt-in only via AUTOBOT_SCOUT_STEPS>0): enforces observation-only step.
+        # Disabled by default — wastes a step on simple tasks.
         _scout_mode = (self.step_number < self._scout_steps)
         if _scout_mode:
             _evolution_hint = (
                 "<scout_mode>\n"
-                "SCOUT STEP — observe and plan. Do NOT click, type, submit, or modify anything.\n"
-                "Only allowed actions: screenshot, wait, navigate (to get to the right starting page).\n\n"
-                "Write a complete situation report in your memory field:\n"
-                "  1. Task type: what category is this? (login / form / search / download / code / other)\n"
-                "  2. Current state: what page or app are you on? What is visible?\n"
-                "  3. Available elements: what interactive elements exist? (summarize DOM snapshot)\n"
-                "  4. Planned approach: step-by-step strategy for the actual task\n"
-                "  5. Risks: what could go wrong and how will you handle it?\n"
+                "OBSERVATION STEP — assess the situation before committing to an approach.\n"
+                "Examine: what page/app are you on? What's visible? What elements are available?\n"
+                "Plan your approach in your memory field, then act on the next step.\n"
                 "</scout_mode>"
             )
             logger.info(f"🔍 Scout mode active (step {self.step_number + 1} of {self._scout_steps})")
+        # Step 0 hint: light observation nudge (no action restriction) if no other context injected
+        elif self.step_number == 0 and not _evolution_hint and not self.first_step_context:
+            _evolution_hint = (
+                "First step: observe before acting. Read the URL, page title, and available elements. "
+                "If the page is already where you need to be, proceed immediately. "
+                "If not, navigate there first."
+            )
         # First-step mission context: inject full context once at step 0 if no evolver hint or scout
         elif self.step_number == 0 and self.first_step_context and not _evolution_hint:
             _evolution_hint = f"<mission_context>\n{self.first_step_context}\n</mission_context>"
@@ -844,9 +873,6 @@ class AgentLoop:
             {"role": "system", "content": self.system_prompt},
             *user_messages,
         ]
-
-        # Token budget guard — progressively strip low-value context if over limit
-        messages = self._enforce_token_budget(messages)
 
         # Estimate prompt size and warn user on first step (cold prompt processing is slow)
         prompt_tokens_est = sum(len(str(m.get("content", ""))) // 4 for m in messages)
@@ -916,11 +942,26 @@ class AgentLoop:
         #     f"Actions: {len(agent_output.action)}"
         # )
 
-        # Capture narrative for dashboard display
+        # Capture narrative for dashboard display and push to agent message bus + event stream
         if agent_output.narrative:
             self._last_narrative = agent_output.narrative
         elif agent_output.next_goal:
             self._last_narrative = agent_output.next_goal
+        if self._last_narrative:
+            try:
+                from autobot.agent.human_gate import push_agent_message
+                push_agent_message(self._last_narrative, kind="narrative")
+            except Exception:
+                pass
+            try:
+                from autobot.web.app import _push_event
+                _push_event({
+                    "type": "narrative",
+                    "text": self._last_narrative,
+                    "step": self.step_number + 1,
+                })
+            except Exception:
+                pass
 
         # Check pause again — LLM call may have taken 30s so the flag may have
         # been set while we were waiting. This makes pause feel immediate.
@@ -997,15 +1038,17 @@ class AgentLoop:
                     if len(self._recent_clicks) > 8:
                         self._recent_clicks = self._recent_clicks[-8:]
 
-        # Detect coordinate drift: clicking same small area repeatedly with slight adjustments
+        # Detect coordinate drift: clicking same small area repeatedly — only flag after 3+
+        # consecutive failures AND a very tight cluster (< 40px). The old 80px threshold
+        # fired on legitimate retry sequences (slightly different button coordinates).
         _click_drift = False
-        if len(self._recent_clicks) >= 4:
+        if len(self._recent_clicks) >= 4 and self._consecutive_failures >= 3:
             _last4 = self._recent_clicks[-4:]
             _xs = [c[0] for c in _last4]
             _ys = [c[1] for c in _last4]
             _x_spread = max(_xs) - min(_xs)
             _y_spread = max(_ys) - min(_ys)
-            if _x_spread < 80 and _y_spread < 80:
+            if _x_spread < 40 and _y_spread < 40:
                 _click_drift = True
 
         if any_failed and current_goal == self._last_goal:
@@ -1018,8 +1061,8 @@ class AgentLoop:
             self._recent_clicks.clear()  # reset click tracking on success
         self._last_goal = current_goal
 
-        # Inject failure-specific recovery guidance
-        if self._consecutive_failures >= 1:
+        # Inject failure-specific recovery guidance (start at #2 — single failures are normal)
+        if self._consecutive_failures >= 2:
             # Analyze WHAT failed to give specific advice
             _failed_actions = [
                 (a, r) for a, r in zip(agent_output.action, action_results) if not r.success
@@ -1110,14 +1153,16 @@ class AgentLoop:
                 ) or current_goal[:80]
                 self._memory_store.remember(key, f"FAILED 2x on '{current_goal[:60]}': {failed_actions}")
                 logger.info(f"🧠 Auto-remembered failure: {key}")
+                # Early REPLAN: don't wait for the scheduled eval interval — act now
+                logger.info("🔄 Early EvaluationAgent trigger (2 consecutive failures)")
+                await self._run_evaluation()
 
-            # After 4 consecutive failures, FORCE a strategy change via strong scratchpad alert
-            if self._consecutive_failures >= 4:
+            # After 3 consecutive failures, FORCE a strategy change via strong scratchpad alert
+            if self._consecutive_failures >= 3:
                 self.scratchpad.append(
-                    "[FORCED STRATEGY CHANGE] You have failed 4+ times on the same goal. "
-                    "Your current approach is NOT working. You MUST try something completely "
-                    "different: a different tool, a different page, a different method. "
-                    "If you repeat the same action, you will continue to fail."
+                    "[FORCED STRATEGY CHANGE] You have failed 3+ times on the same goal. "
+                    "Your current approach is NOT working. Switch completely: different tool, "
+                    "different page, different method. Repeating the same action guarantees failure."
                 )
 
         # Confidence tracking: low confidence → nudge agent to verify before next action
@@ -1591,40 +1636,17 @@ class AgentLoop:
         self,
         actions: list[ActionModel],
         browser_state: BrowserState,
-        scout_mode: bool = False,
+        scout_mode: bool = False,  # kept for API compatibility; no longer enforces restrictions
     ) -> list[ActionResult]:
         """
         Execute a list of actions sequentially.
 
         Adapted from Browser Use: if an action changes the page
         (navigation, click on link), remaining actions are SKIPPED.
-
-        scout_mode=True: only screenshot, wait, navigate, and done are permitted.
-        All other actions are blocked and returned as failed ActionResults.
         """
-        _SCOUT_ALLOWED = {"screenshot", "wait", "navigate", "done"}
-
         results: list[ActionResult] = []
 
         for i, action in enumerate(actions):
-            # Scout mode action filter — block irreversible actions
-            if scout_mode:
-                action_name = next(
-                    (k for k in action.model_dump(exclude_none=True) if k != "done"),
-                    None
-                )
-                if action.done is None and action_name not in _SCOUT_ALLOWED:
-                    logger.warning(
-                        f"Scout mode: blocked action '{action_name}' — "
-                        "only screenshot/wait/navigate allowed during observation step."
-                    )
-                    results.append(ActionResult(
-                        action_name=action_name or "unknown",
-                        success=False,
-                        error="Blocked: scout mode only allows screenshot, wait, navigate.",
-                    ))
-                    continue
-
             # Check if this is a "done" action — don't actually execute, just record
             if action.done is not None:
                 results.append(ActionResult(
@@ -2047,6 +2069,41 @@ class AgentLoop:
                     )
                     break
 
+                # ── Signal 0: AI still generating — must NOT exit early ──
+                # If the page DOM contains a "stop generating" button or similar
+                # indicator, the AI response is still streaming. Override all
+                # stability signals and keep waiting.
+                try:
+                    _GENERATING_SELECTORS = (
+                        # DeepSeek
+                        '[aria-label="Stop"]', '[data-testid="stop-button"]',
+                        # ChatGPT
+                        'button[aria-label="Stop streaming"]',
+                        # Grok / generic
+                        'button:has-text("Stop")', '[class*="stop"]',
+                    )
+                    _is_generating = False
+                    for _sel in _GENERATING_SELECTORS:
+                        try:
+                            _js = f"!!document.querySelector({__import__('json').dumps(_sel)})"
+                            from autobot.computer.browser import _cdp_eval as _bcdp
+                            _found = await asyncio.wait_for(
+                                _bcdp(_js), timeout=1.0
+                            )
+                            if _found:
+                                _is_generating = True
+                                break
+                        except Exception:
+                            pass
+                    if _is_generating:
+                        stable_count = 0   # Reset stability — generation is ongoing
+                        dom_stable_count = 0
+                        await asyncio.sleep(2.0)  # Poll less aggressively during generation
+                        elapsed = time.time() - start
+                        continue
+                except Exception:
+                    pass
+
                 # ── Signal 2: Screenshot hash stable ─────────────────────
                 shot = await self.page.screenshot()
                 curr_hash = hashlib.md5(shot).hexdigest()
@@ -2405,131 +2462,6 @@ class AgentLoop:
                 )
 
         return "\n".join(lines)
-
-    def _enforce_token_budget(self, messages: list[dict]) -> list[dict]:
-        """
-        Progressively strip low-value context if estimated token count exceeds the budget.
-
-        Stripping order (lowest value first):
-          1. Click zoom image (second image_url — nice-to-have verification)
-          2. Compact agent_history to only the last 3 full steps
-          3. Drop <memory> block (recalled facts; key ones are already in scratchpad)
-          4. Drop <affordances> block
-
-        Budget is configurable via AUTOBOT_TOKEN_BUDGET (default: 7000).
-        """
-        import copy
-        import re as _re
-
-        budget = int(os.getenv("AUTOBOT_TOKEN_BUDGET", "7000"))
-
-        def _est(msgs: list[dict]) -> int:
-            total = 0
-            for m in msgs:
-                c = m.get("content", "")
-                if isinstance(c, list):
-                    for part in c:
-                        total += len(str(part)) // 4
-                else:
-                    total += len(str(c)) // 4
-            return total
-
-        if _est(messages) <= budget:
-            return messages
-
-        msgs = copy.deepcopy(messages)
-        logger.warning(
-            f"⚠️ Token budget: ~{_est(msgs)} tokens > {budget} limit at step "
-            f"{self.step_number + 1}. Stripping context to fit."
-        )
-
-        # Strip 1: Remove click zoom image (keep only the first image_url per message)
-        for msg in msgs:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            first_img_seen = False
-            new_parts = []
-            for part in content:
-                if part.get("type") == "image_url":
-                    if not first_img_seen:
-                        first_img_seen = True
-                        new_parts.append(part)
-                    # else: drop click zoom (second+ image)
-                else:
-                    new_parts.append(part)
-            msg["content"] = new_parts
-
-        if _est(msgs) <= budget:
-            logger.info("Token budget: click zoom stripped — within budget.")
-            return msgs
-
-        # Strip 2: Compact agent_history to last 3 full steps only
-        compact_hist = ""
-        if self.history:
-            entries = self.history[-3:]
-            compact_lines = []
-            for entry in entries:
-                compact_lines.append(entry.to_history_text())
-            compact_hist = "\n".join(compact_lines)
-
-        for msg in msgs:
-            content = msg.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if part.get("type") == "text" and "<agent_history>" in part["text"]:
-                        part["text"] = _re.sub(
-                            r"<agent_history>.*?</agent_history>",
-                            f"<agent_history>\n{compact_hist}\n</agent_history>",
-                            part["text"],
-                            flags=_re.DOTALL,
-                        )
-            elif isinstance(content, str) and "<agent_history>" in content:
-                msg["content"] = _re.sub(
-                    r"<agent_history>.*?</agent_history>",
-                    f"<agent_history>\n{compact_hist}\n</agent_history>",
-                    content,
-                    flags=_re.DOTALL,
-                )
-
-        if _est(msgs) <= budget:
-            logger.info("Token budget: history compacted to 3 steps — within budget.")
-            return msgs
-
-        # Strip 3: Drop <memory> block
-        for msg in msgs:
-            content = msg.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if part.get("type") == "text" and "<memory>" in part["text"]:
-                        part["text"] = _re.sub(
-                            r"<memory>.*?</memory>", "", part["text"], flags=_re.DOTALL
-                        ).strip()
-            elif isinstance(content, str) and "<memory>" in content:
-                msg["content"] = _re.sub(
-                    r"<memory>.*?</memory>", "", content, flags=_re.DOTALL
-                ).strip()
-
-        if _est(msgs) <= budget:
-            logger.info("Token budget: memory block dropped — within budget.")
-            return msgs
-
-        # Strip 4: Drop <affordances> block
-        for msg in msgs:
-            content = msg.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if part.get("type") == "text" and "<affordances>" in part["text"]:
-                        part["text"] = _re.sub(
-                            r"<affordances>.*?</affordances>", "", part["text"], flags=_re.DOTALL
-                        ).strip()
-            elif isinstance(content, str) and "<affordances>" in content:
-                msg["content"] = _re.sub(
-                    r"<affordances>.*?</affordances>", "", content, flags=_re.DOTALL
-                ).strip()
-
-        logger.warning(f"Token budget: after all strips, ~{_est(msgs)} tokens remain.")
-        return msgs
 
     async def _compress_history(self) -> None:
         """

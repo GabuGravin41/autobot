@@ -23,19 +23,33 @@ class Keyboard:
             interval: Delay between each character in seconds.
         """
         import subprocess
+        # Clamp timeout: 5s minimum, 30s maximum regardless of text length
+        _timeout = max(5, min(30, len(text) // 20 + 5))
         try:
             # xdotool handles all characters reliably (URLs, Unicode, special chars)
             subprocess.run(
                 ["xdotool", "type", "--clearmodifiers", "--delay",
                  str(int(interval * 1000)), text],
-                timeout=max(10, len(text) // 5),
+                timeout=_timeout,
                 capture_output=True,
             )
-        except (FileNotFoundError, Exception) as e:
-            # Fallback to pyautogui if xdotool not available
-            logger.debug(f"xdotool type failed ({e}), falling back to pyautogui")
+        except subprocess.TimeoutExpired:
+            # Text too long for one shot — type in 200-char chunks
+            logger.debug(f"xdotool type timed out, chunking {len(text)} chars")
+            for _chunk in [text[i:i+200] for i in range(0, len(text), 200)]:
+                subprocess.run(
+                    ["xdotool", "type", "--clearmodifiers", "--delay",
+                     str(int(interval * 1000)), _chunk],
+                    timeout=15,
+                    capture_output=True,
+                )
+        except FileNotFoundError:
+            # xdotool not installed — last resort pyautogui (ASCII only)
+            logger.warning("xdotool not found — falling back to pyautogui (Unicode may not work)")
             import pyautogui
             pyautogui.typewrite(text, interval=interval)
+        except Exception as e:
+            logger.warning(f"xdotool type failed: {e}")
         logger.debug(f"Keyboard type: '{text[:50]}...'")
 
     def write(self, text: str) -> None:
@@ -63,21 +77,56 @@ class Keyboard:
         "Control": "ctrl", "Alt": "alt", "Shift": "shift", "Meta": "win",
     }
 
-    def press(self, key: str) -> None:
-        """Press a single key or key combo (e.g. 'enter', 'ctrl+a', 'ctrl+shift+t').
+    # xdotool key names differ from pyautogui in some cases
+    _XDOTOOL_KEY_MAP: dict[str, str] = {
+        "enter": "Return", "return": "Return",
+        "tab": "Tab",
+        "esc": "Escape", "escape": "Escape",
+        "backspace": "BackSpace",
+        "delete": "Delete",
+        "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+        "home": "Home", "end": "End",
+        "pageup": "Prior", "pagedown": "Next",
+        "space": "space",
+        "ctrl": "ctrl", "alt": "alt", "shift": "shift",
+        "f5": "F5", "f12": "F12",
+    }
 
-        Args:
-            key: Key name or combo separated by '+'.
+    def press(self, key: str) -> None:
+        """Press a single key or key combo (e.g. 'Enter', 'ctrl+a', 'ctrl+shift+t').
+
+        Uses xdotool for reliability — works even when the browser window is not
+        the last-focused window, as xdotool sends events at the OS level.
         """
+        import subprocess, time
+        # Normalise to lowercase for mapping lookups
+        if "+" in key:
+            parts = [self._KEY_MAP.get(k.strip(), k.strip().lower()) for k in key.split("+")]
+            xdotool_parts = [self._XDOTOOL_KEY_MAP.get(p, p) for p in parts]
+            xdotool_key = "+".join(xdotool_parts)
+        else:
+            mapped = self._KEY_MAP.get(key, key.lower())
+            xdotool_key = self._XDOTOOL_KEY_MAP.get(mapped, mapped)
+
+        try:
+            subprocess.run(
+                ["xdotool", "key", "--clearmodifiers", xdotool_key],
+                timeout=5,
+                capture_output=True,
+            )
+            logger.debug(f"Keyboard press (xdotool): {key} → {xdotool_key}")
+            return
+        except (FileNotFoundError, Exception) as e:
+            logger.debug(f"xdotool key failed ({e}), falling back to pyautogui")
+
         import pyautogui
         if "+" in key:
-            # Combo key — split and use hotkey
             parts = [self._KEY_MAP.get(k.strip(), k.strip().lower()) for k in key.split("+")]
             pyautogui.hotkey(*parts)
         else:
             mapped = self._KEY_MAP.get(key, key.lower())
             pyautogui.press(mapped)
-        logger.debug(f"Keyboard press: {key}")
+        logger.debug(f"Keyboard press (pyautogui): {key}")
 
     def hotkey(self, *keys: str) -> None:
         """Press a keyboard shortcut (multiple keys simultaneously).

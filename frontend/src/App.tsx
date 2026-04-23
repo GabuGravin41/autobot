@@ -17,7 +17,7 @@ import {
 import {
   getStatus, getAdapters, getRuns, getWorkflows, getTasks, cancelTask, addTask,
   getScreenLockStatus, getScheduleStatus, runPlan, cancelRun,
-  connectLogStream, updateSettings, getBrowserScreenshotUrl, submitHumanInput,
+  connectLogStream, connectEventStream, updateSettings, getBrowserScreenshotUrl, submitHumanInput,
   getRun as apiGetRun, deleteRun as apiDeleteRun, sendChat,
   runAutonomous, cancelAutonomous, getAutonomousStatus,
   BackendStatus, BackendAdapter, BackendRun, BackendWorkflow,
@@ -114,7 +114,7 @@ export default function App() {
 
   // ── Effects ───────────────────────────────────────────────────────────────
   useEffect(() => {
-    let disconnect: (() => void) | null = null;
+    // Full poll — used on startup and as a 30s heartbeat fallback
     const poll = async () => {
       try {
         const [status, adapters, runs, wfs, tasksResp, lockStatus, sched] = await Promise.all([
@@ -134,14 +134,63 @@ export default function App() {
         setBackendOnline(true);
       } catch { setBackendOnline(false); }
     };
+
     poll();
-    const interval = setInterval(poll, 5000);
-    disconnect = connectLogStream(
+    // Reduced to 30s — real-time updates come from /ws/events, not this poll
+    const interval = setInterval(poll, 30_000);
+
+    // Real-time event stream: all clients (laptop, phone, tablet) stay in sync
+    // because the backend pushes to all of them simultaneously on every change.
+    const disconnectEvents = connectEventStream((event) => {
+      if (event.type === 'snapshot') {
+        // Initial sync on connect — bring this client up to date immediately
+        if (event.run_status) {
+          setBackendStatus((prev: BackendStatus | null) => prev
+            ? { ...prev, run_status: event.run_status as BackendStatus['run_status'], active_run_id: event.active_run_id ?? null }
+            : null
+          );
+        }
+        if (event.logs) {
+          setLiveLogLines(event.logs.map((l: string) => {
+            const pipe = l.indexOf('|');
+            return pipe > 0 ? l.substring(pipe + 1) : l;
+          }).slice(-200));
+        }
+        if (event.screenshot_ts) {
+          setScreenshotUrl(`/api/browser/screenshot?t=${event.screenshot_ts}`);
+        }
+        setBackendOnline(true);
+      } else if (event.type === 'status') {
+        // Run status changed — update immediately without waiting for poll
+        setBackendStatus((prev: BackendStatus | null) => prev
+          ? { ...prev, run_status: event.run_status as BackendStatus['run_status'], active_run_id: event.active_run_id ?? null }
+          : null
+        );
+        setBackendOnline(true);
+        // Refresh full status on run start/end to get complete data
+        poll();
+      } else if (event.type === 'log' && event.line) {
+        setLiveLogLines((prev: string[]) => [...prev.slice(-199), event.line!]);
+      } else if (event.type === 'screenshot' && event.ts) {
+        // All clients receive this at the same time → all show the same screenshot
+        setScreenshotUrl(`/api/browser/screenshot?t=${event.ts}`);
+      } else if (event.type === 'narrative' && event.text) {
+        setBackendStatus((prev: BackendStatus | null) => prev ? { ...prev, narrative: event.text } : null);
+      }
+    });
+
+    // Keep /ws/logs connected for polling fallback on clients that can't reach /ws/events
+    const disconnectLogs = connectLogStream(
       (line) => setLiveLogLines(prev => [...prev.slice(-199), line]),
       undefined,
       { usePollingFallback: true, onLogsSnapshot: (logs) => setLiveLogLines(logs.slice(-200)) },
     );
-    return () => { clearInterval(interval); disconnect?.(); };
+
+    return () => {
+      clearInterval(interval);
+      disconnectEvents();
+      disconnectLogs();
+    };
   }, []);
 
   useEffect(() => {
@@ -180,11 +229,11 @@ export default function App() {
     }
   }, [backendStatus?.run_status, backendStatus?.active_run_id, liveLogLines]);
 
+  // Screenshot URL is now pushed via /ws/events (type: "screenshot") so all clients
+  // update simultaneously. This effect only sets the initial URL on first connect.
   useEffect(() => {
     if (!backendOnline || !backendStatus?.browser?.active) return;
     setScreenshotUrl(getBrowserScreenshotUrl());
-    const interval = setInterval(() => setScreenshotUrl(getBrowserScreenshotUrl()), 3000);
-    return () => clearInterval(interval);
   }, [backendOnline, backendStatus?.browser?.active]);
 
   useEffect(() => {

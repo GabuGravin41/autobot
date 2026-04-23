@@ -77,6 +77,27 @@ The `action` field is a list. Each item uses EXACTLY one of the action formats b
 `{{"computer_call": {{"call": "computer.keyboard.key_down('shift')"}}}}`
 `{{"computer_call": {{"call": "computer.keyboard.key_up('shift')"}}}}`
 
+**[PREFERRED] Click element by DOM index (use instead of coordinate click):**
+`{{"computer_call": {{"call": "computer.browser.click_element(3)"}}}}`
+
+**[PREFERRED] Type into input/textarea/richtext by DOM index (clears + types + verifies):**
+`{{"computer_call": {{"call": "computer.browser.fill(3, 'text to type')"}}}}`
+
+**Read current value of input element [N] to verify typing worked:**
+`{{"computer_call": {{"call": "computer.browser.read_value(3)"}}}}`
+
+**Focus an element without clicking (for keyboard navigation):**
+`{{"computer_call": {{"call": "computer.browser.focus(3)"}}}}`
+
+**Wait until a CSS selector appears (after navigation or form submit):**
+`{{"computer_call": {{"call": "computer.browser.wait_for('button.submit', 10.0)"}}}}`
+
+**Check if AI chatbot is still generating:**
+`{{"computer_call": {{"call": "computer.browser.is_generating()"}}}}`
+
+**Scroll element [N] into view:**
+`{{"computer_call": {{"call": "computer.browser.scroll_to(10)"}}}}`
+
 **Copy selected text (Ctrl+C, returns the text):**
 `{{"computer_call": {{"call": "computer.clipboard.copy()"}}}}`
 
@@ -104,26 +125,44 @@ The `action` field is a list. Each item uses EXACTLY one of the action formats b
 
 **Navigation**: ALWAYS use the `navigate` action for URLs. NEVER type in the address bar — the system cannot track it.
 
-**Clicking**: Every DOM element in the interactive list includes exact click coordinates: `[18] <button> @(801,305) Copy`. Use these directly — `computer.mouse.click(x=801, y=305)`. Never guess coordinates from a screenshot when the DOM already tells you where to click.
+# Interaction Priority — ALWAYS follow this order
 
-**Typing**: Click the input field first to focus it, then use `keyboard.type()`.
+Every DOM element in the snapshot has an index like `[3] <textarea> @(640,400)`. Use the index directly with browser methods — never guess from screenshot coordinates.
+
+## TIER 1 — browser.fill() for typing into any field (MOST RELIABLE)
+```
+{{"computer_call": {{"call": "computer.browser.fill(3, 'your text here')"}}}}
+```
+`browser.fill(index, text)` finds the element by its [N] index, focuses it, clears it, and types via CDP — works on inputs, textareas, AND rich-text editors (ChatGPT, Grok, Notion). It verifies the text appeared and tells you if it worked. Use this for ALL typing in the browser.
+
+## TIER 2 — browser.click_element() for clicking (MOST RELIABLE)
+```
+{{"computer_call": {{"call": "computer.browser.click_element(3)"}}}}
+```
+`browser.click_element(index)` scrolls the element into view, gets its CURRENT coordinates from CDP, and fires real mouse events. Always use this for links, buttons, and dropdowns when a DOM index is available.
+
+## TIER 3 — coordinate click as LAST RESORT
+```
+{{"computer_call": {{"call": "computer.mouse.click(x=640, y=400)"}}}}
+```
+Only use coordinate clicks for: OS dialogs, desktop apps outside the browser, elements that don't appear in the DOM snapshot (file pickers, permission prompts). If an element IS in the DOM snapshot with an [N] index, use click_element(N) instead.
+
+## Verifying interactions
+After fill() or click_element(), the return value tells you what happened. Also use:
+- `browser.read_value(N)` — read the current value of input [N] to verify text is there
+- `browser.wait_for('selector', 10.0)` — wait until an element appears (after navigation/submit)
+- `browser.is_generating()` — returns True while an AI chatbot is still writing its response
 
 **Reading typed text** — CRITICAL: the DOM description shows element values like `[filled:422ch] Research perovskite cells…(truncated from 422ch)`. The `filled:Nch` flag is the SINGLE source of truth for how much text is in the field. If `Nch` matches or exceeds what you wanted to type, the text IS fully there — the "…(truncated)" is just the display being cut off. DO NOT re-type. Press Enter (or click Submit) to send.
 
-**Rich-text editors (Grok, ChatGPT, Overleaf, Notion)** — CRITICAL: These sites use `contenteditable` divs, NOT standard `<textarea>` elements. The DOM list will show these with a `[richtext]` flag. The `[filled:Nch]` count on a richtext element IS the correct character count. A separate `<textarea>` with `[filled:1ch]` visible nearby is a DIFFERENT element (e.g. a close button or hidden form field) — ignore it. After `keyboard.type()` or `clipboard.paste()` into a richtext element:
-1. Take a screenshot to VISUALLY confirm the text appeared.
-2. If the screenshot shows text in the input box, it worked — press Enter immediately. Do NOT re-type.
-3. If the screenshot shows empty input, THEN retry — but use `clipboard.set()` + paste, never `keyboard.type()` twice.
-4. Clear the field first with `ctrl+a` then `Delete` before retrying.
-
 **Sending a message to an AI chatbot** — exact sequence:
-1. `clipboard.set('your full prompt text')` — write to clipboard first, no risk of truncation
-2. Click the input field
-3. `keyboard.press('ctrl+a')` then `keyboard.press('Delete')` — clear any stale content
-4. `clipboard.paste()` — paste in one shot
-5. Take a screenshot — verify text is visible in the input box
-6. `keyboard.press('Enter')` — send it
-Do NOT use `keyboard.type()` for long prompts — it's slow and the agent may lose track of what was typed.
+1. Find the input field index from the DOM snapshot — it will be a `[richtext]` or `<textarea>` element.
+2. `browser.fill(N, 'your full prompt text')` — this clears, types, and verifies in one step.
+3. Check the fill() return value: if `verified: True`, the text is there.
+4. `keyboard.press('Enter')` or `browser.click_element(M)` on the Send button.
+5. `wait(5)` then check `browser.is_generating()` — keep waiting while True.
+
+For very long prompts: `clipboard.set('text')` then `browser.fill(N, computer.clipboard.get())` — but fill() handles most cases directly.
 
 **Copying AI chatbot output (Grok, ChatGPT, Claude)** — NEVER click the UI "Copy" button. It uses the browser Web Clipboard API which silently fails in automation — the clipboard stays empty and you waste steps. ALWAYS use `computer.browser.copy(selector)` which reads the DOM directly via CDP and is 100% reliable.
 

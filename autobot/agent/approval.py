@@ -59,13 +59,14 @@ _DANGER_PATTERNS = [
 ]
 
 _CAUTION_PATTERNS = [
-    # Sending messages / emails
-    r"\bsend\b", r"\bsubmit\b", r"\.send\(", r"\.submit\(",
-    r"\bemail\b", r"\bslack\b", r"\bwhatsapp\b", r"\btelegram\b",
+    # Sending actual messages/emails (not generic "send" keyword which matches code everywhere)
+    r"\bsend.{0,20}(email|message|mail|dm|notification)\b",
+    r"\bemail.{0,20}send\b",
+    r"\bslack\b.*\bsend\b|\bwhatsapp\b|\btelegram\b.*\bsend\b",
     r"\btweet\b",
-    # File write (to home/docs but not temp)
-    r"open\(.*['\"]w['\"]", r"\.write\(",
-    # Git push / publish
+    # Web form submission via browser (not method calls in Python code)
+    r"\bform\.submit\b|\bsubmit form\b",
+    # Git push / publish (irreversible)
     r"\bgit push\b", r"\bgit commit\b", r"\bnpm publish\b",
 ]
 
@@ -131,7 +132,7 @@ class ApprovalGuard:
         action: "ActionModel",
         tier: RiskTier,
         goal: str = "",
-        timeout: float = 120.0,
+        timeout: float = 300.0,
     ) -> bool:
         """
         Gate an action based on current approval mode and risk tier.

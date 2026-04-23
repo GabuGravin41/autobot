@@ -45,11 +45,13 @@ export PYTHONPATH=$(pwd)
 python -m autobot.main &
 BACKEND_PID=$!
 
+LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo ""
 echo "=================================="
-echo "   Autobot is now RUNNING!        "
-echo "   Open: http://127.0.0.1:8000    "
-echo "   Press Ctrl+C to stop.          "
+echo "   Autobot is now RUNNING!"
+echo "   Local: http://127.0.0.1:8000"
+[ -n "$LAN_IP" ] && echo "   Phone: http://$LAN_IP:8000"
+echo "   Press Ctrl+C to stop."
 echo "=================================="
 echo ""
 
