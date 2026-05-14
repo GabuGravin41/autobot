@@ -15,12 +15,32 @@ Brain Regions:
 import json
 import logging
 import asyncio
+import os
 from typing import Any
 
 from autobot.agent.models import AgentOutput, ActionModel
 from autobot.dom.models import BrowserState
 
 logger = logging.getLogger(__name__)
+
+# ── AgentOps Integration ───────────────────────────────────────────────────────
+# AgentOps tracks every LLM call, session cost, and agent reasoning trace.
+# Judges and developers can replay full sessions at app.agentops.ai
+try:
+    import agentops
+    _AGENTOPS_KEY = os.getenv("AGENTOPS_API_KEY", "")
+    if _AGENTOPS_KEY:
+        agentops.init(
+            api_key=_AGENTOPS_KEY,
+            default_tags=["autobot", "cognitive-brain", "computer-use"],
+            skip_auto_end_session=True,  # We manage session lifecycle
+        )
+        logger.info("✅ AgentOps session tracking enabled")
+    else:
+        agentops = None  # type: ignore
+except ImportError:
+    agentops = None  # type: ignore
+    logger.debug("AgentOps not installed — session tracking disabled")
 
 class CognitiveBrain:
     """
@@ -45,6 +65,16 @@ class CognitiveBrain:
         """
         logger.debug("🧠 CognitiveBrain: Starting cognitive cycle...")
 
+        # Record AgentOps session event for this cognitive cycle
+        if agentops:
+            try:
+                agentops.record(agentops.ActionEvent(
+                    action_type="cognitive_cycle_start",
+                    params={"goal": goal[:200], "url": browser_state.url},
+                ))
+            except Exception:
+                pass
+
         # 1. Perception Phase (Compress observation)
         perception_summary = await self._perceive_state(browser_state)
         
@@ -53,7 +83,14 @@ class CognitiveBrain:
         
         if route == "ASK_USER":
             logger.info(f"⏸️ Brain routing to Human-in-the-Loop: {meta_context}")
-            # Output an empty action so the loop pauses, and use the narrative to alert the user
+            if agentops:
+                try:
+                    agentops.record(agentops.ActionEvent(
+                        action_type="human_escalation",
+                        params={"reason": meta_context},
+                    ))
+                except Exception:
+                    pass
             return AgentOutput(
                 thinking=f"Meta-Cognition determined human input is required: {meta_context}",
                 next_goal="Wait for user input",
@@ -64,6 +101,14 @@ class CognitiveBrain:
         if route == "REPLAN":
             logger.info(f"🔄 Brain routing to new strategy: {meta_context}")
             scratchpad.append(f"[STRATEGY CHANGE] {meta_context}")
+            if agentops:
+                try:
+                    agentops.record(agentops.ActionEvent(
+                        action_type="replan",
+                        params={"new_strategy": meta_context},
+                    ))
+                except Exception:
+                    pass
             
         # 3. Planner Phase (Decide what to do next in natural language)
         plan_text = await self._plan_next_step(goal, perception_summary, history_summary, scratchpad)
