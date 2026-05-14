@@ -91,6 +91,16 @@ export const getOnboardingStatus = (): Promise<{ complete: boolean }> =>
 export const getStatus = (): Promise<BackendStatus> =>
     apiFetch<BackendStatus>('/api/status');
 
+export interface HealthStatus {
+    overall_ok: boolean;
+    llm: { ok: boolean; provider: string; model: string; error: string };
+    cdp: { ok: boolean; tabs: number; url: string; error: string };
+    config: { has_api_key: boolean; vision_enabled: boolean };
+}
+
+export const getHealth = (): Promise<HealthStatus> =>
+    apiFetch<HealthStatus>('/api/health', { timeoutMs: 15_000 });
+
 // ── Adapters ────────────────────────────────────────────────────────────────
 export interface BackendAdapter {
     name: string;
@@ -174,6 +184,14 @@ export const pauseRun = (): Promise<{ status: string }> =>
 /** Resume a paused agent run */
 export const resumeRun = (): Promise<{ status: string }> =>
     apiFetch('/api/agent/resume', { method: 'POST' });
+
+/**
+ * Inject a human feedback message into the running agent.
+ * The agent picks it up at the start of its next step and adds it to its context.
+ * Works whether the agent is running or paused (also auto-resumes if paused).
+ */
+export const sendAgentMessage = (text: string): Promise<{ status: string; text: string }> =>
+    apiFetch('/api/agent/message', { method: 'POST', body: JSON.stringify({ text }) });
 
 // ── Autonomous Multi-Agent Runner ───────────────────────────────────────────
 export interface AutonomousStatus {

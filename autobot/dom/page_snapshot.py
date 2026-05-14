@@ -30,99 +30,93 @@ _CDP_HOST = "localhost"
 _CDP_PORT = 9222
 _JS_EXTRACT = """
 (function() {
-    const MAX_TEXT = 3000;
-    const MAX_ELEMENTS = 120;
+    const MAX_TEXT = 4000;
+    const MAX_ELEMENTS = 200;
 
-    // ── 1. Interactive elements ──────────────────────────────────────────────
-    // contenteditable="true" covers rich-text editors like Grok, ChatGPT, Overleaf
-    // which do NOT use <textarea> — their .value is always empty.
+    // 1. Interactive elements
     const INTERACTIVE = 'a[href], button, input:not([type="hidden"]), select, textarea, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"]';
     const elements = [];
     let idx = 1;
 
     document.querySelectorAll(INTERACTIVE).forEach(el => {
         if (idx > MAX_ELEMENTS) return;
-        // Skip truly hidden elements (not just position:fixed which has no offsetParent)
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
 
         const tag = el.tagName.toLowerCase();
-        const type = el.getAttribute('type') || '';
-        const isContentEditable = el.getAttribute('contenteditable') === 'true';
-        const isInput = (tag === 'input' || tag === 'textarea') && !isContentEditable;
-        // For inputs/textareas: read .value. For contenteditable rich-text editors
-        // (Grok, ChatGPT, Overleaf, etc.): read innerText — .value is always ''.
-        // We MUST report the actual length or the agent will re-type content already there.
-        const rawValue = isInput
-            ? (el.value || '')
-            : (isContentEditable ? (el.innerText || el.textContent || '') : '');
-        const valueLen = rawValue.length;
-        const rawText = (el.innerText || rawValue || el.placeholder || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
-        const text = rawText.slice(0, 80);
-        const textTruncated = rawText.length > 80;
+        const role = el.getAttribute('role') || '';
+        const ariaLabel = el.getAttribute('aria-label') || el.getAttribute('aria-description') || '';
         const href = el.getAttribute('href') || '';
+        const isInput = (tag === 'input' || tag === 'textarea') && el.getAttribute('contenteditable') !== 'true';
+        const isContentEditable = el.getAttribute('contenteditable') === 'true';
+        const type = el.getAttribute('type') || '';
         const name = el.getAttribute('name') || el.getAttribute('id') || '';
 
-        if (!text && !href) return; // skip completely unlabelled elements
+        const rawValue = isInput ? (el.value || '') : (isContentEditable ? (el.innerText || '') : '');
+        const rawText = (ariaLabel || el.innerText || rawValue || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim();
+        const text = rawText.slice(0, 80);
 
-        // ── Element state flags ─────────────────────────────────────
-        const flags = [];
-        if (el.disabled || el.getAttribute('aria-disabled') === 'true') flags.push('DISABLED');
-        if (el.required || el.getAttribute('aria-required') === 'true') flags.push('required');
-        if (el.readOnly) flags.push('readonly');
-        if ((isInput || isContentEditable) && rawValue.trim()) flags.push(`filled:${valueLen}ch`);
-        if (isContentEditable) flags.push('richtext');
-        if (el.getAttribute('aria-expanded') === 'true') flags.push('expanded');
-        if (el.getAttribute('aria-checked') === 'true') flags.push('checked');
-        if (el.getAttribute('aria-busy') === 'true') flags.push('loading');
-        const placeholder = el.placeholder || el.getAttribute('data-placeholder') || '';
+        // Skip invisible elements with no label and no href
+        if (!text && !href) return;
 
-        // Screen coordinates — agent uses these directly for mouse.click(x, y)
         const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return;  // hidden element
         const cx = Math.round(r.left + r.width / 2);
         const cy = Math.round(r.top + r.height / 2 + window.scrollY);
 
-        let desc = `[${idx}] <${tag}`;
-        if (type) desc += ` type="${type}"`;
-        if (name) desc += ` name="${name}"`;
-        if (placeholder && !text.includes(placeholder)) desc += ` placeholder="${placeholder.slice(0, 40)}"`;
-        desc += `>`;
-        // Append click coordinates so agent never has to guess
-        desc += ` @(${cx},${cy})`;
-        if (flags.length) desc += ` [${flags.join(', ')}]`;
-        if (text) {
-            desc += ` ${text}`;
-            if (textTruncated) desc += `…(truncated from ${rawText.length}ch)`;
-        }
-        if (href && href !== '#' && !href.startsWith('javascript')) desc += ` → ${href.slice(0, 60)}`;
+        // Format: [N](@eN) <tag type="t" name="n"> @x,y [flags] text → href
+        // [N] = full index for click_element(N), @eN = compact alias for token efficiency
+        let desc = `[${idx}](@e${idx}) <${tag}`;
+        if (type && tag === 'input') desc += ` type="${type}"`;
+        if (name) desc += ` name="${name.slice(0, 30)}"`;
+        if (role) desc += ` role="${role}"`;
+        desc += `> @${cx},${cy}`;
+
+        const flags = [];
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') flags.push('DISABLED');
+        if (el.required || el.getAttribute('aria-required') === 'true') flags.push('req');
+        if (el.readOnly) flags.push('ro');
+        if ((isInput || isContentEditable) && rawValue.trim()) flags.push(`${rawValue.length}ch`);
+        if (isContentEditable) flags.push('richtext');
+        if (el.getAttribute('aria-expanded') === 'true') flags.push('exp');
+        if (el.getAttribute('aria-checked') === 'true') flags.push('chk');
+
+        if (flags.length) desc += ` [${flags.join(',')}]`;
+        if (text) desc += ` ${text}`;
+        if (href && href !== '#' && !href.startsWith('javascript')) desc += ` → ${href.slice(0, 40)}`;
 
         elements.push(desc);
         idx++;
     });
 
-    // ── 2. Popup / dialog detection ──────────────────────────────────────────
+    // 2. Dialog detection
     const DIALOG_SEL = '[role="dialog"], [role="alertdialog"], dialog[open], .modal, .modal-dialog, .popup, [aria-modal="true"]';
     const dialogs = [];
     document.querySelectorAll(DIALOG_SEL).forEach(d => {
-        if (!d.offsetParent) return; // skip hidden dialogs
+        if (!d.offsetParent) return;
         const title = (d.querySelector('h1,h2,h3,h4,[role="heading"]') || {}).innerText || '';
-        const btns = Array.from(d.querySelectorAll('button')).map(b => b.innerText.trim()).filter(Boolean).slice(0, 5);
-        dialogs.push({ title: title.trim().slice(0, 80), buttons: btns });
+        const btns = Array.from(d.querySelectorAll('button')).map(b => b.innerText.trim()).filter(Boolean).slice(0, 3);
+        dialogs.push({ title: title.trim().slice(0, 60), buttons: btns });
     });
 
-    // ── 3. Visible page text ─────────────────────────────────────────────────
-    // Main content areas first, then fallback to full body
+    // 3. Visible page text
     let bodyText = '';
     const main = document.querySelector('main, [role="main"], article, #content, .content');
     const source = main || document.body;
     if (source) {
-        // Remove nav/header/footer/script/style clutter
         const clone = source.cloneNode(true);
         clone.querySelectorAll('nav, header, footer, script, style, noscript').forEach(n => n.remove());
         bodyText = (clone.innerText || '').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, MAX_TEXT);
     }
 
-    // ── 4. Page metadata ─────────────────────────────────────────────────────
+    // 4. ARIA landmark regions (helps orient the agent on complex pages)
+    const landmarks = [];
+    document.querySelectorAll('[role="main"],[role="navigation"],[role="search"],[role="banner"],[role="form"],[role="region"]').forEach(el => {
+        const r = el.getAttribute('role');
+        const lbl = el.getAttribute('aria-label') || '';
+        if (r) landmarks.push(lbl ? `${r}:"${lbl}"` : r);
+    });
+
     return JSON.stringify({
         url: window.location.href,
         title: document.title,
@@ -130,8 +124,7 @@ _JS_EXTRACT = """
         dialogs: dialogs,
         text: bodyText,
         num_interactive: elements.length,
-        num_links: document.querySelectorAll('a[href]').length,
-        num_inputs: document.querySelectorAll('input, textarea, select').length,
+        landmarks: landmarks,
     });
 })()
 """
@@ -141,16 +134,19 @@ _JS_EXTRACT = """
 class PageSnapshot:
     url: str
     title: str
-    elements: list[str]          # ["[1] <button> Login", "[2] <a> Home → /"]
+    elements: list[str]          # ["[1](@e1) <button> @x,y Login", ...]
     text: str                     # Visible page text (truncated)
     num_interactive: int
     num_links: int
     num_inputs: int
     dialogs: list[dict] = None   # [{"title": "...", "buttons": ["OK", "Cancel"]}]
+    landmarks: list[str] = None  # ["main", "navigation:\"Primary\"", "search"]
 
     def __post_init__(self):
         if self.dialogs is None:
             self.dialogs = []
+        if self.landmarks is None:
+            self.landmarks = []
 
     @property
     def has_popup(self) -> bool:
@@ -159,6 +155,10 @@ class PageSnapshot:
     def to_prompt_text(self) -> str:
         """Format for inclusion in the LLM prompt."""
         parts = [f"URL: {self.url}", f"Title: {self.title}"]
+
+        # Landmark regions — orient agent to page structure
+        if self.landmarks:
+            parts.append(f"Page regions: {', '.join(self.landmarks)}")
 
         # Popup alert — shown first so agent handles it before anything else
         if self.dialogs:
@@ -212,11 +212,17 @@ class CDPClient:
         msg = json.dumps({"id": self._msg_id, "method": method, "params": params or {}})
         await self._ws.send(msg)
         # Read until we get the response for our message id
-        for _ in range(20):
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            data = json.loads(raw)
-            if data.get("id") == self._msg_id:
-                return data.get("result", {})
+        for _ in range(40):  # More attempts, shorter timeout
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=2.0)
+                data = json.loads(raw)
+                if data.get("id") == self._msg_id:
+                    if "error" in data:
+                        logger.error(f"CDP Error ({method}): {data['error']}")
+                        return {}
+                    return data.get("result", {})
+            except asyncio.TimeoutError:
+                break
         return {}
 
 
@@ -327,6 +333,7 @@ async def get_page_snapshot(timeout: float = 4.0, url_hint: str | None = None) -
                 num_links=data.get("num_links", 0),
                 num_inputs=data.get("num_inputs", 0),
                 dialogs=data.get("dialogs", []),
+                landmarks=data.get("landmarks", []),
             )
 
         except Exception as e:

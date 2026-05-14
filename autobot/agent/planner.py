@@ -190,7 +190,7 @@ Examples:
 
         resp = await self.llm_client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"SYSTEM: You are a Task Complexity Analyzer.\n\n{prompt}"}],
             temperature=0.0,
             max_tokens=512,
         )

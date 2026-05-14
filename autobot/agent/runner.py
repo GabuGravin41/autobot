@@ -312,7 +312,7 @@ class AgentRunner:
         try:
             resp = await self.llm_client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": "Reply with the single word: OK"}],
+                messages=[{"role": "user", "content": "SYSTEM: Respond with the single word: OK"}],
                 max_tokens=16,   # Match real call cap; a failed pre-flight here means real calls will also fail
                 temperature=0,
             )
@@ -779,9 +779,16 @@ def _create_llm_client() -> Any | None:
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             return None
+        import httpx as _httpx
+        # OpenRouter requires HTTP-Referer and X-Title headers for proper API routing.
+        # Without these, some free models (Llama, Gemma) may return 403 or be rate-limited.
         return AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
+            default_headers={
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "Autobot",
+            },
         )
 
     elif provider == "openai":
@@ -815,19 +822,36 @@ def _create_llm_client() -> Any | None:
         )
 
     else:
-        # Auto-detect: try in order vertex → google → openrouter → openai
-        if os.getenv("VERTEX_API_KEY"):
-            return _VertexNativeClient(os.getenv("VERTEX_API_KEY"))
-        for env_key, base_url in [
-            ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-            ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-            ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+        # Auto-detect: try in order openrouter → google → gemini → vertex → openai
+        # OpenRouter first: has free capable models available immediately.
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        if openrouter_key and not openrouter_key.startswith("your_"):
+            # Set a sensible free default model if none configured
+            if not os.getenv("AUTOBOT_LLM_MODEL"):
+                os.environ["AUTOBOT_LLM_MODEL"] = "meta-llama/llama-3.3-70b-instruct:free"
+            return AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_key,
+                default_headers={
+                    "HTTP-Referer": "http://localhost:8000",
+                    "X-Title": "Autobot",
+                },
+            )
+        for env_key, base_url, default_model in [
+            ("GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
+            ("GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
         ]:
             api_key = os.getenv(env_key)
-            if api_key:
+            if api_key and not api_key.startswith("your_"):
+                if not os.getenv("AUTOBOT_LLM_MODEL"):
+                    os.environ["AUTOBOT_LLM_MODEL"] = default_model
                 return AsyncOpenAI(base_url=base_url, api_key=api_key)
+        if os.getenv("VERTEX_API_KEY"):
+            if not os.getenv("AUTOBOT_LLM_MODEL"):
+                os.environ["AUTOBOT_LLM_MODEL"] = "gemini-2.0-flash-lite"
+            return _VertexNativeClient(os.getenv("VERTEX_API_KEY"))
         api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
+        if api_key and not api_key.startswith("your_"):
             return AsyncOpenAI(api_key=api_key)
 
         # ── Default key fallback (zero-config / bundled binary) ──────────────

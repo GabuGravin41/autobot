@@ -188,6 +188,7 @@ app.add_middleware(
 _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if not _frontend_path.exists():
     _frontend_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "build"
+logger.info(f"🎨 Frontend path: {_frontend_path}")
 
 
 # ── Pydantic Request Models ───────────────────────────────────────────────────
@@ -214,9 +215,76 @@ class SettingsUpdate(BaseModel):
     approval_mode: str | None = None   # "strict" | "balanced" | "trusted"
 
 
+# ── Health Check ─────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def get_health():
+    """
+    Pre-flight health check — verifies LLM and browser are ready before running tasks.
+    Returns structured status so the dashboard can show a clear readiness banner.
+    """
+    import urllib.request as _url_req
+    health = {
+        "llm": {"ok": False, "provider": "", "model": "", "error": ""},
+        "cdp": {"ok": False, "url": "", "tabs": 0, "error": ""},
+        "config": {"has_api_key": False, "vision_enabled": False},
+    }
+
+    # 1. Check LLM config
+    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "auto")
+    model = os.getenv("AUTOBOT_LLM_MODEL", "")
+    health["llm"]["provider"] = provider
+    health["llm"]["model"] = model
+    health["config"]["has_api_key"] = bool(
+        os.getenv("OPENROUTER_API_KEY") or os.getenv("GOOGLE_API_KEY") or
+        os.getenv("GEMINI_API_KEY") or os.getenv("VERTEX_API_KEY") or
+        os.getenv("OPENAI_API_KEY")
+    )
+    health["config"]["vision_enabled"] = os.getenv("AUTOBOT_LOCAL_NO_VISION", "0") != "1"
+
+    # 2. Quick LLM ping (async, 10s timeout)
+    try:
+        from ..agent.runner import _create_llm_client
+        client = _create_llm_client()
+        if client is None:
+            health["llm"]["error"] = "No API key configured"
+        else:
+            import asyncio as _asyncio
+            resp = await _asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Reply with the single word: OK"}],
+                    max_tokens=10,
+                    temperature=0,
+                ),
+                timeout=10.0,
+            )
+            if resp.choices and resp.choices[0].message.content:
+                health["llm"]["ok"] = True
+            else:
+                health["llm"]["error"] = "Empty response from model"
+    except Exception as e:
+        health["llm"]["error"] = str(e)[:200]
+
+    # 3. Check Chrome CDP
+    try:
+        req = _url_req.urlopen("http://localhost:9222/json", timeout=2)
+        tabs = json.loads(req.read())
+        page_tabs = [t for t in tabs if t.get("type") == "page"]
+        health["cdp"]["ok"] = True
+        health["cdp"]["tabs"] = len(page_tabs)
+        health["cdp"]["url"] = page_tabs[0].get("url", "") if page_tabs else ""
+    except Exception as e:
+        health["cdp"]["error"] = f"Chrome CDP not reachable: {str(e)[:100]}"
+
+    health["overall_ok"] = health["llm"]["ok"] and health["cdp"]["ok"]
+    return health
+
+
 # ── Agent Endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/api/agent/run")
+
 def start_agent_run(req: AgentRunRequest):
     """
     Start the AgentRunner (CDP browser + DOM intelligence).
@@ -605,18 +673,29 @@ def start_background_task(req: BackgroundRunRequest):
 @app.post("/api/agent/pause")
 def pause_agent():
     """Pause the active agent run (it will idle after the current step)."""
-    if not _agent_runner or _agent_status not in ("running",):
+    global _agent_status
+    if not _agent_runner or _agent_status != "running":
         raise HTTPException(status_code=400, detail="No active agent run to pause.")
     _agent_runner.pause()
+    # Immediately update global status so dashboard shows paused
+    with _agent_lock:
+        _agent_status = "paused"
+    _push_status_event()  # notify all clients
+    _log("⏸ Agent paused by user")
     return {"status": "paused"}
 
 
 @app.post("/api/agent/resume")
 def resume_agent():
     """Resume a paused agent run."""
-    if not _agent_runner or _agent_status not in ("paused", "running"):
+    global _agent_status
+    if not _agent_runner or _agent_status != "paused":
         raise HTTPException(status_code=400, detail="No paused agent run to resume.")
     _agent_runner.resume()
+    with _agent_lock:
+        _agent_status = "running"
+    _push_status_event()  # notify all clients
+    _log("▶ Agent resumed by user")
     return {"status": "running"}
 
 
@@ -1413,11 +1492,15 @@ The description field is critical — it becomes the agent's goal. Make it rich 
 
 Each step should describe a real action on the computer (navigate, click, type, wait, copy, switch app, run command). Keep steps concrete enough that someone watching the screen would see each one happen."""
 
-    # Build conversation history
-    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    # Build consolidated message for local LLM compatibility
+    full_content = f"SYSTEM: {system_prompt}\n\n"
     for msg in req.history:
-        messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-    messages.append({"role": "user", "content": req.message})
+        role = msg.get("role", "user").upper()
+        content = msg.get("content", "")
+        full_content += f"{role}: {content}\n\n"
+    full_content += f"USER: {req.message}"
+
+    messages = [{"role": "user", "content": full_content}]
 
     # Call LLM synchronously (we're in a sync endpoint)
     loop = asyncio.new_event_loop()
@@ -1606,7 +1689,10 @@ from fastapi.responses import FileResponse
 
 _assets_path = _frontend_path / "assets"
 if _assets_path.exists():
-    app.mount("/assets", StaticFiles(directory=str(_assets_path)), name="assets")
+    logger.info(f"📁 Mounting assets from: {_assets_path}")
+    app.mount("/assets", StaticFiles(directory=str(_assets_path.absolute())), name="assets")
+else:
+    logger.warning(f"⚠️ Assets directory not found at: {_assets_path}")
 
 # Serve other root-level static files (favicon, manifest, etc.)
 if _frontend_path.exists():
@@ -1625,6 +1711,13 @@ if _frontend_path.exists():
 # React Router takes over client-side — reloading /dashboard, /history, etc. all work.
 @app.get("/{full_path:path}", include_in_schema=False)
 async def serve_spa(full_path: str):
+    # If the path looks like a static asset (has a file extension) but wasn't 
+    # caught by the static mounts above, it truly doesn't exist. 
+    # Returning index.html (text/html) for a .js/.css request causes 
+    # MIME type errors in the browser.
+    if "." in full_path.split("/")[-1]:
+        return Response(status_code=404)
+
     index = _frontend_path / "index.html"
     if index.exists():
         return FileResponse(str(index))

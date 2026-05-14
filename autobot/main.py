@@ -96,6 +96,9 @@ def _start_watch(stop_event: threading.Event) -> None:
         proc.kill()
 
 
+_stop = threading.Event()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Autobot — desktop automation agent")
     parser.add_argument("--rebuild",  action="store_true", help="Force rebuild of frontend before starting")
@@ -117,25 +120,19 @@ def main() -> None:
     # ── 1. Build frontend (if needed) ─────────────────────────────────────────
     _build_frontend(force=args.rebuild)
 
-    # ── 2. Start frontend watcher in background thread ─────────────────────────
-    _stop = threading.Event()
-    no_watch = args.no_watch or os.getenv("AUTOBOT_NO_WATCH", "").lower() in ("1", "true", "yes")
-    if not no_watch and _frontend_dir.exists():
-        watcher_thread = threading.Thread(target=_start_watch, args=(_stop,), daemon=True)
-        watcher_thread.start()
-
-    # ── 3. Print addresses (no auto-open — navigate there yourself) ────────────
+    # ── 2. Print addresses ───────────────────────────────────────────────────
     logger.info(f"Local:  {local_url}")
     logger.info(f"Phone:  http://{_lan_ip}:{port}  (same WiFi)")
 
     # ── 4. Launch backend (blocks until Ctrl+C) ────────────────────────────────
+    logger.info("✨ Autobot backend ready.")
     try:
         uvicorn.run(
             "autobot.web.app:app",
             host=host,
             port=port,
             reload=False,
-            log_level="warning",
+            log_level="info",
         )
     except Exception as e:
         logger.error(f"Failed to start server: {e}")

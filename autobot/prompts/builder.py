@@ -160,9 +160,7 @@ class StepPromptBuilder:
         # First-step situational awareness nudge (~30 tokens, step 1 only)
         if self.step_number == 0:
             parts.append(
-                "<first_step_hint>This is your first observation. Assess what is on "
-                "screen before acting — if the current page is not relevant to the "
-                "task, navigate to your target.</first_step_hint>"
+                "<first_step_hint>Assess the screen. If the current page is not relevant, navigate to your target immediately.</first_step_hint>"
             )
 
         # 3. Browser state
@@ -174,9 +172,7 @@ class StepPromptBuilder:
             snapshot_text = self.page_snapshot.to_prompt_text()
             parts.append(
                 f"<dom_snapshot>\n"
-                f"IMPORTANT: These are the REAL interactive elements on the current page, "
-                f"extracted directly from the browser DOM. Use element numbers [N] to identify "
-                f"what to click — coordinates from the screenshot are less reliable.\n\n"
+                f"PRIORITY: Use index [N] with click(N) or fill(N, text). CDP indices are 100% reliable.\n\n"
                 f"{snapshot_text}\n"
                 f"</dom_snapshot>"
             )
@@ -193,12 +189,8 @@ class StepPromptBuilder:
         screen_w, screen_h = self._get_screen_size()
         parts.append(
             f"<screen_info>\n"
-            f"Resolution: {screen_w}×{screen_h} pixels\n"
-            f"The screenshot is at FULL resolution — coordinates you see in the image match "
-            f"the real screen pixels exactly. No scaling needed.\n"
-            f"Chrome's content area is roughly: x=0–{screen_w}, y=80–{screen_h} "
-            f"(top ~80px is the browser chrome/tab bar).\n"
-            f"Center of screen: x={screen_w//2}, y={screen_h//2}\n"
+            f"Resolution: {screen_w}×{screen_h}. Browser: y=80–{screen_h}.\n"
+            f"Screenshot is full-res; coordinates in image match screen pixels.\n"
             f"</screen_info>"
         )
 

@@ -207,7 +207,7 @@ class MissionAgent:
         try:
             resp1 = await self.llm_client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": analysis_prompt}],
+                messages=[{"role": "user", "content": f"SYSTEM: You are a task analyzer.\n\n{analysis_prompt}"}],
                 temperature=0.1,
                 max_tokens=300,
             )
@@ -243,7 +243,7 @@ class MissionAgent:
         try:
             resp2 = await self.llm_client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": plan_prompt}],
+                messages=[{"role": "user", "content": f"SYSTEM: You are a Mission Strategist.\n\n{plan_prompt}"}],
                 temperature=0.2,
                 max_tokens=1024,
             )

@@ -384,7 +384,7 @@ Rules:
 
         resp = await self.llm_client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"SYSTEM: You are a task planning agent.\n\n{prompt}"}],
             max_tokens=800,
             temperature=0.3,
         )

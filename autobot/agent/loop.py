@@ -633,6 +633,36 @@ class AgentLoop:
                 f"{len(page_snapshot.text)} chars of text"
             )
 
+            # Detect DOM/tab mismatch: CDP returned data from a different tab.
+            # This happens when Chrome has multiple tabs and CDP defaults to the
+            # first tab (e.g. Grok) rather than the one we navigated to (DeepSeek).
+            # If detected, discard the wrong snapshot and warn the agent.
+            _expected_host = ""
+            _snap_host = ""
+            try:
+                from urllib.parse import urlparse as _urlparse
+                if _url_hint and _url_hint not in ("about:blank", ""):
+                    _expected_host = _urlparse(_url_hint).netloc.lstrip("www.")
+                    _snap_host = _urlparse(page_snapshot.url).netloc.lstrip("www.")
+                    if (_expected_host and _snap_host
+                            and _expected_host not in _snap_host
+                            and _snap_host not in _expected_host):
+                        logger.warning(
+                            f"DOM mismatch: snapshot is from '{_snap_host}' "
+                            f"but expected '{_expected_host}'. Discarding stale DOM."
+                        )
+                        self.scratchpad.append(
+                            f"[DOM MISMATCH] The DOM snapshot is from '{_snap_host}' "
+                            f"but the current page should be '{_expected_host}'. "
+                            f"The DOM data is from the WRONG browser tab. "
+                            f"Ignore the DOM element list. Use only the screenshot. "
+                            f"The page IS loaded — use coordinate clicks based on what you see in the screenshot, "
+                            f"or use browser.fill(N, text) after reading the screenshot carefully."
+                        )
+                        page_snapshot = None  # don't pass wrong DOM to agent
+            except Exception:
+                pass
+
         # Get screen resolution for coordinate guidance in prompt
         try:
             screen_w, screen_h = self.computer.display.size()
@@ -847,55 +877,80 @@ class AgentLoop:
                 _remaining_hypotheses = _last.agent_output.hypotheses[1:]
 
         # Build the step prompt
-        step_builder = StepPromptBuilder(
-            browser_state=browser_state,
-            task=self.goal,
-            step_number=self.step_number,
-            max_steps=self.max_steps,
-            agent_history=self._build_history_text(),
-            native_ui=native_ui,
-            page_snapshot=page_snapshot if not _skip_dom_snapshot else None,
-            memories=recalled,
-            click_zoom_b64=self._last_click_zoom_b64,
-            click_zoom_coords=self._last_click_coords,
-            affordances=self._build_affordances(page_snapshot, native_ui),
-            evolution_hint=_evolution_hint,
-            remaining_hypotheses=_remaining_hypotheses,
-        )
-        # Click zoom is consumed once per step — clear after passing to builder
-        self._last_click_zoom_b64 = None
-        self._last_click_coords = None
+        _use_brain = os.getenv("AUTOBOT_USE_BRAIN", "0") == "1"
 
-        user_messages = step_builder.build_messages(use_vision=_use_vision_this_step)
-
-        # Construct full message list
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            *user_messages,
-        ]
-
-        # Estimate prompt size and warn user on first step (cold prompt processing is slow)
-        prompt_tokens_est = sum(len(str(m.get("content", ""))) // 4 for m in messages)
-        if self.step_number == 0:
-            logger.info(
-                f"🧠 Step 1: processing prompt (~{prompt_tokens_est} tokens) — "
-                f"first step takes longer as the model loads context. Please wait..."
-            )
-        else:
-            logger.info(f"🧠 Step {self.step_number + 1}: thinking (~{prompt_tokens_est} tokens)...")
-
-        # Retry LLM call up to 3 times with increasing backoff
         agent_output = None
-        for _llm_attempt in range(1, 4):
-            agent_output = await self._call_llm(messages)
-            if agent_output is not None:
-                break
-            backoff = _llm_attempt * 5  # 5s, 10s, 15s
-            logger.warning(
-                f"Step {self.step_number + 1}: LLM attempt {_llm_attempt}/3 failed. "
-                f"Retrying in {backoff}s..."
+        if _use_brain:
+            from autobot.agent.brain import CognitiveBrain
+            brain = CognitiveBrain(self.llm_client, self.model, self.fast_model)
+            tool_catalog = self.computer.get_tool_catalog()
+            
+            for _llm_attempt in range(1, 4):
+                try:
+                    agent_output = await brain.think_and_decide(
+                        goal=self.goal,
+                        browser_state=browser_state,
+                        history_summary=self._build_history_text(),
+                        scratchpad=self.scratchpad,
+                        tool_catalog=tool_catalog
+                    )
+                    if agent_output is not None:
+                        break
+                except Exception as e:
+                    logger.error(f"Brain attempt {_llm_attempt} failed: {e}")
+                    
+                backoff = _llm_attempt * 5
+                logger.warning(f"Step {self.step_number + 1}: Brain attempt {_llm_attempt}/3 failed. Retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
+        else:
+            step_builder = StepPromptBuilder(
+                browser_state=browser_state,
+                task=self.goal,
+                step_number=self.step_number,
+                max_steps=self.max_steps,
+                agent_history=self._build_history_text(),
+                native_ui=native_ui,
+                page_snapshot=page_snapshot if not _skip_dom_snapshot else None,
+                memories=recalled,
+                click_zoom_b64=self._last_click_zoom_b64,
+                click_zoom_coords=self._last_click_coords,
+                affordances=self._build_affordances(page_snapshot, native_ui),
+                evolution_hint=_evolution_hint,
+                remaining_hypotheses=_remaining_hypotheses,
             )
-            await asyncio.sleep(backoff)
+            # Click zoom is consumed once per step — clear after passing to builder
+            self._last_click_zoom_b64 = None
+            self._last_click_coords = None
+
+            user_messages = step_builder.build_messages(use_vision=_use_vision_this_step)
+
+            # Construct full message list
+            messages = [
+                {"role": "system", "content": self.system_prompt},
+                *user_messages,
+            ]
+
+            # Estimate prompt size and warn user on first step (cold prompt processing is slow)
+            prompt_tokens_est = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+            if self.step_number == 0:
+                logger.info(
+                    f"🧠 Step 1: processing prompt (~{prompt_tokens_est} tokens) — "
+                    f"first step takes longer as the model loads context. Please wait..."
+                )
+            else:
+                logger.info(f"🧠 Step {self.step_number + 1}: thinking (~{prompt_tokens_est} tokens)...")
+
+            # Retry LLM call up to 3 times with increasing backoff
+            for _llm_attempt in range(1, 4):
+                agent_output = await self._call_llm(messages)
+                if agent_output is not None:
+                    break
+                backoff = _llm_attempt * 5  # 5s, 10s, 15s
+                logger.warning(
+                    f"Step {self.step_number + 1}: LLM attempt {_llm_attempt}/3 failed. "
+                    f"Retrying in {backoff}s..."
+                )
+                await asyncio.sleep(backoff)
 
         if agent_output is not None:
             self._consecutive_llm_failures = 0  # Reset circuit breaker on success
@@ -1386,6 +1441,22 @@ class AgentLoop:
                     args["messages"] = _usr
                     logger.debug("Gemini: system prompt routed via system_instruction (prefix caching enabled)")
 
+        # Consolidate for local LLMs (llama-server/Ollama) to avoid role alternation errors.
+        _is_local = any(h in str(getattr(self.llm_client, "base_url", "")) for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+        if _is_local and len(args["messages"]) > 1:
+            consolidated_content = ""
+            for msg in args["messages"]:
+                role = msg["role"].upper()
+                content = msg["content"]
+                if isinstance(content, list):
+                    # Handle multi-part content (text + images)
+                    text_parts = [p["text"] for p in content if p.get("type") == "text"]
+                    content = "\n".join(text_parts)
+                consolidated_content += f"### {role}:\n{content}\n\n"
+            
+            args["messages"] = [{"role": "user", "content": consolidated_content.strip()}]
+            logger.debug(f"Local LLM detected: consolidated {len(messages)} messages into 1 user message")
+
         async def _do_call(current_args: dict) -> str:
             # Wrap in a Task so cancel() can interrupt in-flight API calls
             async def _inner():
@@ -1574,8 +1645,20 @@ class AgentLoop:
                 except json.JSONDecodeError:
                     pass
 
-            # 3. Bracket-matching outermost { ... }
-            json_str = self._extract_outermost_json(text)
+            # 3. JSON repair — fix common LLM formatting errors before structural parse
+            repaired = self._repair_json(text)
+            if repaired and repaired != text:
+                try:
+                    data = json.loads(repaired)
+                    result = _try_build(data)
+                    if result is not None:
+                        logger.debug("JSON repaired successfully")
+                        return result
+                except json.JSONDecodeError:
+                    pass
+
+            # 4. Bracket-matching outermost { ... }
+            json_str = self._extract_outermost_json(repaired or text)
             if json_str:
                 try:
                     data = json.loads(json_str)
@@ -1631,6 +1714,52 @@ class AgentLoop:
                 if depth == 0:
                     return text[start:i + 1]
         return None
+
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """
+        Attempt to repair common LLM JSON formatting errors.
+
+        Handles:
+        - Trailing commas before } or ]
+        - Single-quoted strings (Python-style output)
+        - action field as dict instead of list
+        - Control characters that break JSON parsing
+        - Markdown code fence removal
+        - Truncated JSON (missing closing braces)
+
+        Returns the repaired string (may still be invalid JSON, caller checks).
+        """
+        import re as _re
+
+        # Strip markdown fences
+        if "```" in text:
+            m = _re.search(r"```(?:json)?\s*(\{.*)", text, _re.DOTALL)
+            if m:
+                text = m.group(1).rstrip().rstrip("`").rstrip()
+
+        # Find outermost JSON object
+        start = text.find("{")
+        if start == -1:
+            return text
+        text = text[start:]
+
+        # Remove control characters (except \n, \r, \t)
+        text = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
+        # Fix trailing commas before closing brackets/braces
+        text = _re.sub(r',\s*([}\]])', r'\1', text)
+
+        # Attempt to close unclosed braces/brackets (truncated output)
+        opens = text.count('{') + text.count('[')
+        closes = text.count('}') + text.count(']')
+        if opens > closes:
+            # Count specific imbalances
+            brace_diff = text.count('{') - text.count('}')
+            bracket_diff = text.count('[') - text.count(']')
+            text = text.rstrip() + (']' * bracket_diff) + ('}' * brace_diff)
+
+        return text
 
     async def _execute_actions(
         self,
@@ -1763,18 +1892,10 @@ class AgentLoop:
                 return ActionResult(action_name="navigate", success=True, page_changed=True)
 
             elif action.click is not None:
-                return ActionResult(
-                    action_name="click", 
-                    success=False, 
-                    error="DOM Click not available. Use computer.mouse.click(x, y) instead based on visual coordinates in the screenshot."
-                )
+                return await self._execute_click(action.click, browser_state)
 
             elif action.input_text is not None:
-                return ActionResult(
-                    action_name="input_text", 
-                    success=False, 
-                    error="DOM Input not available. Use computer.mouse.click() to focus then computer.keyboard.type() instead."
-                )
+                return await self._execute_input(action.input_text, browser_state)
 
             elif action.scroll_down is not None:
                 await self.page.evaluate(
@@ -1859,98 +1980,54 @@ class AgentLoop:
 
     async def _execute_click(self, click: ClickAction, browser_state: BrowserState) -> ActionResult:
         """
-        Click an element by its DOM index.
-
-        This is the key pattern from Browser Use: instead of guessing CSS selectors,
-        the LLM references elements by their numeric index from the DOM tree.
-        We resolve the index to an actual element using the accessibility tree.
+        Click an element by its DOM index using CDP-backed browser tools.
+        The index matches the [N] shown in the <dom_snapshot> prompt block.
         """
         index = click.index
-        element = browser_state.selector_map.get(index)
-
-        if element is None:
+        try:
+            # Use the CDP-backed tool directly. It handles scrolling, focus, and event dispatch.
+            # browser.click_element is sync-wrapped, so we run in a thread.
+            res = await asyncio.to_thread(self.computer.browser.click_element, index)
+            
+            success = "clicked" in res.lower()
+            # If success=True, page_changed=True is a safe assumption for a click, 
+            # though we could do a more precise check if needed.
             return ActionResult(
                 action_name="click",
-                success=False,
-                error=f"Element with index {index} not found in selector map",
+                success=success,
+                error=None if success else res,
+                extracted_content=res,
+                page_changed=success
             )
-
-        try:
-            # Strategy: Use accessibility role + name to find the element via Playwright
-            role = element.attributes.get("role", "")
-            text = element.text
-
-            if role and text:
-                await self.page.get_by_role(role, name=text).first.click(timeout=5000)
-            elif text:
-                await self.page.get_by_text(text, exact=False).first.click(timeout=5000)
-            elif element.tag_name == "a" and "href" in element.attributes:
-                await self.page.locator(f'a[href="{element.attributes["href"]}"]').first.click(timeout=5000)
-            else:
-                # Fallback: use tag + any identifying attribute
-                selector = element.tag_name
-                if "name" in element.attributes:
-                    selector = f'{element.tag_name}[name="{element.attributes["name"]}"]'
-                elif "aria-label" in element.attributes:
-                    selector = f'{element.tag_name}[aria-label="{element.attributes["aria-label"]}"]'
-
-                await self.page.locator(selector).first.click(timeout=5000)
-
-            logger.info(f"Clicked [{index}] <{element.tag_name}> '{text[:30]}'")
-
-            # Check if page changed
-            await asyncio.sleep(0.5)
-            page_changed = self.page.url != browser_state.url
-
-            return ActionResult(action_name="click", success=True, page_changed=page_changed)
-
         except Exception as e:
             return ActionResult(
                 action_name="click",
                 success=False,
-                error=f"Click on [{index}] failed: {e}",
+                error=f"Click on [{index}] failed: {e}"
             )
 
     async def _execute_input(self, input_action: InputTextAction, browser_state: BrowserState) -> ActionResult:
         """
-        Type text into an element by its DOM index.
-        Same index-based approach as click.
+        Type text into an element by its DOM index using CDP-backed browser tools.
         """
         index = input_action.index
-        element = browser_state.selector_map.get(index)
-
-        if element is None:
+        text = input_action.text
+        try:
+            # browser.fill() clears, types via CDP, and verifies content.
+            res = await asyncio.to_thread(self.computer.browser.fill, index, text)
+            
+            success = "verified: True" in res or "filled" in res.lower()
             return ActionResult(
                 action_name="input_text",
-                success=False,
-                error=f"Element with index {index} not found in selector map",
+                success=success,
+                error=None if success else res,
+                extracted_content=res
             )
-
-        try:
-            role = element.attributes.get("role", "")
-            text = element.text
-            placeholder = element.attributes.get("placeholder", "")
-
-            if role in ("textbox", "searchbox", "combobox"):
-                locator = self.page.get_by_role(role, name=text or placeholder)
-            elif placeholder:
-                locator = self.page.get_by_placeholder(placeholder)
-            elif text:
-                locator = self.page.get_by_label(text)
-            else:
-                locator = self.page.locator(f'{element.tag_name}[name="{element.attributes.get("name", "")}"]')
-
-            await locator.first.click(timeout=5000)
-            await locator.first.fill(input_action.text, timeout=5000)
-
-            logger.info(f"Input [{index}] <{element.tag_name}>: '{input_action.text[:30]}'")
-            return ActionResult(action_name="input_text", success=True)
-
         except Exception as e:
             return ActionResult(
                 action_name="input_text",
                 success=False,
-                error=f"Input to [{index}] failed: {e}",
+                error=f"Input to [{index}] failed: {e}"
             )
 
     @staticmethod
@@ -2276,7 +2353,26 @@ class AgentLoop:
                 for kw_node in call_node.keywords:
                     kwargs[kw_node.arg] = ast.literal_eval(kw_node.value)
             except Exception as parse_err:
-                raise ValueError(f"Cannot parse args '{args_str}': {parse_err}")
+                # Diagnose common mistakes and give actionable guidance
+                _hint = ""
+                _args_lower = args_str.lower()
+                if "memory[" in args_str or "memory['" in args_str:
+                    _hint = " RULE: memory['key'] is not accessible here. Write the literal text directly as a string."
+                elif "computer." in args_str or ".read(" in args_str or ".get(" in args_str:
+                    _hint = (
+                        " RULE: You cannot nest computer calls in arguments. "
+                        "To put file content on clipboard use: clipboard.set_from_file('path'). "
+                        "To combine clipboard + text use: clipboard.prepend('text') or clipboard.append('text')."
+                    )
+                elif "+" in args_str and ("'" in args_str or '"' in args_str):
+                    _hint = (
+                        " RULE: String concatenation (+) is not allowed in arguments. "
+                        "Use clipboard.set_from_file() with a prefix= argument, or clipboard.prepend()/append()."
+                    )
+                raise ValueError(
+                    f"Arguments must be literal strings/numbers — no expressions, variable lookups, "
+                    f"or nested calls allowed. Got: '{args_str[:80]}...'.{_hint}"
+                )
 
         return method(*args, **kwargs)
 
@@ -2467,7 +2563,7 @@ class AgentLoop:
         """
         Compress old history entries into a heuristic summary to prevent context overflow.
 
-        Keeps the last 10 steps verbatim. Older steps are compressed into:
+        Keeps the last 3 steps verbatim. Older steps are compressed into:
         - Distinct goals achieved (successes)
         - Distinct failures encountered (for avoiding repetition)
         - URL changes (navigation progress)
@@ -2475,7 +2571,7 @@ class AgentLoop:
         Uses heuristic compression (no LLM call) to avoid nested API latency.
         Called every AUTOBOT_COMPRESS_INTERVAL steps (default 25).
         """
-        keep = 10
+        keep = 3
         old_entries = self.history[:-keep]
         if not old_entries:
             return

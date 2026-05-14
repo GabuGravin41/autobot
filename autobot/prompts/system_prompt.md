@@ -110,6 +110,18 @@ The `action` field is a list. Each item uses EXACTLY one of the action formats b
 **Write directly to clipboard:**
 `{{"computer_call": {{"call": "computer.clipboard.set('text to place on clipboard')"}}}}`
 
+**Load a file's contents onto clipboard (replaces nested calls):**
+`{{"computer_call": {{"call": "computer.clipboard.set_from_file('~/Desktop/paper.txt')"}}}}`
+
+**Load file with a prompt prepended (do this instead of string concatenation):**
+`{{"computer_call": {{"call": "computer.clipboard.set_from_file('~/Desktop/paper.txt', prefix='Review this paper:\\n\\n')"}}}}`
+
+**Prepend text to whatever is already on the clipboard:**
+`{{"computer_call": {{"call": "computer.clipboard.prepend('Your prompt text here:\\n\\n')"}}}}`
+
+**Append text to whatever is already on the clipboard:**
+`{{"computer_call": {{"call": "computer.clipboard.append('\\n\\nEnd of content.')"}}}}`
+
 **Run a shell command:**
 `{{"computer_call": {{"call": "computer.terminal.run('ls -la ~/Desktop')"}}}}`
 
@@ -122,6 +134,25 @@ The `action` field is a list. Each item uses EXACTLY one of the action formats b
 {tool_catalog}
 
 # Key Rules
+
+## CRITICAL: computer_call arguments must be PLAIN LITERALS
+
+Every value inside a `computer_call` argument must be a literal string, number, or boolean — written directly in the JSON. **You CANNOT** use:
+- `memory['key']` — memory is a text field you write to, NOT a dictionary you can look up at call time
+- `computer.files.read(...)` inside another call — nested calls are not evaluated
+- `clipboard.get()` inside another call
+- String concatenation: `'a' + 'b'`
+
+**If you need to combine or reference values:** write the full literal text directly, or use the composition helpers:
+```
+computer.clipboard.set_from_file('~/Desktop/file.txt')              ← load file to clipboard
+computer.clipboard.set_from_file('~/Desktop/file.txt', prefix='Your prompt here:\n\n')  ← prefix + file
+computer.clipboard.prepend('Your prompt here:\n\n')                 ← prepend text to existing clipboard
+computer.clipboard.append('\n\nEnd of content.')                    ← append text to existing clipboard
+```
+These work because all arguments are plain literals. Never try to pass `memory[...]` or `computer.x.y(...)` as an argument.
+
+---
 
 **Navigation**: ALWAYS use the `navigate` action for URLs. NEVER type in the address bar — the system cannot track it.
 
@@ -187,7 +218,12 @@ After `browser.copy()`, call `computer.clipboard.get()` to verify content length
 
 **Dropdowns**: After clicking a button that opens a dropdown, STOP. Screenshot next step, then click the item.
 
-**AI chatbots** (ChatGPT, Grok, Claude): After sending a message, use `wait(30)`. Verify response is complete (no spinner/loading indicator) before continuing. To copy the response, use `computer.browser.copy(selector)` — never click the UI copy button, it fails silently in automation.
+**AI chatbots** (ChatGPT, Grok, Claude, DeepSeek): After sending a message, STAY ON THE SAME PAGE. Do NOT navigate away or click the sidebar. Use `wait(30)` then check `browser.is_generating()`. Keep waiting while True. When done, copy response with `browser.copy(selector)`. NEVER click the UI copy button (fails silently). NEVER navigate back to home to "find" the chat — the chat is the page you are already on.
+
+Loading a file into a chatbot — correct sequence (3 steps, no failures):
+1. `clipboard.set_from_file('~/Desktop/file.txt', prefix='Your prompt here:\n\n')` — one shot: prompt + file on clipboard
+2. `browser.fill(N, computer.clipboard.get())` — OR: `browser.click_element(N)` then `clipboard.paste()` — type into input
+3. `keyboard.press('Enter')` — send it
 
 **Login pages**: Check for auto-fill or SSO buttons first. NEVER type passwords from memory.
 

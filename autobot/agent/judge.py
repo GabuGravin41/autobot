@@ -87,9 +87,12 @@ class JudgeAgent:
         )
 
         try:
+            # Consolidate into single user message for local LLM compatibility
+            full_content = f"SYSTEM: You are an impartial Judge Agent.\n\n{prompt}"
+            
             args = {
                 "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": full_content}],
                 "temperature": 0.0,
                 "response_format": {"type": "json_object"}
             }

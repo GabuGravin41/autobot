@@ -206,26 +206,50 @@ def _launch_chrome() -> None:
     )
 
 
+# Track the URL the agent most recently navigated to via goto().
+# _query_cdp_url() uses this to prefer the correct tab over the first tab
+# in multi-tab Chrome sessions (e.g. Grok tab open while agent navigates to DeepSeek).
+_last_goto_url: str | None = None
+
+
+def _set_last_goto_url(url: str) -> None:
+    global _last_goto_url
+    _last_goto_url = url
+
+
 def _query_cdp_url() -> str | None:
     """Query Chrome CDP for the real URL of the frontmost tab.
 
+    Prefers the tab matching the most recently navigated URL (_last_goto_url)
+    to avoid returning the wrong tab in multi-tab Chrome sessions where an
+    earlier tab (e.g. Grok) is still the first entry in Chrome's CDP list.
+
     Returns None if CDP is unreachable (Chrome not running, or no debugging port).
-    This is used by HumanModeEmulator.url to return the actual current URL even
-    when the agent navigated via keyboard shortcuts instead of goto().
     """
     import json
     import urllib.request
+    _SKIP = ("chrome-extension://", "devtools://", "chrome://newtab",
+             "chrome://new-tab-page", "about:blank", "chrome://")
     try:
         with urllib.request.urlopen("http://localhost:9222/json", timeout=1) as resp:
             tabs = json.loads(resp.read())
-        # Skip DevTools / extension / new-tab pages; return first real URL
-        for tab in tabs:
-            url = tab.get("url", "")
-            if url and not url.startswith((
-                "chrome-extension://", "devtools://", "chrome://newtab",
-                "chrome://new-tab-page", "about:blank",
-            )):
-                return url
+        page_tabs = [t for t in tabs if t.get("type") == "page"
+                     and t.get("url") and not t["url"].startswith(_SKIP)]
+        if not page_tabs:
+            return None
+
+        # Prefer tab matching the URL we most recently navigated to
+        if _last_goto_url:
+            from urllib.parse import urlparse
+            _hint_host = urlparse(_last_goto_url).netloc.lstrip("www.")
+            for tab in page_tabs:
+                tab_url = tab.get("url", "")
+                tab_host = urlparse(tab_url).netloc.lstrip("www.")
+                if _hint_host and _hint_host in tab_host:
+                    return tab_url
+
+        # Fallback: first real page tab
+        return page_tabs[0]["url"]
     except Exception:
         pass
     return None
@@ -411,6 +435,7 @@ class HumanModeEmulator:
         await asyncio.sleep(0.2)
         pyautogui.press("enter")
         self._url = url
+        _set_last_goto_url(url)  # track for multi-tab CDP disambiguation
         await asyncio.sleep(3.0)
 
         # Wait for the page to actually render. Modern SPAs (Grok, ChatGPT,

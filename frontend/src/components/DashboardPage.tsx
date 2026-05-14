@@ -7,8 +7,9 @@ import {
     Maximize2, Minimize2, X, Move, Brain, ExternalLink, Code2,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission, runOrchestrated, getLearningStats, LearningStats, pauseRun, resumeRun } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission, runOrchestrated, getLearningStats, LearningStats, pauseRun, resumeRun, sendAgentMessage, getHealth, HealthStatus } from '../services/apiService';
 import TaskQueuePanel from './TaskQueuePanel';
+import { Cpu, Wifi, WifiOff } from 'lucide-react';
 
 interface DashboardPageProps {
     backendOnline: boolean;
@@ -39,11 +40,27 @@ export default function DashboardPage({
 }: DashboardPageProps) {
     const navigate = useNavigate();
     const [isScreenPopout, setIsScreenPopout] = useState(false);
+    const [feedbackText, setFeedbackText] = useState('');
+    const [feedbackSending, setFeedbackSending] = useState(false);
+    const [feedbackSent, setFeedbackSent] = useState(false);
     const [leetcodeProblems, setLeetcodeProblems] = useState(5);
     const [leetcodeLaunching, setLeetcodeLaunching] = useState(false);
     const [orchestratedGoal, setOrchestratedGoal] = useState('');
     const [orchestratedLaunching, setOrchestratedLaunching] = useState(false);
     const [learningStats, setLearningStats] = useState<LearningStats | null>(null);
+    const [healthStatus, setHealthStatus] = useState<HealthStatus | null>(null);
+    const [healthChecking, setHealthChecking] = useState(false);
+
+    const runHealthCheck = async () => {
+        setHealthChecking(true);
+        try {
+            const result = await getHealth();
+            setHealthStatus(result);
+        } catch { setHealthStatus(null); } finally { setHealthChecking(false); }
+    };
+
+    // Health check on mount and after each run completes
+    React.useEffect(() => { runHealthCheck(); }, []);
 
     // Fetch learning stats on mount and auto-refresh every 30s during active runs
     React.useEffect(() => {
@@ -137,6 +154,75 @@ export default function DashboardPage({
             exit={{ opacity: 0, y: -20 }}
             className="space-y-8"
         >
+            {/* Health status banner — shows pre-flight system readiness */}
+            {healthStatus && (
+                <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`glass-panel p-4 rounded-2xl border flex items-center gap-4 ${
+                        healthStatus.overall_ok
+                            ? 'border-emerald-500/30 bg-emerald-500/5'
+                            : 'border-amber-500/30 bg-amber-500/5'
+                    }`}
+                >
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                        healthStatus.overall_ok ? 'bg-emerald-500/20' : 'bg-amber-500/20'
+                    }`}>
+                        {healthStatus.overall_ok
+                            ? <CheckCircle2 size={16} className="text-emerald-400" />
+                            : <AlertCircle size={16} className="text-amber-400" />
+                        }
+                    </div>
+                    <div className="flex-1 flex flex-wrap items-center gap-4 min-w-0">
+                        {/* LLM status */}
+                        <div className="flex items-center gap-2">
+                            <Cpu size={12} className={healthStatus.llm.ok ? 'text-emerald-400' : 'text-amber-400'} />
+                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                healthStatus.llm.ok ? 'text-emerald-400' : 'text-amber-400'
+                            }`}>
+                                {healthStatus.llm.ok ? 'LLM ✓' : 'LLM ✗'}
+                            </span>
+                            <span className="text-[9px] text-[var(--base-text-muted)] font-mono truncate max-w-[160px]">
+                                {healthStatus.llm.ok
+                                    ? `${healthStatus.llm.provider}/${healthStatus.llm.model.split('/').pop()}`
+                                    : healthStatus.llm.error.slice(0, 50)
+                                }
+                            </span>
+                        </div>
+                        {/* CDP status */}
+                        <div className="flex items-center gap-2">
+                            {healthStatus.cdp.ok
+                                ? <Wifi size={12} className="text-emerald-400" />
+                                : <WifiOff size={12} className="text-amber-400" />
+                            }
+                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                healthStatus.cdp.ok ? 'text-emerald-400' : 'text-amber-400'
+                            }`}>
+                                {healthStatus.cdp.ok ? `CDP ✓ (${healthStatus.cdp.tabs} tab${healthStatus.cdp.tabs !== 1 ? 's' : ''})` : 'CDP ✗'}
+                            </span>
+                            {!healthStatus.cdp.ok && (
+                                <span className="text-[9px] text-amber-400/70">Start Chrome with --remote-debugging-port=9222</span>
+                            )}
+                        </div>
+                        {/* Vision */}
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+                            healthStatus.config.vision_enabled
+                                ? 'bg-purple-500/20 text-purple-400'
+                                : 'bg-gray-500/20 text-gray-400'
+                        }`}>
+                            {healthStatus.config.vision_enabled ? '👁 Vision ON' : 'Vision OFF'}
+                        </span>
+                    </div>
+                    <button
+                        onClick={runHealthCheck}
+                        disabled={healthChecking}
+                        className="shrink-0 px-2 py-1 rounded-lg text-[9px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] hover:text-[var(--brand-primary)] transition-colors disabled:opacity-40"
+                    >
+                        {healthChecking ? '…' : '↻ Check'}
+                    </button>
+                </motion.div>
+            )}
+
             {/* Auth notification banner */}
             {backendStatus?.auth_notification && (
                 <motion.div
@@ -336,6 +422,57 @@ export default function DashboardPage({
                                         >
                                             ■ Abort
                                         </button>
+                                    </div>
+                                )}
+
+                                {/* Human feedback input — visible while agent is running or paused */}
+                                {(activeRun.status === 'running' || backendStatus?.paused) && (
+                                    <div className="space-y-2">
+                                        <div className="text-[9px] font-bold uppercase tracking-widest text-[var(--brand-primary)] flex items-center gap-1">
+                                            <Brain size={10} /> Send feedback to agent
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <textarea
+                                                value={feedbackText}
+                                                onChange={e => { setFeedbackText(e.target.value); setFeedbackSent(false); }}
+                                                onKeyDown={async e => {
+                                                    if (e.key === 'Enter' && !e.shiftKey && feedbackText.trim()) {
+                                                        e.preventDefault();
+                                                        setFeedbackSending(true);
+                                                        try {
+                                                            await sendAgentMessage(feedbackText.trim());
+                                                            setFeedbackText('');
+                                                            setFeedbackSent(true);
+                                                            setTimeout(() => setFeedbackSent(false), 3000);
+                                                        } catch (e) { console.error(e); }
+                                                        finally { setFeedbackSending(false); }
+                                                    }
+                                                }}
+                                                placeholder="Tell the agent what to do… (Enter to send, Shift+Enter for newline)"
+                                                rows={2}
+                                                className="flex-1 bg-[var(--base-bg)] border border-[var(--brand-primary)]/30 rounded-xl px-3 py-2 text-xs text-[var(--base-text)] placeholder-[var(--base-text-muted)] resize-none focus:outline-none focus:border-[var(--brand-primary)]/60 transition-colors"
+                                            />
+                                            <button
+                                                onClick={async () => {
+                                                    if (!feedbackText.trim()) return;
+                                                    setFeedbackSending(true);
+                                                    try {
+                                                        await sendAgentMessage(feedbackText.trim());
+                                                        setFeedbackText('');
+                                                        setFeedbackSent(true);
+                                                        setTimeout(() => setFeedbackSent(false), 3000);
+                                                    } catch (e) { console.error(e); }
+                                                    finally { setFeedbackSending(false); }
+                                                }}
+                                                disabled={!feedbackText.trim() || feedbackSending}
+                                                className="px-3 py-2 rounded-xl bg-[var(--brand-primary)]/20 border border-[var(--brand-primary)]/30 text-[var(--brand-primary)] text-[10px] font-bold uppercase tracking-widest hover:bg-[var(--brand-primary)]/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end"
+                                            >
+                                                {feedbackSending ? '…' : feedbackSent ? '✓ Sent' : 'Send'}
+                                            </button>
+                                        </div>
+                                        <p className="text-[9px] text-[var(--base-text-muted)]">
+                                            Agent picks this up at the next step. Use this to redirect it when it gets stuck.
+                                        </p>
                                     </div>
                                 )}
                             </div>

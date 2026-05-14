@@ -256,52 +256,22 @@ class StepHistoryEntry(BaseModel):
     url_after: str
 
     def to_history_text(self) -> str:
-        """
-        Convert this step to a text summary for the agent history.
-        Adapted from Browser Use's step history formatting.
-        """
-        lines = [f"Step {self.step_number + 1}:"]
-        lines.append(f"  Goal: {self.agent_output.next_goal}")
-
-        for i, (action, result) in enumerate(
-            zip(self.agent_output.action, self.action_results)
-        ):
-            status = "✅" if result.success else "❌"
-            action_desc = f"{action.action_name}"
-            if action.action_data:
-                # Get a brief description of the action parameters
-                data = action.action_data
-                if isinstance(data, ClickAction):
-                    action_desc = f"click(index={data.index})"
-                elif isinstance(data, InputTextAction):
-                    action_desc = f"input_text(index={data.index}, text='{data.text[:30]}')"
-                elif isinstance(data, NavigateAction):
-                    action_desc = f"navigate(url='{data.url[:50]}')"
-                elif isinstance(data, DoneAction):
-                    action_desc = f"done(success={data.success})"
-                elif isinstance(data, ComputerCallAction):
-                    action_desc = f"computer_call({data.call[:60]})"
-                elif isinstance(data, WaitAction):
-                    action_desc = f"wait({data.seconds}s)"
-                elif isinstance(data, PressKeyAction):
-                    action_desc = f"press_key('{data.key}')"
-                elif isinstance(data, ScrollAction):
-                    action_desc = f"scroll({data.amount})"
-                elif isinstance(data, ClickNativeAction):
-                    action_desc = f"click_native(index={data.index})"
-                elif isinstance(data, InputTextNativeAction):
-                    action_desc = f"input_text_native(index={data.index}, text='{data.text[:30]}')"
-
-            error_text = f" Error: {result.error}" if result.error else ""
-            lines.append(f"  Action {i + 1}: {status} {action_desc}{error_text}")
+        """Compact summary of the step for agent history."""
+        lines = [f"Step {self.step_number + 1}: {self.agent_output.next_goal[:60]}"]
+        
+        for i, (action, result) in enumerate(zip(self.agent_output.action, self.action_results)):
+            status = "✓" if result.success else "✗"
+            name = action.action_name
+            data = action.action_data
+            desc = name
+            if isinstance(data, ClickAction): desc = f"click({data.index})"
+            elif isinstance(data, InputTextAction): desc = f"fill({data.index},'{data.text[:20]}')"
+            elif isinstance(data, NavigateAction): desc = f"goto({data.url[:40]})"
+            elif isinstance(data, ComputerCallAction): desc = f"call({data.call[:50]})"
+            
+            err = f" ! {result.error[:40]}" if result.error else ""
+            lines.append(f"  {i+1}.{status} {desc}{err}")
 
         if self.url_before != self.url_after:
-            lines.append(f"  URL changed: {self.url_before[:50]} → {self.url_after[:50]}")
-
-        # Show hypotheses — chosen approach and alternatives considered
-        if self.agent_output.hypotheses:
-            lines.append(f"  Chosen approach: {self.agent_output.hypotheses[0]}")
-            if len(self.agent_output.hypotheses) > 1:
-                lines.append(f"  Alternatives considered: {'; '.join(self.agent_output.hypotheses[1:])}")
-
+            lines.append(f"  Url: {self.url_after[:50]}")
         return "\n".join(lines)

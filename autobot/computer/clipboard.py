@@ -81,6 +81,81 @@ class Clipboard:
         time.sleep(0.05)  # Brief pause for paste to register
         logger.debug("Clipboard paste (Ctrl+V)")
 
+    def set_from_file(self, path: str, prefix: str = "", suffix: str = "") -> str:
+        """Read a file and copy its contents (optionally with prefix/suffix text) to the clipboard.
+
+        This is the correct single-step way to load a file's content onto the clipboard.
+        Use this instead of trying to nest computer.files.read() inside clipboard.set().
+
+        Args:
+            path:   Path to the file. Supports ~ expansion.
+            prefix: Optional text to prepend before the file content (e.g. a prompt).
+            suffix: Optional text to append after the file content.
+
+        Returns:
+            Summary string: 'copied N chars from path/to/file to clipboard'
+
+        Example:
+            computer.clipboard.set_from_file('~/Desktop/paper.txt')
+            computer.clipboard.set_from_file('~/Desktop/paper.txt', prefix='Review this paper:\\n\\n')
+        """
+        from pathlib import Path
+        try:
+            p = Path(path).expanduser().resolve()
+            if not p.exists():
+                return f"File not found: {p}"
+            content = p.read_text(encoding="utf-8", errors="replace")
+            full_text = prefix + content + suffix
+            self.set(full_text)
+            logger.info(f"clipboard.set_from_file: copied {len(full_text)} chars from {p}")
+            return f"copied {len(full_text)} chars from {p} to clipboard"
+        except Exception as e:
+            logger.warning(f"clipboard.set_from_file({path!r}) failed: {e}")
+            return f"error: {e}"
+
+    def prepend(self, text: str) -> str:
+        """Prepend text to whatever is currently on the clipboard.
+
+        Use this after clipboard.set_from_file() to add a prompt before the file content.
+        Avoids the need to nest calls or reference variables.
+
+        Args:
+            text: Text to add BEFORE the current clipboard contents.
+
+        Returns:
+            'prepended N chars — clipboard now has M chars total'
+
+        Example:
+            computer.clipboard.set_from_file('~/Desktop/paper.txt')
+            computer.clipboard.prepend('Please review this paper:\\n\\n')
+        """
+        try:
+            current = self.get()
+            new_text = text + current
+            self.set(new_text)
+            logger.info(f"clipboard.prepend: {len(text)} chars prepended, total {len(new_text)} chars")
+            return f"prepended {len(text)} chars — clipboard now has {len(new_text)} chars total"
+        except Exception as e:
+            return f"error: {e}"
+
+    def append(self, text: str) -> str:
+        """Append text to whatever is currently on the clipboard.
+
+        Args:
+            text: Text to add AFTER the current clipboard contents.
+
+        Returns:
+            'appended N chars — clipboard now has M chars total'
+        """
+        try:
+            current = self.get()
+            new_text = current + text
+            self.set(new_text)
+            logger.info(f"clipboard.append: {len(text)} chars appended, total {len(new_text)} chars")
+            return f"appended {len(text)} chars — clipboard now has {len(new_text)} chars total"
+        except Exception as e:
+            return f"error: {e}"
+
     def _fallback_get(self) -> str:
         """Platform-specific fallback for reading clipboard."""
         import subprocess
