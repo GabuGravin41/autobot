@@ -102,10 +102,25 @@ class AgentRunner:
         self.log(f"📋 Max steps: {steps} | Model: {self.model}")
 
         try:
-            # 1. Launch browser
-            self.log("🌐 Launching Chrome with CDP...")
-            page = await self.browser_launcher.start()
-            self.log(f"✅ Browser connected. Current page: {page.url}")
+            # 1. Attach a browser IF WE CAN — but never let its absence end the
+            # run. Plenty of goals ("open Notepad and type hello", "run this
+            # script", "focus Artemis and read the annotation") involve no
+            # browser at all, and this used to raise and kill the task before
+            # a single agent step executed. Autobot is a computer-use agent,
+            # not a browser-only agent: no Chrome means reduced capability,
+            # not failure.
+            self.log("🌐 Attaching to Chrome via CDP...")
+            page = None
+            try:
+                page = await self.browser_launcher.start()
+                self.log(f"✅ Browser connected. Current page: {page.url}")
+            except Exception as browser_error:
+                self.log(
+                    "⚠️  No browser attached - continuing in OS-only mode "
+                    "(native apps, mouse/keyboard, terminal, files still work).\n"
+                    f"    Reason: {str(browser_error).splitlines()[0]}"
+                )
+                logger.warning(f"Browser attach failed, degrading to OS-only: {browser_error}")
 
             # 2. Create LLM client if not provided
             if self.llm_client is None:

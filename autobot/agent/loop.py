@@ -255,7 +255,7 @@ class AgentLoop:
         )
 
         # ─── 4. RECORD ───
-        url_after = self.page.url
+        url_after = self._page_url()
         entry = StepHistoryEntry(
             step_number=self.step_number,
             agent_output=agent_output,
@@ -481,13 +481,13 @@ class AgentLoop:
                     break
 
             # Execute the action
-            url_before = self.page.url
+            url_before = self._page_url()
             result = await self._execute_single_action(action, browser_state)
             results.append(result)
 
             # Page change detection (adapted from Browser Use)
             # If the page changed, skip remaining actions
-            if result.page_changed or self.page.url != url_before:
+            if result.page_changed or self._page_url() != url_before:
                 remaining = len(actions) - i - 1
                 if remaining > 0:
                     logger.info(
@@ -540,6 +540,25 @@ class AgentLoop:
         attr_str = " ".join(f'{k}="{v}"' for k, v in element.attributes.items())
         return f"<{element.tag_name} {attr_str}> {element.text}".strip()
 
+    def _page_url(self) -> str:
+        """Current page URL, or "" when no browser is attached.
+
+        AgentLoop can run without a browser (OS-only mode) — see
+        AgentRunner.run — so every page access has to tolerate page=None.
+        """
+        if self.page is None:
+            return ""
+        try:
+            return self._page_url()
+        except Exception:
+            return ""
+
+    # Actions that cannot work without an attached browser.
+    _BROWSER_ONLY_ACTIONS = (
+        "navigate", "click", "input_text", "scroll_down", "scroll_up",
+        "press_key", "switch_tab", "new_tab", "close_tab", "go_back",
+    )
+
     async def _execute_single_action(
         self,
         action: ActionModel,
@@ -552,6 +571,19 @@ class AgentLoop:
         """
         action_name = action.action_name
         action_data = action.action_data
+
+        if self.page is None and action_name in self._BROWSER_ONLY_ACTIONS:
+            return ActionResult(
+                action_name=action_name,
+                success=False,
+                error=(
+                    f"'{action_name}' needs a browser, but none is attached "
+                    "(OS-only mode). For desktop apps use computer_call instead, e.g. "
+                    '{"computer_call": {"call": "computer.window.focus(\'Notepad\')"}} '
+                    "then computer.window.extract_ui() to see its elements. "
+                    "To get a browser, start Chrome with --remote-debugging-port=9222."
+                ),
+            )
 
         try:
             if action.navigate is not None:
@@ -685,7 +717,7 @@ class AgentLoop:
             return ActionResult(
                 action_name="click",
                 success=True,
-                page_changed=self.page.url != browser_state.url,
+                page_changed=self._page_url() != browser_state.url,
             )
 
         # The CDP click didn't land. Rather than report failure and let the
@@ -722,7 +754,7 @@ class AgentLoop:
                 await asyncio.sleep(0.5)
                 return ActionResult(
                     action_name="click", success=True,
-                    page_changed=self.page.url != browser_state.url,
+                    page_changed=self._page_url() != browser_state.url,
                     extracted_content="recovered: needed scroll into view first",
                 )
             attempts.append(f"scroll+cdp_click: {retry}")
@@ -740,7 +772,7 @@ class AgentLoop:
                 await asyncio.sleep(0.5)
                 return ActionResult(
                     action_name="click", success=True,
-                    page_changed=self.page.url != browser_state.url,
+                    page_changed=self._page_url() != browser_state.url,
                     extracted_content="recovered: normal click was intercepted; used JS click",
                 )
             attempts.append(f"js_click: {js_result}")

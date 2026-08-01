@@ -125,14 +125,41 @@ class AsyncBrowserLauncher:
             logger.info(f"Chrome already running with CDP on port {self.debug_port}")
             return
 
-        # Attempt to kill lingering non-CDP Chrome processes on Windows to release profile lock
-        try:
-            if os.name == "nt":
+        # A Chrome that's already running WITHOUT the debug port is the single
+        # most common reason attaching fails: launching a second chrome.exe
+        # against the same --user-data-dir just hands off to the existing
+        # process and exits, so no CDP listener ever appears.
+        #
+        # This used to be "solved" with an unconditional `taskkill /F /IM
+        # chrome.exe`, which force-killed every window the user had open —
+        # losing their tabs and any unsaved work — without asking, and then
+        # waited only 1s, which isn't long enough for Chrome to release its
+        # SingletonLock anyway. Destroying the user's browsing session is not
+        # an acceptable default, so it is now opt-in.
+        if os.name == "nt" and self._chrome_is_running():
+            if os.getenv("AUTOBOT_ALLOW_CHROME_KILL", "").lower() in ("1", "true", "yes"):
+                logger.warning("AUTOBOT_ALLOW_CHROME_KILL set — force-closing your Chrome windows.")
                 subprocess.run("taskkill /F /IM chrome.exe", shell=True, capture_output=True)
-                logger.info("🧹 Closed background Chrome processes to release profile lock for CDP.")
-                await _async_sleep(1.0)
-        except Exception as e:
-            logger.debug(f"Taskkill check: {e}")
+                # Wait for the processes to actually exit and release the
+                # profile lock, rather than assuming 1s was enough.
+                for _ in range(10):
+                    await _async_sleep(0.5)
+                    if not self._chrome_is_running():
+                        break
+                await _async_sleep(1.0)  # let SingletonLock clear
+            else:
+                raise RuntimeError(
+                    f"Chrome is already running without the DevTools port open, so Autobot "
+                    f"cannot attach to it (starting another Chrome would just hand off to the "
+                    f"existing one).\n\n"
+                    f"Pick either:\n"
+                    f"  1. Close Chrome yourself, then re-run. Autobot will start it correctly.\n"
+                    f"  2. Leave your tabs open and start a CDP-enabled Chrome yourself:\n"
+                    f'       & "{self.chrome_path}" --remote-debugging-port={self.debug_port} '
+                    f'--profile-directory="{self.profile_dir}"\n\n'
+                    f"Autobot will NOT force-close your Chrome for you — you'd lose open tabs "
+                    f"and unsaved work. To allow that anyway, set AUTOBOT_ALLOW_CHROME_KILL=1."
+                )
 
         # Target the real user profile directory strictly
         target_dir = self.user_data_dir or _real_chrome_user_data_dir()
@@ -202,6 +229,20 @@ class AsyncBrowserLauncher:
         else:
             self._context = await self._browser.new_context()
             self._page = await self._context.new_page()
+
+    @staticmethod
+    def _chrome_is_running() -> bool:
+        """True if any chrome.exe process exists (Windows only)."""
+        if os.name != "nt":
+            return False
+        try:
+            out = subprocess.run(
+                'tasklist /FI "IMAGENAME eq chrome.exe" /NH',
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
+            return "chrome.exe" in (out.stdout or "")
+        except Exception:
+            return False
 
     async def _is_cdp_available(self) -> bool:
         """Check if CDP endpoint is available."""
