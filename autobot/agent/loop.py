@@ -52,6 +52,14 @@ from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 logger = logging.getLogger(__name__)
 
 
+class LLMUnavailableError(RuntimeError):
+    """The LLM failed repeatedly, so no further progress is possible.
+
+    Raised to stop the run immediately rather than letting the agent spend its
+    whole step budget on requests that cannot succeed.
+    """
+
+
 class AgentLoop:
     """
     The core agent loop: observe → think → act → verify.
@@ -97,6 +105,14 @@ class AgentLoop:
         self.previous_dom_state: DOMSerializedState | None = None
         # Whether the agent's done() reported success — gates skill distillation.
         self._last_done_success = False
+        # If the LLM is unreachable (bad key, no credit, network down), every
+        # step fails identically. Without a circuit breaker the agent silently
+        # burns its ENTIRE step budget re-issuing a doomed request and then
+        # reports "No steps were executed", which says nothing about the real
+        # cause. Track consecutive failures and abort early with the actual error.
+        self._consecutive_llm_failures = 0
+        self._last_llm_error: str = ""
+        self._max_consecutive_llm_failures = 3
 
         # ── Vision cost control ──────────────────────────────────────────
         # A screenshot is by far the most expensive part of a step (roughly
@@ -160,6 +176,11 @@ class AgentLoop:
 
                 self.step_number += 1
 
+            except LLMUnavailableError:
+                # Not recoverable by retrying — the model itself is unreachable.
+                # Propagate so the user sees the real cause immediately instead
+                # of a spun-out step budget.
+                raise
             except Exception as e:
                 logger.error(f"❌ Step {self.step_number + 1} failed: {e}")
                 self.step_number += 1
@@ -238,8 +259,22 @@ class AgentLoop:
         agent_output = await self._call_llm(browser_state, native_context=native_context)
 
         if agent_output is None:
-            logger.error("LLM returned no output")
+            self._consecutive_llm_failures += 1
+            logger.error(
+                f"LLM returned no output "
+                f"({self._consecutive_llm_failures}/{self._max_consecutive_llm_failures} consecutive)"
+            )
+            if self._consecutive_llm_failures >= self._max_consecutive_llm_failures:
+                raise LLMUnavailableError(
+                    f"The LLM failed {self._consecutive_llm_failures} times in a row, so "
+                    f"the agent cannot make progress. Last error:\n  {self._last_llm_error}\n\n"
+                    "Common causes: no credit on the API account, an invalid or revoked "
+                    "API key, no network access, or a model name that doesn't exist for "
+                    "this provider. Run 'autobot --doctor' to check configuration."
+                )
             return None
+
+        self._consecutive_llm_failures = 0
 
         logger.info(
             f"Step {self.step_number + 1}: "
@@ -394,9 +429,16 @@ class AgentLoop:
 
         try:
             response = await self._make_llm_call(messages)
-            return self._parse_agent_output(response)
+            parsed = self._parse_agent_output(response)
+            if parsed is None:
+                self._last_llm_error = (
+                    "the model replied, but its output was not valid JSON matching the "
+                    "required action schema"
+                )
+            return parsed
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            self._last_llm_error = f"{type(e).__name__}: {e}"
+            logger.error(f"LLM call failed: {self._last_llm_error}")
             return None
 
     async def _make_llm_call(self, messages: list[dict]) -> str:

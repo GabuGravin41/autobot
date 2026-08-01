@@ -33,7 +33,30 @@ def _load_env() -> None:
             pass
 
 
+def _make_stdout_unicode_safe() -> None:
+    """Stop the CLI from dying on its own log characters.
+
+    Autobot's output is full of box-drawing rules and emoji status markers.
+    Windows Terminal negotiates UTF-8 so they render fine there, but a plain
+    console — or ANY redirect to a file or pipe — falls back to cp1252, where
+    printing them raises UnicodeEncodeError and takes the whole run down
+    before a single agent step executes:
+
+        print("\\u2500" * 50)
+        UnicodeEncodeError: 'charmap' codec can't encode characters...
+
+    errors="replace" matters as much as the encoding: if a console genuinely
+    cannot render a glyph we want a '?' in the log, never a crashed run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass  # not a real TTY / already wrapped — nothing to do
+
+
 def main() -> None:
+    _make_stdout_unicode_safe()
     _load_env()
 
     parser = argparse.ArgumentParser(

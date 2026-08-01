@@ -116,6 +116,35 @@ async def main():
     check("vision decision runs without a browser",
           isinstance(agent2._should_use_vision(_empty_state()), bool))
 
+    # ── 7. An unreachable LLM must fail FAST, not burn the step budget ───
+    # Regression: with the LLM down, the agent spun through all 25 steps and
+    # then reported "No steps were executed", telling the user nothing.
+    from autobot.agent.loop import LLMUnavailableError
+
+    class DeadCompletions:
+        def __init__(self): self.attempts = 0
+        async def create(self, **kwargs):
+            self.attempts += 1
+            raise ConnectionError("simulated: API unreachable")
+    class DeadLLM:
+        def __init__(self):
+            self.chat = type("C", (), {})()
+            self.chat.completions = DeadCompletions()
+
+    dead = DeadLLM()
+    agent3 = AgentLoop(page=None, llm_client=dead, goal="x", model="fake", max_steps=25)
+    try:
+        await agent3.run()
+        check("unreachable LLM raises instead of spinning", False, "run() returned normally")
+    except LLMUnavailableError as e:
+        check("unreachable LLM raises instead of spinning", True)
+        check("aborts after 3 attempts, not 25",
+              dead.chat.completions.attempts == 3, f"attempts={dead.chat.completions.attempts}")
+        check("error names the underlying cause",
+              "unreachable" in str(e) or "ConnectionError" in str(e), str(e)[:120])
+    except Exception as e:
+        check("unreachable LLM raises instead of spinning", False, f"wrong type: {type(e).__name__}")
+
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("FAILED:", ", ".join(FAIL))
