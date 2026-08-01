@@ -486,19 +486,127 @@ def get_logs(limit: int = 500):
 class ChatRequest(BaseModel):
     message: str
     state: dict = {}
+    # The frontend has always sent this (apiService.ts's sendChat: "Supports
+    # multi-turn conversation by passing message history", with a 5-minute
+    # timeout explicitly anticipating a real, possibly-slow LLM call) — but
+    # this field didn't exist here, so pydantic silently dropped it on every
+    # request. A stub that ignores its own turn history was one of two
+    # reasons multi-turn planning never worked; the other was that nothing
+    # here ever called an LLM at all.
+    history: list[dict] = []
+
+
+_CHAT_SYSTEM_PROMPT = """You are Autobot's planning assistant. Have a natural, brief \
+conversation with the user about the computer task they want done — browser \
+automation, native desktop apps, research, file operations, anything Autobot can do.
+
+Ask ONE clarifying question if something essential and genuinely ambiguous is \
+missing (e.g. which website, which file). Don't ask about details you can \
+reasonably infer or that don't change the plan.
+
+Once you understand the goal well enough to act, stop asking questions and \
+propose a plan.
+
+Respond with ONLY valid JSON in this exact shape:
+{
+  "reply": "what you say to the user - a question, or a short summary if proposing a plan",
+  "needs_plan": true or false,
+  "plan_name": "short plan name (only if needs_plan is true)",
+  "plan_description": "one sentence describing the goal (only if needs_plan is true)",
+  "plan_steps": ["step 1 in plain language", "step 2", "..."]   // only if needs_plan is true, 3-8 steps
+}"""
+
 
 @app.post("/api/chat")
-def chat(req: ChatRequest):
-    plan = {
-        "id": f"plan_{int(time.time())}",
-        "name": "Auto Task",
-        "description": req.message,
-        "steps": [{"action": "auto_execute", "args": {}, "description": f"Autonomously execute: {req.message}"}]
+async def chat(req: ChatRequest):
+    """
+    AI Planner: a real multi-turn conversation backed by an LLM, ending in a
+    proposed plan the user can review and execute.
+
+    Previously this endpoint never called an LLM at all — it synchronously
+    fabricated an identical single-step "Auto Task" plan from whatever text
+    was typed, regardless of content, and ignored the conversation history
+    the frontend was already sending. That's what "an execution plan appears
+    immediately, for no clear reason" was: there was no thinking step to
+    wait for, because nothing was ever asked to think.
+    """
+    from ..agent.runner import _create_llm_client
+
+    llm_client = _create_llm_client()
+    if llm_client is None:
+        return {
+            "reply": "No LLM is configured, so I can't plan anything yet. "
+                     "Set an API key (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or "
+                     "OPENAI_API_KEY) in .env, then restart the server. "
+                     "Run 'autobot --doctor' to check your setup.",
+            "plan": None,
+        }
+
+    messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
+    for turn in req.history[-10:]:  # bounded — this is a chat panel, not the full run log
+        role = turn.get("role")
+        content = turn.get("content")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": req.message})
+
+    model = os.getenv("AUTOBOT_LLM_MODEL") or "gpt-4o"
+    call_kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
     }
-    return {
-        "reply": "I have created a direct automation plan for your task. Click Execute to begin.",
-        "plan": plan
-    }
+
+    try:
+        try:
+            resp = await llm_client.chat.completions.create(**call_kwargs)
+        except TypeError:
+            resp = await asyncio.to_thread(llm_client.chat.completions.create, **call_kwargs)
+        raw = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        _log(f"Chat LLM call failed: {e}")
+        return {
+            "reply": f"Sorry, I couldn't reach the LLM: {e}",
+            "plan": None,
+        }
+
+    data = _parse_chat_json(raw)
+    if data is None:
+        _log(f"Chat: could not parse LLM JSON, treating as plain reply: {raw[:200]}")
+        return {"reply": raw or "I didn't get a response — try rephrasing?", "plan": None}
+
+    reply = str(data.get("reply") or "").strip() or "..."
+    plan = None
+    if data.get("needs_plan") and data.get("plan_steps"):
+        plan = {
+            "id": f"plan_{int(time.time())}",
+            "name": str(data.get("plan_name") or "Task Plan")[:100],
+            "description": str(data.get("plan_description") or req.message)[:500],
+            "steps": [
+                {"action": "auto_execute", "args": {}, "description": str(s)[:300]}
+                for s in data["plan_steps"][:10]
+                if str(s).strip()
+            ],
+        }
+    return {"reply": reply, "plan": plan}
+
+
+def _parse_chat_json(raw: str) -> dict | None:
+    """Parse the chat LLM's JSON reply, tolerating markdown code fences."""
+    import re
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL) or \
+        re.search(r"(\{.*\})", raw, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 _frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
