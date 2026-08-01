@@ -136,6 +136,30 @@ actually working (not just present).
    the pieces underneath are solid, is exactly how the project got into
    the state this file exists to prevent.
 
+### Round 3 — making failure legible and runs cheap
+- **`autobot --doctor`** (`autobot/diagnostics.py`). Every serious bug in
+  this project failed at a different layer but surfaced identically: "it
+  doesn't work." The doctor checks each layer independently — Python
+  version, required and optional packages, `.env`, which LLM key is set
+  (never its value), approval mode, Chrome executable, whether anything is
+  listening on the CDP port, writable dirs, and how many skills have been
+  learned — and prints an actionable fix per failure. No LLM calls, no
+  browser, pure stdlib, so it works even when the agent is badly broken.
+- **Vision cost control** (`AUTOBOT_VISION_MODE=always|auto|never`).
+  A screenshot is roughly 1-2k tokens versus a few hundred for the DOM
+  text, and it was being sent on EVERY step. `auto` (the new default)
+  spends it only where it pays: the first step, when the DOM is too sparse
+  to act on (canvas apps, SPAs mid-render), and after a failed action —
+  where the text state has demonstrably proven insufficient. In `never`
+  mode the screenshot isn't even captured.
+- **Self-correction ladder for clicks.** A failed click used to return a
+  bare failure, and the model would typically re-issue the identical
+  click. It now escalates through genuinely different mechanisms —
+  CDP click, then scroll-into-view + retry, then `click_via_js()` which
+  bypasses pointer hit-testing entirely (the fix for overlay/banner
+  interception) — and if all fail, reports every method tried plus an
+  explicit "do NOT retry this same click" with likely causes.
+
 ## Verification standard
 
 Everything above marked "done and tested" has behavioral tests that

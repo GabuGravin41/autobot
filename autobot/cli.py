@@ -48,6 +48,11 @@ def main() -> None:
         help="Run initial setup (install playwright browsers, etc.)",
     )
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Diagnose the environment (deps, Chrome/CDP, API keys) without running a task",
+    )
+    parser.add_argument(
         "--host",
         default="127.0.0.1",
         help="Host for the web server (default: 127.0.0.1)",
@@ -69,6 +74,10 @@ def main() -> None:
     if args.version:
         print("autobot 0.1.0")
         return
+
+    if args.doctor:
+        from autobot.diagnostics import main as doctor_main
+        sys.exit(doctor_main())
 
     if args.setup:
         _run_setup()

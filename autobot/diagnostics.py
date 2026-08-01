@@ -1,0 +1,331 @@
+"""
+Preflight Diagnostics - answer "why isn't it working?" before spending a run.
+
+Every serious bug found in this project so far (a dead import, a missing
+action field, an uncalled function, a stubbed endpoint, an unguarded
+Windows-only import) failed at a different layer, and every one of them
+surfaced to the user as the same thing: the agent just didn't work. There
+was no way to tell a missing API key from a missing package from Chrome not
+listening on the debug port.
+
+This module checks each layer independently and reports what is broken and
+how to fix it - with no LLM calls and no browser automation, so it costs
+nothing to run and works even when the agent itself is badly broken.
+
+Run with:  autobot --doctor
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import platform
+import shutil
+import sys
+import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
+
+# Status values, ordered by severity.
+OK = "OK"
+WARN = "WARN"
+FAIL = "FAIL"
+
+_ICON = {OK: "[ OK ]", WARN: "[WARN]", FAIL: "[FAIL]"}
+
+
+@dataclass
+class Check:
+    name: str
+    status: str
+    detail: str = ""
+    fix: str = ""
+
+    def render(self) -> str:
+        line = f"{_ICON[self.status]} {self.name}"
+        if self.detail:
+            line += f"\n        {self.detail}"
+        if self.fix and self.status != OK:
+            line += f"\n        -> {self.fix}"
+        return line
+
+
+# ── Individual checks ─────────────────────────────────────────────────────────
+
+def check_python() -> Check:
+    v = sys.version_info
+    version = f"{v.major}.{v.minor}.{v.micro}"
+    if v < (3, 10):
+        return Check(
+            "Python version", FAIL, f"found {version}",
+            "Autobot uses 3.10+ syntax (X | None). Install Python 3.10 or newer.",
+        )
+    return Check("Python version", OK, version)
+
+
+def _module_present(name: str) -> bool:
+    """True if importable WITHOUT importing it (avoids side effects)."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def check_required_packages() -> list[Check]:
+    """Packages the agent cannot run at all without."""
+    required = {
+        "pydantic": "pip install pydantic",
+        "openai": "pip install openai",
+        "playwright": "pip install playwright && playwright install chromium",
+        "httpx": "pip install httpx",
+        "websockets": "pip install websockets",
+        "PIL": "pip install Pillow",
+    }
+    checks = []
+    missing = [n for n in required if not _module_present(n)]
+    for name, fix in required.items():
+        if name in missing:
+            checks.append(Check(f"package: {name}", FAIL, "not installed", fix))
+        else:
+            checks.append(Check(f"package: {name}", OK))
+    if missing:
+        checks.append(Check(
+            "install all requirements", FAIL,
+            f"{len(missing)} required package(s) missing",
+            "pip install -r requirements.txt",
+        ))
+    return checks
+
+
+def check_optional_packages() -> list[Check]:
+    """Packages that disable a capability when missing, but don't break the agent."""
+    checks: list[Check] = []
+
+    if platform.system() == "Windows":
+        if _module_present("uiautomation"):
+            checks.append(Check("native app control (uiautomation)", OK,
+                                "can drive Artemis / VESTA / Excel"))
+        else:
+            checks.append(Check(
+                "native app control (uiautomation)", WARN,
+                "not installed - Autobot is blind outside the browser",
+                "pip install uiautomation",
+            ))
+    else:
+        checks.append(Check(
+            "native app control (uiautomation)", WARN,
+            f"unavailable on {platform.system()} (Windows-only)",
+            "Native desktop automation currently requires Windows.",
+        ))
+
+    if _module_present("pyautogui"):
+        checks.append(Check("mouse/keyboard control (pyautogui)", OK))
+    else:
+        checks.append(Check(
+            "mouse/keyboard control (pyautogui)", FAIL,
+            "not installed - anti_sleep imports it at module load, which "
+            "breaks Computer() and therefore the whole agent",
+            "pip install pyautogui",
+        ))
+    return checks
+
+
+def check_chrome() -> Check:
+    """Locate the Chrome executable the launcher will try to start."""
+    candidates = [
+        os.getenv("AUTOBOT_CHROME_EXECUTABLE"),
+        os.getenv("CHROME_EXECUTABLE"),
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+    ]
+    for path in candidates:
+        if path and Path(path).exists():
+            return Check("Chrome executable", OK, path)
+    if shutil.which("google-chrome") or shutil.which("chrome"):
+        return Check("Chrome executable", OK, "found on PATH")
+    return Check(
+        "Chrome executable", FAIL, "not found in any standard location",
+        "Install Chrome, or set AUTOBOT_CHROME_EXECUTABLE to its full path in .env",
+    )
+
+
+def check_cdp(port: int | None = None) -> Check:
+    """Is a Chrome already listening on the DevTools port we attach to?"""
+    port = port or int(os.getenv("AUTOBOT_CDP_PORT", "9222"))
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2) as r:
+            info = json.loads(r.read())
+        browser = info.get("Browser", "unknown")
+        return Check(f"Chrome DevTools port {port}", OK, f"reachable - {browser}")
+    except Exception:
+        return Check(
+            f"Chrome DevTools port {port}", WARN,
+            "nothing listening (Autobot will try to launch Chrome itself)",
+            "If launching fails, close ALL Chrome windows first, or start Chrome "
+            f'manually with --remote-debugging-port={port}',
+        )
+
+
+def check_llm_config() -> list[Check]:
+    """Which provider will be used, and is a key present?
+
+    Only reports whether a key is SET - never its value, and never validates
+    it against the network (that would cost a request and could leak the key
+    into logs on failure).
+    """
+    providers = {
+        "OPENROUTER_API_KEY": "openrouter",
+        "OPENAI_API_KEY": "openai",
+        "GEMINI_API_KEY": "gemini",
+        "GOOGLE_API_KEY": "gemini",
+        "ANTHROPIC_API_KEY": "anthropic (not yet supported natively)",
+    }
+    present = [(k, v) for k, v in providers.items() if os.getenv(k)]
+    checks: list[Check] = []
+
+    if not present:
+        checks.append(Check(
+            "LLM API key", FAIL, "no provider key found in environment or .env",
+            "Set OPENROUTER_API_KEY (or OPENAI_API_KEY) in .env. "
+            "For Claude models, route via OpenRouter - Autobot has no native "
+            "Anthropic client yet.",
+        ))
+    else:
+        names = ", ".join(k for k, _ in present)
+        checks.append(Check("LLM API key", OK, f"set: {names}"))
+
+    if os.getenv("ANTHROPIC_API_KEY") and len(present) == 1:
+        checks.append(Check(
+            "Anthropic key usable?", WARN,
+            "ANTHROPIC_API_KEY is set but Autobot's client is OpenAI-compatible only",
+            "Use OpenRouter with AUTOBOT_LLM_MODEL=anthropic/claude-... instead.",
+        ))
+
+    configured = os.getenv("AUTOBOT_LLM_PROVIDER", "(auto-detect)")
+    model = os.getenv("AUTOBOT_LLM_MODEL", "(provider default)")
+    checks.append(Check("LLM provider / model", OK, f"provider={configured}  model={model}"))
+    return checks
+
+
+def check_approval_mode() -> Check:
+    mode = os.getenv("AUTOBOT_APPROVAL_MODE", "balanced").lower()
+    if mode not in ("strict", "balanced", "trusted"):
+        return Check(
+            "approval mode", FAIL, f"unrecognized value '{mode}'",
+            "Set AUTOBOT_APPROVAL_MODE to strict, balanced, or trusted.",
+        )
+    note = {
+        "strict": "pauses for CAUTION and above",
+        "balanced": "pauses for DANGER and above",
+        "trusted": "pauses only for IRREVERSIBLE actions",
+    }[mode]
+    return Check("approval mode", OK, f"{mode} - {note}")
+
+
+def check_env_file() -> Check:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        return Check(".env file", OK, str(env_path))
+    return Check(
+        ".env file", WARN, "not found - relying on shell environment only",
+        f"Create {env_path} with your API key(s) so settings persist between runs.",
+    )
+
+
+def check_writable_dirs() -> list[Check]:
+    """Directories the agent writes to during a run."""
+    targets = {
+        "learned skills": Path.cwd() / "autobot" / "knowledge" / "skills",
+        "run history": Path.cwd() / "runs",
+    }
+    checks = []
+    for label, path in targets.items():
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".write_probe"
+            probe.write_text("x", encoding="utf-8")
+            probe.unlink()
+            checks.append(Check(f"writable: {label}", OK, str(path)))
+        except Exception as e:
+            checks.append(Check(
+                f"writable: {label}", FAIL, f"{path} - {e}",
+                "Check folder permissions, or run Autobot from a directory you own.",
+            ))
+    return checks
+
+
+def check_learned_skills() -> Check:
+    """How much the agent has learned - directly predicts token cost per run."""
+    skills_dir = Path.cwd() / "autobot" / "knowledge" / "skills"
+    if not skills_dir.exists():
+        return Check("learned skills", WARN, "none yet - first runs cost full price")
+    files = list(skills_dir.glob("*.json"))
+    if not files:
+        return Check(
+            "learned skills", WARN,
+            "none yet - every run re-derives from scratch at full token cost",
+            "Skills are saved automatically when a run ends with done(success=true).",
+        )
+    return Check("learned skills", OK, f"{len(files)} saved - repeat tasks run cheaper")
+
+
+# ── Runner ────────────────────────────────────────────────────────────────────
+
+def run_all() -> list[Check]:
+    """Run every check. Never raises - a broken check must not break the doctor."""
+    checks: list[Check] = []
+    steps = [
+        lambda: [check_python()],
+        check_required_packages,
+        check_optional_packages,
+        lambda: [check_env_file()],
+        check_llm_config,
+        lambda: [check_approval_mode()],
+        lambda: [check_chrome()],
+        lambda: [check_cdp()],
+        check_writable_dirs,
+        lambda: [check_learned_skills()],
+    ]
+    for step in steps:
+        try:
+            checks.extend(step())
+        except Exception as e:
+            checks.append(Check(f"check failed: {step}", WARN, str(e)))
+    return checks
+
+
+def report(checks: list[Check]) -> int:
+    """Print the report. Returns a process exit code (0 = usable)."""
+    fails = [c for c in checks if c.status == FAIL]
+    warns = [c for c in checks if c.status == WARN]
+
+    print("=" * 68)
+    print(" Autobot Preflight Diagnostics")
+    print("=" * 68)
+    for c in checks:
+        print(c.render())
+    print("-" * 68)
+
+    if fails:
+        print(f"{len(fails)} blocking problem(s), {len(warns)} warning(s).")
+        print("\nFix the [FAIL] items above before running a task - the agent")
+        print("cannot work until they are resolved. Warnings reduce capability")
+        print("but still allow a run.")
+        return 1
+
+    if warns:
+        print(f"No blocking problems. {len(warns)} warning(s) - reduced capability.")
+    else:
+        print("All checks passed. Autobot is ready to run.")
+    print("\nNext: try the cheapest possible end-to-end test first -")
+    print('  autobot "open Notepad and type hello"')
+    print("It exercises window focus, native UI extraction, and computer_call")
+    print("in ~4 steps, so a failure points at one layer instead of nine.")
+    return 0
+
+
+def main() -> int:
+    return report(run_all())

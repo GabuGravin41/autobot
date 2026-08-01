@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -96,6 +97,26 @@ class AgentLoop:
         self.previous_dom_state: DOMSerializedState | None = None
         # Whether the agent's done() reported success — gates skill distillation.
         self._last_done_success = False
+
+        # ── Vision cost control ──────────────────────────────────────────
+        # A screenshot is by far the most expensive part of a step (roughly
+        # 1-2k tokens each, versus a few hundred for the DOM text). Most
+        # browser steps don't need one: the DOM snapshot already names every
+        # interactive element. So send vision only when it actually adds
+        # information — see _should_use_vision().
+        #   always    — every step (most expensive; use when debugging)
+        #   auto      — first step, after a failure, or when the DOM is sparse
+        #   never     — text only (cheapest; blind to canvas/image-only UIs)
+        self.vision_mode = os.getenv("AUTOBOT_VISION_MODE", "auto").lower()
+        if self.vision_mode not in ("always", "auto", "never"):
+            logger.warning(f"Unknown AUTOBOT_VISION_MODE '{self.vision_mode}', using 'auto'")
+            self.vision_mode = "auto"
+        if not use_vision:
+            self.vision_mode = "never"
+        # Below this many interactive elements, the DOM probably failed to
+        # describe the page (SPA still rendering, canvas app) and a screenshot
+        # is worth its cost.
+        self._sparse_dom_threshold = 5
 
         # Computer API for OS-level tools
         self.computer = Computer()
@@ -196,6 +217,7 @@ class AgentLoop:
         dom_service = DOMExtractionService(
             self.page,
             previous_state=self.previous_dom_state,
+            capture_screenshot=self.vision_mode != "never",
         )
         browser_state = await dom_service.extract_state()
         url_before = browser_state.url
@@ -296,6 +318,39 @@ class AgentLoop:
             logger.debug(f"Native window extraction skipped: {e}")
             return ""
 
+    def _should_use_vision(self, browser_state: BrowserState) -> bool:
+        """
+        Decide whether this step is worth a screenshot.
+
+        Sending an image every step is the single largest recurring cost in a
+        run, and on a well-described DOM page it usually tells the model
+        nothing the element list didn't already. We spend it where it pays:
+        orienting on the first step, recovering after something went wrong,
+        and whenever the text description looks too thin to act on.
+        """
+        if self.vision_mode == "never":
+            return False
+        if self.vision_mode == "always":
+            return True
+
+        # auto:
+        if self.step_number == 0:
+            return True  # orient once at the start
+
+        # The DOM didn't describe much — likely a canvas app, an image-only
+        # UI, or a page still rendering. Look at it directly.
+        if browser_state.num_interactive < self._sparse_dom_threshold:
+            return True
+
+        # Something failed last step: the text state evidently wasn't enough
+        # to choose a working action, so pay for eyes on the retry.
+        if self.history:
+            last = self.history[-1]
+            if any(not r.success for r in last.action_results):
+                return True
+
+        return False
+
     async def _call_llm(
         self, browser_state: BrowserState, native_context: str = ""
     ) -> AgentOutput | None:
@@ -326,7 +381,10 @@ class AgentLoop:
             native_window_context=native_context,
         )
 
-        user_messages = step_builder.build_messages(use_vision=self.use_vision)
+        use_vision = self._should_use_vision(browser_state)
+        if not use_vision:
+            logger.debug(f"Step {self.step_number + 1}: text-only (vision skipped to save tokens)")
+        user_messages = step_builder.build_messages(use_vision=use_vision)
 
         # Construct full message list
         messages = [
@@ -608,7 +666,8 @@ class AgentLoop:
         "CDP DOM Query First").
         """
         index = click.index
-        if browser_state.selector_map.get(index) is None:
+        element = browser_state.selector_map.get(index)
+        if element is None:
             return ActionResult(
                 action_name="click",
                 success=False,
@@ -618,16 +677,90 @@ class AgentLoop:
         try:
             result_text = await asyncio.to_thread(self.computer.browser.click_element, index)
         except Exception as e:
-            return ActionResult(action_name="click", success=False, error=f"Click on [{index}] failed: {e}")
+            result_text = f"error: {e}"
 
-        if not result_text.startswith("clicked "):
-            return ActionResult(action_name="click", success=False, error=result_text)
+        if result_text.startswith("clicked "):
+            logger.info(f"Clicked [{index}]: {result_text}")
+            await asyncio.sleep(0.5)
+            return ActionResult(
+                action_name="click",
+                success=True,
+                page_changed=self.page.url != browser_state.url,
+            )
 
-        logger.info(f"Clicked [{index}]: {result_text}")
-        await asyncio.sleep(0.5)
-        page_changed = self.page.url != browser_state.url
+        # The CDP click didn't land. Rather than report failure and let the
+        # model burn its next step re-issuing the identical click, escalate to
+        # a physically different interaction — an element can be present in the
+        # DOM but covered by an overlay, outside the viewport, or only
+        # responsive to a real OS-level mouse event.
+        return await self._click_fallback_ladder(index, element, browser_state, result_text)
 
-        return ActionResult(action_name="click", success=True, page_changed=page_changed)
+    async def _click_fallback_ladder(
+        self,
+        index: int,
+        element: Any,
+        browser_state: BrowserState,
+        first_error: str,
+    ) -> ActionResult:
+        """
+        Try progressively different ways of clicking the same element.
+
+        Each rung is a genuinely different mechanism, not a retry of the last
+        one — repeating an identical failing action is the single most common
+        way this agent used to waste its whole step budget.
+        """
+        attempts = [f"cdp_click: {first_error}"]
+
+        # Rung 1: scroll it into view, then click again. Handles elements that
+        # resolve fine but sit outside the current viewport.
+        try:
+            await asyncio.to_thread(self.computer.browser.scroll_to, index)
+            await asyncio.sleep(0.3)
+            retry = await asyncio.to_thread(self.computer.browser.click_element, index)
+            if retry.startswith("clicked "):
+                logger.info(f"Clicked [{index}] after scrolling into view")
+                await asyncio.sleep(0.5)
+                return ActionResult(
+                    action_name="click", success=True,
+                    page_changed=self.page.url != browser_state.url,
+                    extracted_content="recovered: needed scroll into view first",
+                )
+            attempts.append(f"scroll+cdp_click: {retry}")
+        except Exception as e:
+            attempts.append(f"scroll+cdp_click: {e}")
+
+        # Rung 2: call the element's own .click() in JS. This dispatches no
+        # mouse events at coordinates, so it bypasses pointer hit-testing —
+        # the fix when the correct element is found but a transparent overlay,
+        # cookie banner, or sticky header is intercepting the real click.
+        try:
+            js_result = await asyncio.to_thread(self.computer.browser.click_via_js, index)
+            if js_result.startswith("js-clicked "):
+                logger.info(f"Clicked [{index}] via JS fallback (something was intercepting)")
+                await asyncio.sleep(0.5)
+                return ActionResult(
+                    action_name="click", success=True,
+                    page_changed=self.page.url != browser_state.url,
+                    extracted_content="recovered: normal click was intercepted; used JS click",
+                )
+            attempts.append(f"js_click: {js_result}")
+        except Exception as e:
+            attempts.append(f"js_click: {e}")
+
+        # All rungs failed. Report every distinct thing that was tried, so the
+        # model picks a different STRATEGY next step (different element, scroll,
+        # dismiss an overlay) instead of the same click a third time.
+        return ActionResult(
+            action_name="click",
+            success=False,
+            error=(
+                f"Click on [{index}] <{element.tag_name}> '{element.text[:40]}' failed "
+                f"after {len(attempts)} different methods:\n  - " + "\n  - ".join(attempts)
+                + "\nDo NOT retry this same click. The element may be covered by an "
+                "overlay/modal, disabled, or inside an iframe. Try dismissing any "
+                "popup, scrolling, or targeting a different element."
+            ),
+        )
 
     async def _execute_input(self, input_action: InputTextAction, browser_state: BrowserState) -> ActionResult:
         """

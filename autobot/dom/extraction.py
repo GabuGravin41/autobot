@@ -54,9 +54,18 @@ class DOMExtractionService:
     or for resolving clicks (that stays in computer/browser.py, CDP-only).
     """
 
-    def __init__(self, page: Any, previous_state: DOMSerializedState | None = None):
+    def __init__(
+        self,
+        page: Any,
+        previous_state: DOMSerializedState | None = None,
+        capture_screenshot: bool = True,
+    ):
         self.page = page
         self.previous_state = previous_state
+        # When the caller already knows it will never send an image (vision
+        # disabled), skip the capture entirely — it costs real wall-clock time
+        # on every step for a result nothing reads.
+        self.capture_screenshot = capture_screenshot
 
     async def extract_state(self) -> BrowserState:
         """
@@ -175,6 +184,8 @@ class DOMExtractionService:
         return tabs
 
     async def _get_screenshot(self) -> str | None:
+        if not self.capture_screenshot:
+            return None
         try:
             png_bytes = await self.page.screenshot(type="jpeg", quality=60)
             return base64.b64encode(png_bytes).decode("ascii")
