@@ -55,8 +55,16 @@ _MAX_LOG_LINES = 500           # per-task log ring buffer size
 # How many tasks can be actively running (using CPU/LLM) at the same time.
 # Only ONE holds the ScreenLock at any moment — the rest are in their LLM wait
 # window. This is what enables smooth time-sliced handoffs.
-# Env: AUTOBOT_MAX_CONCURRENT_TASKS (default 3)
+# Env: AUTOBOT_MAX_CONCURRENT_TASKS (default 3) — the INTENDED concurrency
+# once screen_lock.acquire() is wired into AgentLoop's action dispatch.
 _MAX_CONCURRENT = int(os.getenv("AUTOBOT_MAX_CONCURRENT_TASKS", "3"))
+
+# The ACTUAL concurrency in effect right now. See the safety comment in
+# _tick() — this stays 1 until AgentLoop's mouse/keyboard/browser actions
+# actually acquire screen_lock, which they currently don't. Reported to the
+# dashboard (not _MAX_CONCURRENT) so the UI's slot bar reflects real
+# behavior instead of an aspirational setting nothing enforces yet.
+_EFFECTIVE_MAX_CONCURRENT = 1
 
 
 # ── Task model ────────────────────────────────────────────────────────────────
@@ -343,9 +351,9 @@ class TaskScheduler:
         queued  = [t for t in self._tasks.values() if t.status == TaskStatus.QUEUED]
         paused  = [t for t in self._tasks.values() if t.status == TaskStatus.PAUSED]
         return {
-            "max_concurrent": _MAX_CONCURRENT,
+            "max_concurrent": _EFFECTIVE_MAX_CONCURRENT,
             "slots_used": len(running),
-            "slots_free": max(0, _MAX_CONCURRENT - len(running)),
+            "slots_free": max(0, _EFFECTIVE_MAX_CONCURRENT - len(running)),
             "running": len(running),
             "queued": len(queued),
             "paused": len(paused),
@@ -405,7 +413,25 @@ class TaskScheduler:
                 1 for t in self._tasks.values()
                 if t.status in (TaskStatus.RUNNING, TaskStatus.STARTING)
             )
-            slots_available = _MAX_CONCURRENT - running_count
+            # SAFETY: real concurrency is capped at 1 here, regardless of
+            # _MAX_CONCURRENT, because nothing in AgentLoop/AgentRunner
+            # actually calls screen_lock.acquire() during action execution —
+            # confirmed by reading the full action-dispatch path. The
+            # "smooth handoff" design this scheduler documents (multiple
+            # tasks holding their own LLM connections, taking turns with the
+            # ScreenLock during the brief action phase) requires that
+            # integration to exist for concurrent execution to be safe.
+            # Without it, starting N tasks per _MAX_CONCURRENT would let N
+            # AgentRunners drive the same physical mouse/keyboard/browser at
+            # once with zero coordination — not a degraded experience, a
+            # real hazard (two agents clicking in the same window
+            # simultaneously, unpredictable and hard to diagnose). Queueing
+            # and sequential execution (this cap) is still a real upgrade
+            # over no queue at all; true concurrency is a distinct, larger
+            # piece of work — wiring screen_lock.acquire() into every
+            # mouse/keyboard/browser action in AgentLoop — not attempted
+            # here.
+            slots_available = _EFFECTIVE_MAX_CONCURRENT - running_count
             if slots_available > 0:
                 queued = [
                     t for t in self._tasks.values()
@@ -418,7 +444,7 @@ class TaskScheduler:
                         next_task.status = TaskStatus.STARTING
                         logger.info(
                             f"Scheduler: starting task {next_task.id} "
-                            f"({running_count + 1}/{_MAX_CONCURRENT} slots used)"
+                            f"({running_count + 1}/{_EFFECTIVE_MAX_CONCURRENT} slots used)"
                         )
                         # Start outside the lock to avoid deadlocks
                         asyncio.create_task(self._start_task(next_task.id))

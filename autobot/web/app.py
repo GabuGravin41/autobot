@@ -83,10 +83,15 @@ async def lifespan(application: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_event_loop()
     _log("Autobot backend starting...")
+
+    from ..agent.scheduler import scheduler
+    scheduler.start()
+
     yield
     _log("Autobot backend shutting down.")
     if _agent_runner:
         _agent_runner.cancel()
+    await scheduler.stop()
 
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
@@ -607,6 +612,110 @@ def _parse_chat_json(raw: str) -> dict | None:
         except json.JSONDecodeError:
             return None
     return None
+
+
+# ── Task Scheduler (multi-task queue) ───────────────────────────────────────
+#
+# The frontend (TaskQueuePanel.tsx, apiService.ts) has called these routes
+# since before this session started — apiService.ts's QueuedTask/
+# ScheduleStatus/ScreenLockStatus interfaces match agent/scheduler.py's
+# ScheduledTask.summary() / get_schedule_status() / resource_manager.py's
+# ScreenLock.get_status() field-for-field. Both halves were complete; only
+# the routes connecting them were missing, which is what produced the 404s
+# reported in the browser console. See scheduler.py's _tick() for why real
+# concurrent execution is capped at 1 task despite AUTOBOT_MAX_CONCURRENT_TASKS
+# defaulting to 3 — screen_lock isn't actually wired into AgentLoop's action
+# dispatch yet, so more than one task running at once would mean multiple
+# AgentRunners fighting over the same physical mouse/keyboard with no
+# coordination. Queueing and sequential execution (what this wiring gives you)
+# is real value on its own; true concurrency is separate, larger work.
+
+class AddTaskRequest(BaseModel):
+    goal: str
+    priority: int = 1
+    run_at: float | None = None  # epoch seconds; None = run ASAP
+
+
+@app.get("/api/tasks")
+def list_tasks():
+    from ..agent.scheduler import scheduler
+    return {"tasks": scheduler.get_all_tasks()}
+
+
+@app.post("/api/tasks")
+async def create_task(req: AddTaskRequest):
+    from ..agent.scheduler import scheduler
+    if not req.goal.strip():
+        raise HTTPException(status_code=400, detail="Goal cannot be empty.")
+    task_id = await scheduler.add_task(req.goal, priority=req.priority, run_at=req.run_at)
+    return {"status": "queued", "task_id": task_id}
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task_detail(task_id: str):
+    from ..agent.scheduler import scheduler
+    task = scheduler.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task.summary()
+
+
+@app.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: str):
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.cancel_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "cancelled", "task_id": task_id}
+
+
+@app.post("/api/tasks/{task_id}/pause")
+async def pause_task_route(task_id: str):
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.pause_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Task not found, or not queued (only queued tasks can be paused)")
+    return {"status": "paused", "task_id": task_id}
+
+
+@app.post("/api/tasks/{task_id}/resume")
+async def resume_task_route(task_id: str):
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.resume_task(task_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Task not found, or not paused")
+    return {"status": "resumed", "task_id": task_id}
+
+
+@app.patch("/api/tasks/{task_id}/priority")
+async def set_task_priority_route(task_id: str, priority: int):
+    from ..agent.scheduler import scheduler
+    ok = await scheduler.reprioritize_task(task_id, priority)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Task not found, or not queued/paused/scheduled")
+    return {"status": "ok"}
+
+
+@app.get("/api/tasks/{task_id}/logs")
+def get_task_logs_route(task_id: str, since: int = 0):
+    from ..agent.scheduler import scheduler
+    task = scheduler.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    lines = scheduler.get_logs(task_id, since)
+    return {"lines": lines, "total": len(task.logs)}
+
+
+@app.get("/api/schedule/status")
+def get_schedule_status_route():
+    from ..agent.scheduler import scheduler
+    return scheduler.get_schedule_status()
+
+
+@app.get("/api/screen-lock")
+def get_screen_lock_status_route():
+    from ..agent.resource_manager import screen_lock
+    return screen_lock.get_status()
 
 
 _frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
