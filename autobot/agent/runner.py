@@ -257,8 +257,9 @@ class AgentRunner:
         """Cancel the running task."""
         self.status = "cancelled"
         if self._agent_loop:
-            # Set max_steps to 0 to stop the current AgentLoop
+            # Set max_steps to 0 and is_cancelled to True to stop the current AgentLoop immediately
             self._agent_loop.max_steps = 0
+            self._agent_loop.is_cancelled = True
         if self._mission_agent:
             # Also stop MissionAgent from advancing to the next objective
             from autobot.agent.mission import MissionStatus

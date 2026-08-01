@@ -311,6 +311,7 @@ export interface BackendSettings {
     llm_provider: string;
     llm_model: string;
     browser_mode: string;
+    has_anthropic_key: boolean;
     has_openrouter_key: boolean;
     has_openai_key: boolean;
     has_google_key: boolean;
@@ -327,6 +328,7 @@ export const updateSettings = (settings: Partial<{
     llm_provider: string;
     llm_model: string;
     browser_mode: string;
+    anthropic_api_key: string;
     openrouter_api_key: string;
     openai_api_key: string;
     google_api_key: string;

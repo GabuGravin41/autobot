@@ -162,9 +162,14 @@ class AgentLoop:
         Returns:
             The final result text from the done action, or a summary.
         """
+        self.is_cancelled = False
         logger.info(f"🤖 Agent starting: '{self.goal}' (max {self.max_steps} steps)")
 
         while self.step_number < self.max_steps:
+            if self.is_cancelled:
+                logger.warning("⚠️ Agent loop cancelled — halting execution immediately")
+                return "Task cancelled by user."
+
             try:
                 result = await self._execute_step()
 

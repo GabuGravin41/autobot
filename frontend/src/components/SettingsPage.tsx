@@ -26,6 +26,16 @@ interface ProviderConfig {
 
 const PROVIDERS: ProviderConfig[] = [
     {
+        id: 'anthropic', name: 'Anthropic Claude', description: 'Direct Anthropic Claude API key.',
+        envKey: 'ANTHROPIC_API_KEY', baseUrl: 'https://api.anthropic.com/v1',
+        models: [
+            { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', tags: ['vision', 'fast', 'recommended'] },
+            { id: 'claude-3-7-sonnet-20250219', name: 'Claude 3.7 Sonnet', tags: ['vision', 'powerful', 'coding'] },
+            { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', tags: ['vision', 'powerful'] },
+            { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', tags: ['fast', 'cheap'] },
+        ],
+    },
+    {
         id: 'openrouter', name: 'OpenRouter', description: '200+ models from one key. Recommended.',
         envKey: 'OPENROUTER_API_KEY', baseUrl: 'https://openrouter.ai/api/v1',
         models: [
