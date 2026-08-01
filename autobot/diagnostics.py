@@ -213,6 +213,93 @@ def check_llm_config() -> list[Check]:
     return checks
 
 
+def check_llm_connectivity() -> list[Check]:
+    """Can we actually REACH the configured LLM provider?
+
+    A missing key and an unreachable host produce very different errors but
+    look identical from the agent's side ("LLM call failed"), so we separate
+    the layers here: DNS, then TCP, then TLS, then HTTP. No API key is sent
+    and no tokens are spent - the models endpoint is public.
+    """
+    import socket
+
+    provider = (os.getenv("AUTOBOT_LLM_PROVIDER") or "").lower()
+    host = {
+        "openrouter": "openrouter.ai",
+        "openai": "api.openai.com",
+        "gemini": "generativelanguage.googleapis.com",
+    }.get(provider, "openrouter.ai")
+
+    checks: list[Check] = []
+
+    # Layer 1: DNS
+    try:
+        socket.getaddrinfo(host, 443)
+    except Exception as e:
+        return [Check(
+            f"reach {host} (DNS)", FAIL, f"cannot resolve: {e}",
+            "No DNS for the provider. Check your internet connection, VPN, or DNS settings.",
+        )]
+    checks.append(Check(f"reach {host} (DNS)", OK))
+
+    # Layer 2: TCP
+    try:
+        with socket.create_connection((host, 443), timeout=8):
+            pass
+    except Exception as e:
+        checks.append(Check(
+            f"reach {host} (TCP 443)", FAIL, f"cannot connect: {e}",
+            "A firewall or network policy is blocking outbound HTTPS to this host.",
+        ))
+        return checks
+    checks.append(Check(f"reach {host} (TCP 443)", OK))
+
+    # Layer 3/4: TLS + HTTP. Separating TLS failures matters because they mean
+    # something is intercepting HTTPS (corporate/campus proxy, or antivirus
+    # with HTTPS scanning) rather than the service being down.
+    import urllib.error
+    import urllib.request
+    url = f"https://{host}/api/v1/models" if host == "openrouter.ai" else f"https://{host}/"
+    try:
+        with urllib.request.urlopen(url, timeout=12) as r:
+            r.read(64)
+        checks.append(Check(f"reach {host} (HTTPS)", OK, "TLS verified, endpoint responded"))
+    except urllib.error.HTTPError as e:
+        # An HTTP status means TLS worked - that's all we needed to prove.
+        checks.append(Check(f"reach {host} (HTTPS)", OK, f"TLS verified (HTTP {e.code})"))
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e))
+        if "CERTIFICATE_VERIFY_FAILED" in reason or "SSL" in reason.upper():
+            checks.append(Check(
+                f"reach {host} (HTTPS)", FAIL,
+                f"TLS certificate verification failed: {reason[:120]}",
+                "Something is intercepting HTTPS on this network (campus/corporate "
+                "proxy, or antivirus with HTTPS scanning). Options: switch network "
+                "(e.g. phone hotspot) to confirm; or export the interceptor's root CA "
+                "and point Python at it with SSL_CERT_FILE=C:\\path\\to\\ca.pem. "
+                "Do NOT disable certificate verification - that exposes your API key.",
+            ))
+        else:
+            checks.append(Check(
+                f"reach {host} (HTTPS)", FAIL, f"request failed: {reason[:120]}",
+                "Check proxy settings (HTTPS_PROXY) or try a different network.",
+            ))
+    except Exception as e:
+        checks.append(Check(f"reach {host} (HTTPS)", WARN, f"unexpected: {e}"))
+
+    return checks
+
+
+def check_proxy_env() -> Check:
+    """Report proxy variables, which silently change where requests go."""
+    names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+    set_vars = {n: os.getenv(n) for n in names if os.getenv(n)}
+    if not set_vars:
+        return Check("proxy / CA environment", OK, "none set")
+    detail = "; ".join(f"{k}={v}" for k, v in set_vars.items())
+    return Check("proxy / CA environment", OK, detail)
+
+
 def check_approval_mode() -> Check:
     mode = os.getenv("AUTOBOT_APPROVAL_MODE", "balanced").lower()
     if mode not in ("strict", "balanced", "trusted"):
@@ -315,6 +402,8 @@ def run_all() -> list[Check]:
         check_optional_packages,
         lambda: [check_env_file()],
         check_llm_config,
+        lambda: [check_proxy_env()],
+        check_llm_connectivity,
         lambda: [check_approval_mode()],
         lambda: [check_chrome()],
         lambda: [check_cdp()],
