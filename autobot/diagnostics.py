@@ -229,13 +229,42 @@ def check_approval_mode() -> Check:
 
 
 def check_env_file() -> Check:
+    """Locate .env and check it for a byte-order mark.
+
+    A BOM makes the FIRST variable in the file unreadable while every other
+    line loads normally - which presents as "my API key isn't being picked
+    up" even though the key is plainly there in the file. Windows PowerShell
+    5.1's `Out-File -Encoding utf8` produces exactly this.
+    """
     env_path = Path(__file__).resolve().parent.parent / ".env"
-    if env_path.exists():
-        return Check(".env file", OK, str(env_path))
-    return Check(
-        ".env file", WARN, "not found - relying on shell environment only",
-        f"Create {env_path} with your API key(s) so settings persist between runs.",
-    )
+    if not env_path.exists():
+        return Check(
+            ".env file", WARN, "not found - relying on shell environment only",
+            f"Create {env_path} with your API key(s) so settings persist between runs.",
+        )
+
+    try:
+        head = env_path.read_bytes()[:3]
+    except Exception as e:
+        return Check(".env file", WARN, f"{env_path} - could not read: {e}")
+
+    if head[:3] == b"\xef\xbb\xbf":
+        return Check(
+            ".env file", WARN,
+            f"{env_path} - starts with a UTF-8 BOM; the FIRST setting in it "
+            "may read as unset in older tooling",
+            "Autobot handles this, but to clean it up rewrite the file without "
+            "a BOM. In PowerShell 5.1 use: "
+            "[IO.File]::WriteAllText('.env', (Get-Content .env -Raw))",
+        )
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return Check(
+            ".env file", FAIL,
+            f"{env_path} - is UTF-16 encoded; none of its settings will load",
+            "Rewrite it as UTF-8. In PowerShell: "
+            "[IO.File]::WriteAllText('.env', (Get-Content .env -Raw))",
+        )
+    return Check(".env file", OK, str(env_path))
 
 
 def check_writable_dirs() -> list[Check]:

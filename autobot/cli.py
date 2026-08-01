@@ -14,12 +14,21 @@ from pathlib import Path
 
 
 def _load_env() -> None:
-    """Load .env from project root."""
+    """Load .env from project root.
+
+    encoding="utf-8-sig" is deliberate and load-bearing on Windows. Windows
+    PowerShell 5.1's `Out-File -Encoding utf8` writes a UTF-8 BOM, and with a
+    plain utf-8 read that BOM becomes part of the FIRST variable's name —
+    "﻿OPENROUTER_API_KEY" instead of "OPENROUTER_API_KEY". The result is
+    maddening to debug: every setting in the file works except the first one,
+    which silently reads as unset. "utf-8-sig" strips the BOM if present and
+    is a no-op otherwise.
+    """
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
         try:
             from dotenv import load_dotenv
-            load_dotenv(env_path)
+            load_dotenv(env_path, encoding="utf-8-sig")
         except ImportError:
             pass
 
