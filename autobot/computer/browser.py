@@ -209,24 +209,32 @@ class Browser:
     # These are the PRIMARY way to interact with browser elements — always prefer
     # these over coordinate-guessing with computer.mouse.click(x, y).
 
-    def click_element(self, index: int) -> str:
+    def click_element(self, index: int, url_hint: str | None = None) -> str:
         """Click a DOM element by its snapshot index (the [N] number in the DOM listing).
 
         Scrolls the element into view, gets its CURRENT bounding-rect center from
         CDP (not the stale snapshot coords), then fires real mouse events via CDP.
         This is the most reliable way to click links, buttons, and inputs.
 
+        url_hint: the URL of the tab you mean to act on. Without it, Chrome's
+        /json endpoint's tab ORDER decides which tab gets clicked — typically
+        the one that was open first, not the one you most recently navigated
+        to or opened. In a single-tab task this is invisible; the moment a
+        second tab exists (open Grok, then open a new Overleaf tab), every
+        click silently keeps targeting the first tab unless a hint says
+        otherwise. Always pass the current page's URL when you have it.
+
         Returns a status string: 'clicked [N] <tag>' or an error message.
         Use this instead of computer.mouse.click() whenever a DOM index is available.
 
         Example: browser.click_element(3)  ← clicks element [3] from DOM snapshot
         """
-        return _run_sync(self._click_element_async(index)) or f"click_element({index}) failed"
+        return _run_sync(self._click_element_async(index, url_hint)) or f"click_element({index}) failed"
 
-    async def _click_element_async(self, index: int) -> str:
+    async def _click_element_async(self, index: int, url_hint: str | None = None) -> str:
         from autobot.dom.page_snapshot import _get_active_tab_ws_url, CDPClient
         try:
-            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(), timeout=1.5)
+            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(url_hint=url_hint), timeout=1.5)
             if not ws_url:
                 return "CDP unavailable — Chrome not running with --remote-debugging-port=9222"
             client = CDPClient(ws_url)
@@ -272,7 +280,7 @@ class Browser:
             logger.warning(f"browser.click_element({index}) failed: {e}")
             return f"error: {e}"
 
-    def click_via_js(self, index: int) -> str:
+    def click_via_js(self, index: int, url_hint: str | None = None) -> str:
         """Click a DOM element by calling its .click() method directly in JS.
 
         This is a genuinely different mechanism from click_element(): it does
@@ -284,6 +292,12 @@ class Browser:
 
         It does not fire realistic mouse movement, so prefer click_element()
         first; this is the fallback.
+
+        url_hint: the current tab's URL — see click_element()'s docstring for
+        why this matters the moment more than one tab is open. This method is
+        the click self-correction ladder's second rung, so it needs the same
+        hint click_element() got, or the ladder targets the right element in
+        the wrong tab just as easily as the click it's meant to be fixing.
 
         Returns 'js-clicked [N] <tag>' or an error message.
         """
@@ -302,13 +316,13 @@ class Browser:
     return 'js-clicked [{index}] <' + found.tagName.toLowerCase() + '>';
 }})()"""
         try:
-            val = _run_sync(_cdp_eval(js))
+            val = _run_sync(_cdp_eval(js, url_hint=url_hint))
             return str(val) if val else f"element [{index}] not found"
         except Exception as e:
             logger.warning(f"browser.click_via_js({index}) failed: {e}")
             return f"error: {e}"
 
-    def fill(self, index: int, text: str) -> str:
+    def fill(self, index: int, text: str, url_hint: str | None = None) -> str:
         """Type text into a DOM input/textarea/contenteditable by its snapshot index.
 
         This is the MOST RELIABLE way to type into any form field. It:
@@ -321,16 +335,19 @@ class Browser:
         Always prefer this over: computer.keyboard.type() after clicking.
         For contenteditable rich-text editors (ChatGPT, Grok, etc.) this also works.
 
+        url_hint: the current tab's URL — see click_element()'s docstring for
+        why this matters the moment more than one tab is open.
+
         Example: browser.fill(2, "hello world")  ← types into element [2]
         Returns: 'filled [N]: typed X chars, verified: True/False (actual: "...")'
         """
-        result = _run_sync(self._fill_async(index, text))
+        result = _run_sync(self._fill_async(index, text, url_hint))
         return result or f"fill({index}) failed with no response"
 
-    async def _fill_async(self, index: int, text: str) -> str:
+    async def _fill_async(self, index: int, text: str, url_hint: str | None = None) -> str:
         from autobot.dom.page_snapshot import _get_active_tab_ws_url, CDPClient
         try:
-            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(), timeout=1.5)
+            ws_url = await asyncio.wait_for(_get_active_tab_ws_url(url_hint=url_hint), timeout=1.5)
             if not ws_url:
                 return "CDP unavailable"
             client = CDPClient(ws_url)
@@ -566,11 +583,15 @@ class Browser:
         except Exception:
             return False
 
-    def scroll_to(self, index: int) -> str:
+    def scroll_to(self, index: int, url_hint: str | None = None) -> str:
         """Scroll a DOM element into view by its snapshot index.
 
         Use this before reading an element or when you need to make an element
         visible before taking a screenshot for visual verification.
+
+        url_hint: the current tab's URL — see click_element()'s docstring.
+        This is the click self-correction ladder's first rung; it needs the
+        hint too, or it scrolls the wrong tab while reporting success.
 
         Example: browser.scroll_to(10)  ← scrolls element [10] into view
         """
@@ -588,7 +609,7 @@ class Browser:
     return 'scrolled to ' + found.tagName.toLowerCase() + ' [{index}]';
 }})()"""
         try:
-            val = _run_sync(_cdp_eval(js))
+            val = _run_sync(_cdp_eval(js, url_hint=url_hint))
             return str(val) if val else f"element [{index}] not found"
         except Exception as e:
             return f"error: {e}"

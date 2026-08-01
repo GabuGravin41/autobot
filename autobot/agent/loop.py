@@ -749,7 +749,9 @@ class AgentLoop:
             )
 
         try:
-            result_text = await asyncio.to_thread(self.computer.browser.click_element, index)
+            result_text = await asyncio.to_thread(
+                self.computer.browser.click_element, index, browser_state.url
+            )
         except Exception as e:
             result_text = f"error: {e}"
 
@@ -788,9 +790,11 @@ class AgentLoop:
         # Rung 1: scroll it into view, then click again. Handles elements that
         # resolve fine but sit outside the current viewport.
         try:
-            await asyncio.to_thread(self.computer.browser.scroll_to, index)
+            await asyncio.to_thread(self.computer.browser.scroll_to, index, browser_state.url)
             await asyncio.sleep(0.3)
-            retry = await asyncio.to_thread(self.computer.browser.click_element, index)
+            retry = await asyncio.to_thread(
+                self.computer.browser.click_element, index, browser_state.url
+            )
             if retry.startswith("clicked "):
                 logger.info(f"Clicked [{index}] after scrolling into view")
                 await asyncio.sleep(0.5)
@@ -808,7 +812,9 @@ class AgentLoop:
         # the fix when the correct element is found but a transparent overlay,
         # cookie banner, or sticky header is intercepting the real click.
         try:
-            js_result = await asyncio.to_thread(self.computer.browser.click_via_js, index)
+            js_result = await asyncio.to_thread(
+                self.computer.browser.click_via_js, index, browser_state.url
+            )
             if js_result.startswith("js-clicked "):
                 logger.info(f"Clicked [{index}] via JS fallback (something was intercepting)")
                 await asyncio.sleep(0.5)
@@ -854,7 +860,9 @@ class AgentLoop:
             )
 
         try:
-            result_text = await asyncio.to_thread(self.computer.browser.fill, index, input_action.text)
+            result_text = await asyncio.to_thread(
+                self.computer.browser.fill, index, input_action.text, browser_state.url
+            )
         except Exception as e:
             return ActionResult(action_name="input_text", success=False, error=f"Input to [{index}] failed: {e}")
 
