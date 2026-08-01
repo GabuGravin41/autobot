@@ -18,6 +18,7 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -70,6 +71,7 @@ class AgentLoop:
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         custom_instructions: str | None = None,
+        first_step_context: str | None = None,
     ):
         self.page = page
         self.llm_client = llm_client
@@ -79,6 +81,12 @@ class AgentLoop:
         self.max_actions_per_step = max_actions_per_step
         self.use_vision = use_vision
         self.custom_instructions = custom_instructions
+        # Big-picture context (e.g. full mission plan) injected only into the
+        # very first step's history slot — see MissionAgent, which gives each
+        # objective a brief per-step reminder via custom_instructions and the
+        # full mission picture once, here, so it doesn't eat context budget
+        # every step.
+        self.first_step_context = first_step_context
 
         # State
         self.step_number = 0
@@ -210,8 +218,13 @@ class AgentLoop:
         """
         Call the LLM with the current state and parse the structured output.
         """
-        # Build agent history text from previous steps
-        history_text = self._build_history_text()
+        # Build agent history text from previous steps.
+        # At step 0 there's no history yet, so this is where a mission's
+        # full-picture context (if any) gets its one-time injection.
+        if self.step_number == 0 and self.first_step_context:
+            history_text = self.first_step_context
+        else:
+            history_text = self._build_history_text()
 
         # Get environment knowledge and learned skill context
         env_summary = self.env_memory.get_summary_text()
@@ -429,16 +442,17 @@ class AgentLoop:
 
     async def _execute_click(self, click: ClickAction, browser_state: BrowserState) -> ActionResult:
         """
-        Click an element by its DOM index.
+        Click an element by its DOM index via CDP (computer.browser.click_element).
 
-        This is the key pattern from Browser Use: instead of guessing CSS selectors,
-        the LLM references elements by their numeric index from the DOM tree.
-        We resolve the index to an actual element using the accessibility tree.
+        The index comes from dom/extraction.py, which builds browser_state.selector_map
+        from the SAME CDP snapshot (dom/page_snapshot.py) that click_element() re-queries
+        by index — so [N] always means the same element in both places. click_element()
+        re-reads the element's current bounding-rect right before dispatching real CDP
+        mouse events, rather than trusting stale snapshot coordinates (DESIGN_PHILOSOPHY.md:
+        "CDP DOM Query First").
         """
         index = click.index
-        element = browser_state.selector_map.get(index)
-
-        if element is None:
+        if browser_state.selector_map.get(index) is None:
             return ActionResult(
                 action_name="click",
                 success=False,
@@ -446,51 +460,30 @@ class AgentLoop:
             )
 
         try:
-            # Strategy: Use accessibility role + name to find the element via Playwright
-            role = element.attributes.get("role", "")
-            text = element.text
-
-            if role and text:
-                await self.page.get_by_role(role, name=text).first.click(timeout=5000)
-            elif text:
-                await self.page.get_by_text(text, exact=False).first.click(timeout=5000)
-            elif element.tag_name == "a" and "href" in element.attributes:
-                await self.page.locator(f'a[href="{element.attributes["href"]}"]').first.click(timeout=5000)
-            else:
-                # Fallback: use tag + any identifying attribute
-                selector = element.tag_name
-                if "name" in element.attributes:
-                    selector = f'{element.tag_name}[name="{element.attributes["name"]}"]'
-                elif "aria-label" in element.attributes:
-                    selector = f'{element.tag_name}[aria-label="{element.attributes["aria-label"]}"]'
-
-                await self.page.locator(selector).first.click(timeout=5000)
-
-            logger.info(f"Clicked [{index}] <{element.tag_name}> '{text[:30]}'")
-
-            # Check if page changed
-            import asyncio
-            await asyncio.sleep(0.5)
-            page_changed = self.page.url != browser_state.url
-
-            return ActionResult(action_name="click", success=True, page_changed=page_changed)
-
+            result_text = await asyncio.to_thread(self.computer.browser.click_element, index)
         except Exception as e:
-            return ActionResult(
-                action_name="click",
-                success=False,
-                error=f"Click on [{index}] failed: {e}",
-            )
+            return ActionResult(action_name="click", success=False, error=f"Click on [{index}] failed: {e}")
+
+        if not result_text.startswith("clicked "):
+            return ActionResult(action_name="click", success=False, error=result_text)
+
+        logger.info(f"Clicked [{index}]: {result_text}")
+        await asyncio.sleep(0.5)
+        page_changed = self.page.url != browser_state.url
+
+        return ActionResult(action_name="click", success=True, page_changed=page_changed)
 
     async def _execute_input(self, input_action: InputTextAction, browser_state: BrowserState) -> ActionResult:
         """
-        Type text into an element by its DOM index.
-        Same index-based approach as click.
+        Type text into an element by its DOM index via CDP (computer.browser.fill).
+        Same index space and same reasoning as _execute_click above. fill() clears
+        the field, inserts text via CDP Input.insertText, then re-reads the field
+        to verify the text actually landed — we treat unverified fills as failures
+        so the agent retries instead of assuming success on a field that silently
+        rejected input (a common failure mode on rich-text editors like Grok/ChatGPT).
         """
         index = input_action.index
-        element = browser_state.selector_map.get(index)
-
-        if element is None:
+        if browser_state.selector_map.get(index) is None:
             return ActionResult(
                 action_name="input_text",
                 success=False,
@@ -498,31 +491,18 @@ class AgentLoop:
             )
 
         try:
-            role = element.attributes.get("role", "")
-            text = element.text
-            placeholder = element.attributes.get("placeholder", "")
-
-            if role in ("textbox", "searchbox", "combobox"):
-                locator = self.page.get_by_role(role, name=text or placeholder)
-            elif placeholder:
-                locator = self.page.get_by_placeholder(placeholder)
-            elif text:
-                locator = self.page.get_by_label(text)
-            else:
-                locator = self.page.locator(f'{element.tag_name}[name="{element.attributes.get("name", "")}"]')
-
-            await locator.first.click(timeout=5000)
-            await locator.first.fill(input_action.text, timeout=5000)
-
-            logger.info(f"Input [{index}] <{element.tag_name}>: '{input_action.text[:30]}'")
-            return ActionResult(action_name="input_text", success=True)
-
+            result_text = await asyncio.to_thread(self.computer.browser.fill, index, input_action.text)
         except Exception as e:
-            return ActionResult(
-                action_name="input_text",
-                success=False,
-                error=f"Input to [{index}] failed: {e}",
-            )
+            return ActionResult(action_name="input_text", success=False, error=f"Input to [{index}] failed: {e}")
+
+        success = result_text.startswith("filled ") and "verified: True" in result_text
+        logger.info(f"Input [{index}]: {result_text}")
+
+        return ActionResult(
+            action_name="input_text",
+            success=success,
+            error=None if success else result_text,
+        )
 
     def _build_history_text(self) -> str:
         """Build a text summary of all previous steps for the agent_history section."""
