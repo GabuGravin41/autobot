@@ -92,15 +92,23 @@ def main() -> None:
 def _run_setup() -> None:
     """Run initial environment setup."""
     print("🛠️ Running Autobot Setup...")
-    
-    # 1. Install Playwright browsers
-    print("📦 Installing Playwright browsers (chromium)...")
+
+    # NOTE: We deliberately do NOT run `playwright install chromium`.
+    # Autobot drives the user's REAL Chrome (with their real logins) by
+    # launching it with --remote-debugging-port and attaching via
+    # connect_over_cdp(). It never calls chromium.launch(), so Playwright's
+    # ~150MB bundled browser is never used. Downloading it is pure waste, and
+    # it fails outright on networks that intercept TLS (corporate proxies,
+    # HTTPS-scanning antivirus) because Playwright's bundled Node has its own
+    # CA store that doesn't include the intercepting certificate.
+    print("ℹ️  Skipping Playwright browser download — Autobot uses your real Chrome.")
+
+    # Verify the Playwright *driver* imports (this is what we actually need).
     try:
-        import subprocess
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-        print("✅ Playwright ready.")
-    except Exception as e:
-        print(f"❌ Playwright setup failed: {e}")
+        import playwright  # noqa: F401
+        print("✅ Playwright driver available.")
+    except ImportError:
+        print("❌ Playwright not installed. Run: pip install -r requirements.txt")
 
     # 2. Check for frontend build
     frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"

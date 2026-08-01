@@ -58,9 +58,18 @@ graph TD
 
 **Start here — before anything else:**
 ```bash
-pip install -r requirements.txt
-autobot --doctor        # checks deps, Chrome/CDP, API keys; tells you what's broken
+python -m pip install -r requirements.txt
+python -m autobot.cli --doctor   # checks deps, Chrome/CDP, API keys; tells you what's broken
 ```
+
+> **Do not run `playwright install chromium`.** Autobot drives your *real*
+> Chrome — the one with your actual logins to Grok, Overleaf, Gmail — by
+> launching it with `--remote-debugging-port` and attaching over CDP. It
+> never calls `chromium.launch()`, so Playwright's bundled ~150MB browser is
+> never used. If you already tried and hit
+> `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, ignore it: that's Playwright's bundled
+> Node.js rejecting a TLS-intercepting certificate (corporate proxy or
+> HTTPS-scanning antivirus), and it has no effect on Autobot.
 `--doctor` makes no LLM calls and costs nothing. Fix every `[FAIL]` before
 running a task; `[WARN]` items reduce capability but still allow a run.
 

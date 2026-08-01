@@ -73,10 +73,13 @@ def _module_present(name: str) -> bool:
 
 def check_required_packages() -> list[Check]:
     """Packages the agent cannot run at all without."""
+    # Note: playwright's bundled browser download is NOT required. Autobot
+    # attaches to the user's real Chrome via connect_over_cdp() and never
+    # calls chromium.launch(), so only the Python driver matters here.
     required = {
         "pydantic": "pip install pydantic",
         "openai": "pip install openai",
-        "playwright": "pip install playwright && playwright install chromium",
+        "playwright": "pip install playwright  (the browser download is NOT needed)",
         "httpx": "pip install httpx",
         "websockets": "pip install websockets",
         "PIL": "pip install Pillow",
