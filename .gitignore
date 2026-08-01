@@ -68,3 +68,10 @@ openclaw_src/
 *.sqlite
 *.png
 
+
+# uiautomation debug log (written into CWD as a side effect)
+@AutomationLog.txt
+
+# Learned skills are per-machine runtime data, not source.
+# Committing them ships one user's (possibly stale) lessons to everyone.
+autobot/knowledge/skills/

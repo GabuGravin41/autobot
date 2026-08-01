@@ -28,11 +28,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from autobot.computer.computer import Computer
+from autobot.computer.dispatch import SCREEN_MODULES, dispatch_computer_call
 
 logger = logging.getLogger(__name__)
 
-# Modules that require screen access — blocked in background mode
-_BLOCKED_MODULES = frozenset({"mouse", "keyboard", "display"})
+# Modules that require screen access — blocked in background mode.
+# Sourced from computer/dispatch.py so this list can't drift from the one the
+# foreground loop uses. Note it now also covers `window` and `browser`, which
+# the previous local copy missed even though both steal focus from whatever
+# the user is actually doing.
+_BLOCKED_MODULES = SCREEN_MODULES
 
 # Short system prompt for background tasks (no vision section — saves ~3,000 tokens/step)
 _BACKGROUND_SYSTEM_PROMPT = """
@@ -213,56 +218,12 @@ class BackgroundTaskRunner:
     async def _dispatch(self, call_str: str) -> Any:
         """
         Safely dispatch a computer.* call, blocking screen-touching modules.
-        Uses the same AST-safe dispatch pattern as AgentLoop.
+
+        Delegates to computer/dispatch.py — the single shared implementation
+        also used by AgentLoop, so parsing and security rules stay identical
+        in foreground and background mode.
         """
-        import ast
-        import re
-
-        call_str = call_str.strip()
-        if not call_str.startswith("computer."):
-            return f"Error: call must start with 'computer.': {call_str}"
-
-        pattern = r"^computer\.(\w+)\.(\w+)\((.*)\)$"
-        match = re.match(pattern, call_str, re.DOTALL)
-        if not match:
-            return f"Error: cannot parse call: {call_str}"
-
-        module_name, method_name, args_str = match.groups()
-
-        # Block screen-touching modules in background mode
-        if module_name in _BLOCKED_MODULES:
-            return (
-                f"[BLOCKED] '{module_name}' is not available in background mode. "
-                "Use terminal, files, clipboard, research, kaggle, or vault instead."
-            )
-
-        module = getattr(self.computer, module_name, None)
-        if module is None:
-            return f"Error: unknown module '{module_name}'"
-
-        method = getattr(module, method_name, None)
-        if method is None:
-            return f"Error: unknown method 'computer.{module_name}.{method_name}'"
-
-        # Parse arguments safely via AST
-        args: list = []
-        kwargs: dict = {}
-        if args_str.strip():
-            try:
-                tree = ast.parse(f"_f({args_str})", mode="eval")
-                call_node = tree.body
-                for node in call_node.args:
-                    args.append(ast.literal_eval(node))
-                for kw in call_node.keywords:
-                    kwargs[kw.arg] = ast.literal_eval(kw.value)
-            except Exception as e:
-                return f"Error parsing arguments: {e}"
-
-        try:
-            if asyncio.iscoroutinefunction(method):
-                result = await method(*args, **kwargs)
-            else:
-                result = await asyncio.to_thread(method, *args, **kwargs)
-            return result
-        except Exception as e:
-            return f"Error executing {call_str}: {e}"
+        _success, result_text = await dispatch_computer_call(
+            self.computer, call_str, blocked_modules=_BLOCKED_MODULES
+        )
+        return result_text

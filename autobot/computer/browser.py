@@ -272,6 +272,42 @@ class Browser:
             logger.warning(f"browser.click_element({index}) failed: {e}")
             return f"error: {e}"
 
+    def click_via_js(self, index: int) -> str:
+        """Click a DOM element by calling its .click() method directly in JS.
+
+        This is a genuinely different mechanism from click_element(): it does
+        NOT dispatch mouse events at coordinates, so it bypasses pointer
+        hit-testing entirely. Use it when a normal click fails because the
+        element is covered by a transparent overlay, a cookie banner, or a
+        sticky header — cases where the right element is found but something
+        else receives the click.
+
+        It does not fire realistic mouse movement, so prefer click_element()
+        first; this is the fallback.
+
+        Returns 'js-clicked [N] <tag>' or an error message.
+        """
+        js = f"""
+(function() {{
+    const SEL = "{_INTERACTIVE_SEL_JS}";
+    let idx = 1, found = null;
+    for (const el of document.querySelectorAll(SEL)) {{
+        const s = window.getComputedStyle(el);
+        if (s.display==='none'||s.visibility==='hidden'||s.opacity==='0') continue;
+        if (idx++==={index}) {{ found=el; break; }}
+    }}
+    if (!found) return 'element {index} not found';
+    found.scrollIntoView({{behavior:'instant',block:'center'}});
+    found.click();
+    return 'js-clicked [{index}] <' + found.tagName.toLowerCase() + '>';
+}})()"""
+        try:
+            val = _run_sync(_cdp_eval(js))
+            return str(val) if val else f"element [{index}] not found"
+        except Exception as e:
+            logger.warning(f"browser.click_via_js({index}) failed: {e}")
+            return f"error: {e}"
+
     def fill(self, index: int, text: str) -> str:
         """Type text into a DOM input/textarea/contenteditable by its snapshot index.
 

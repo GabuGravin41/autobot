@@ -4,18 +4,26 @@ ApprovalGuard — Risk-based action gating for autonomous agent runs.
 Three modes (set via AUTOBOT_APPROVAL_MODE env var or settings API):
   strict   — Ask user before ANY action in the CAUTION or DANGER tier
   balanced — Ask user only for DANGER-tier actions (default)
-  trusted  — Never interrupt; run everything automatically
+  trusted  — Never interrupt for SAFE/CAUTION/DANGER; run those automatically
 
 Risk tiers:
-  SAFE    — Navigation, clicks, typing, scrolling, screenshots, reading
-  CAUTION — Sending messages/emails, form submissions, file uploads
-  DANGER  — Deleting files, making purchases, executing shell commands,
-             writing to system directories, clearing data
+  SAFE         — Navigation, clicks, typing, scrolling, screenshots, reading
+  CAUTION      — Form submissions and other reversible, low-blast-radius actions
+  DANGER       — Shell execution and other risky-but-recoverable actions
+  IRREVERSIBLE — Deleting files/data, financial transactions, entering
+                 credentials, sending messages or publishing under the
+                 user's identity. ALWAYS requires a live "Allow" click —
+                 no mode, including trusted, can auto-proceed. This mirrors
+                 how the assistant building this system operates: certain
+                 categories stay hard-gated regardless of how much trust
+                 has been granted, because the cost of one bad action here
+                 (deleted research data, an unwanted purchase, a leaked
+                 credential) is not something "you can just undo."
 
 Usage (from AgentLoop._execute_step):
     from autobot.agent.approval import ApprovalGuard, RiskTier
     guard = ApprovalGuard(mode="balanced")
-    risk = guard.classify(action)
+    risk = guard.classify(action, element_context=element_context)
     if not await guard.gate(action, risk, goal=agent_output.next_goal):
         return  # user blocked — skip this action
 """
@@ -35,56 +43,82 @@ if TYPE_CHECKING:
 
 
 class RiskTier(str, Enum):
-    SAFE    = "safe"
-    CAUTION = "caution"
-    DANGER  = "danger"
+    SAFE         = "safe"
+    CAUTION      = "caution"
+    DANGER       = "danger"
+    IRREVERSIBLE = "irreversible"
 
 
 # ── Keyword sets for risk classification ──────────────────────────────────────
+# IRREVERSIBLE is checked first and always wins — see gate()'s hard-block below.
 
-_DANGER_PATTERNS = [
-    # File deletion (shell commands only — not Python method calls in typed text)
+_IRREVERSIBLE_PATTERNS = [
+    # File / data deletion — both Unix and Windows/PowerShell forms, since
+    # this project runs on Windows and the Unix-only patterns below would
+    # miss `del /f /s /q`, `rd /s /q`, and Remove-Item entirely.
     r"\brm\s+-\w*r\w*\b", r"\brmdir\b", r"shutil\.rmtree", r"os\.remove", r"os\.unlink",
-    # Shell execution that can be destructive
-    r"subprocess", r"os\.system", r"shell=True",
-    # Payment / purchase
-    r"\bpurchase\b", r"\bcheckout\b", r"\bbuy now\b",
-    r"credit.?card", r"stripe", r"paypal",
-    # Database destruction
+    r"\bdel\s+/[a-z]*f[a-z]*\b", r"\brd\s+/s\b", r"\brmdir\s+/s\b",
+    r"remove-item\b.{0,40}(-recurse|-force)",
+    # Database / disk destruction
     r"\bdrop\b.*\btable\b", r"\btruncate\b", r"\bdelete from\b",
-    # Disk-level (specific — not "format" alone which matches "LaTeX format", "file format", etc.)
-    r"\bmkfs\b", r"\bdd\b.*\bof=\b",
-    # Account-level
+    r"\bmkfs\b", r"\bdd\b.*\bof=\b", r"\bformat\s+[a-z]:\b",
+    # Account-level deletion
     r"delete.?account", r"close.?account",
-]
-
-_CAUTION_PATTERNS = [
-    # Sending actual messages/emails (not generic "send" keyword which matches code everywhere)
+    # Financial transactions
+    r"\bpurchase\b", r"\bcheckout\b", r"\bbuy now\b", r"\bplace order\b",
+    r"credit.?card", r"stripe", r"paypal", r"\bwire transfer\b", r"\bcrypto.{0,10}(send|transfer|swap)\b",
+    # Credential / sensitive-data entry — matched against the target FIELD's
+    # attributes (type="password", aria-label, placeholder) via element_context,
+    # not the typed value itself, since typed values are arbitrary and
+    # uninformative on their own.
+    r'type="password"', r"\bcvv\b", r"\bcard.?number\b", r"\baccount.?number\b",
+    r"\brouting.?number\b", r"\bssn\b", r"\bsocial security\b", r"\bpassport\b",
+    r"\bapi.?key\b", r"\bsecret.?key\b", r"\bprivate.?key\b",
+    # Sending messages / publishing under the user's identity — irreversible
+    # once it leaves the machine, regardless of how "safe" the content is.
     r"\bsend.{0,20}(email|message|mail|dm|notification)\b",
     r"\bemail.{0,20}send\b",
     r"\bslack\b.*\bsend\b|\bwhatsapp\b|\btelegram\b.*\bsend\b",
     r"\btweet\b",
-    # Web form submission via browser (not method calls in Python code)
-    r"\bform\.submit\b|\bsubmit form\b",
-    # Git push / publish (irreversible)
-    r"\bgit push\b", r"\bgit commit\b", r"\bnpm publish\b",
+    r"\bgit push\b", r"\bnpm publish\b",
 ]
 
+_DANGER_PATTERNS = [
+    # Shell execution — risky (can do almost anything) but not itself
+    # irreversible; individual destructive sub-commands are still caught
+    # by _IRREVERSIBLE_PATTERNS above regardless of which action carries them.
+    r"subprocess", r"os\.system", r"shell=True",
+]
+
+_CAUTION_PATTERNS = [
+    # Web form submission via browser (not method calls in Python code)
+    r"\bform\.submit\b|\bsubmit form\b",
+    r"\bgit commit\b",
+]
+
+_IRREVERSIBLE_RE = re.compile("|".join(_IRREVERSIBLE_PATTERNS), re.IGNORECASE)
 _DANGER_RE = re.compile("|".join(_DANGER_PATTERNS), re.IGNORECASE)
 _CAUTION_RE = re.compile("|".join(_CAUTION_PATTERNS), re.IGNORECASE)
 
 
-def _action_text(action: "ActionModel") -> str:
+def _action_text(action: "ActionModel", element_context: str = "") -> str:
     """Extract the human-readable text of an action for risk classification.
 
     For keyboard.type() and clipboard.set() calls, we strip out the typed
     content before classification — the danger patterns should evaluate what
     the agent is *doing*, not the arbitrary text it was asked to type.
     For terminal.run() and other shell-level calls, the full text is kept.
+
+    Uses getattr() defensively: some fields referenced here (computer_call,
+    input_text_native) are part of a planned generic tool-call action that
+    isn't in the current ActionModel schema yet — accessing them directly
+    would raise AttributeError and make the guard fail-crash instead of
+    fail-safe. Once that action type exists, no change is needed here.
     """
     parts: list[str] = []
-    if action.computer_call:
-        call = action.computer_call.call
+    computer_call = getattr(action, "computer_call", None)
+    if computer_call:
+        call = computer_call.call
         # Strip content of typing/clipboard actions — content is user-directed text,
         # not an agent action, so scanning it for "format", "rm", etc. causes false positives.
         if re.match(r"computer\.(keyboard\.type|clipboard\.set)\(", call):
@@ -95,11 +129,18 @@ def _action_text(action: "ActionModel") -> str:
     if action.navigate:
         parts.append(f"navigate to {action.navigate.url}")
     if action.input_text:
-        parts.append(f"type: {action.input_text.text}")
-    if action.input_text_native:
-        parts.append(f"type: {action.input_text_native.text}")
+        parts.append("type_text")  # content excluded — see docstring
+    input_text_native = getattr(action, "input_text_native", None)
+    if input_text_native:
+        parts.append("type_text_native")  # content excluded — see docstring
+    if action.run_command:
+        # Full command text IS kept — this is the actual mechanism by which
+        # an agent would run `rm -rf`, `del /f /s /q`, `shutil.rmtree`, etc.
+        parts.append(f"run_command: {action.run_command.command}")
     if action.done:
         parts.append(f"done: {action.done.text}")
+    if element_context:
+        parts.append(element_context)
     return " | ".join(parts) or action.action_name
 
 
@@ -118,9 +159,18 @@ class ApprovalGuard:
         self.mode = (mode or os.getenv("AUTOBOT_APPROVAL_MODE", "balanced")).lower()
         logger.info(f"ApprovalGuard active — mode: {self.mode}")
 
-    def classify(self, action: "ActionModel") -> RiskTier:
-        """Classify an action into SAFE / CAUTION / DANGER."""
-        text = _action_text(action)
+    def classify(self, action: "ActionModel", element_context: str = "") -> RiskTier:
+        """Classify an action into SAFE / CAUTION / DANGER / IRREVERSIBLE.
+
+        element_context: optional attributes of the DOM/native element being
+        acted on (type, name, aria-label, placeholder) — pass this for
+        input_text/input_text_native actions so credential-field detection
+        (type="password", "card number", etc.) works off the FIELD, not the
+        arbitrary text being typed into it.
+        """
+        text = _action_text(action, element_context=element_context)
+        if _IRREVERSIBLE_RE.search(text):
+            return RiskTier.IRREVERSIBLE
         if _DANGER_RE.search(text):
             return RiskTier.DANGER
         if _CAUTION_RE.search(text):
@@ -133,22 +183,29 @@ class ApprovalGuard:
         tier: RiskTier,
         goal: str = "",
         timeout: float = 300.0,
+        element_context: str = "",
     ) -> bool:
         """
         Gate an action based on current approval mode and risk tier.
 
-        trusted  — Always proceeds. Sends a desktop notification for DANGER actions
-                   so the user is informed but the agent never pauses.
-        balanced — Pauses for DANGER only; CAUTION proceeds with a warning log.
-        strict   — Pauses for CAUTION and DANGER; requires explicit Allow from user.
+        IRREVERSIBLE — ALWAYS pauses for explicit "Allow", in every mode
+                        including trusted. No setting can bypass this tier;
+                        that is the point of it.
+        trusted       — DANGER proceeds automatically (with a notification);
+                        CAUTION proceeds silently.
+        balanced      — Pauses for DANGER; CAUTION proceeds with a log line.
+        strict        — Pauses for CAUTION and DANGER too.
 
         Returns True to proceed, False to skip this action.
         """
-        text = _action_text(action)
+        text = _action_text(action, element_context=element_context)
         tier_label = tier.value.upper()
 
         if tier == RiskTier.SAFE:
             return True
+
+        if tier == RiskTier.IRREVERSIBLE:
+            return await self._request_approval(text, tier_label, goal, timeout)
 
         if self.mode == "trusted":
             if tier == RiskTier.DANGER:
@@ -157,23 +214,30 @@ class ApprovalGuard:
                     title="Autobot — Risky Action (trusted mode)",
                     body=f"Doing: {text[:120]}\nYou can pause or abort from the Autobot dashboard.",
                 )
-            return True  # trusted never pauses
+            return True  # trusted never pauses for DANGER or below
 
         if self.mode == "balanced" and tier == RiskTier.CAUTION:
             logger.info(f"[BALANCED/CAUTION] Proceeding: {text[:100]}")
-            return True  # balanced only pauses for DANGER
+            return True  # balanced only pauses for DANGER and above
 
-        # strict: pause for CAUTION + DANGER
-        # balanced: pause for DANGER
+        # strict: pause for CAUTION + DANGER too
+        return await self._request_approval(text, tier_label, goal, timeout)
+
+    async def _request_approval(self, text: str, tier_label: str, goal: str, timeout: float) -> bool:
+        """Pause and wait for an explicit human Allow/Block via the dashboard."""
         from autobot.agent.human_gate import wait_for_approval
 
         key = "approval_" + hashlib.md5(text.encode()).hexdigest()[:10]
         message = (
             f"[{tier_label}] Agent wants to:\n{text[:200]}"
             + (f"\n\nCurrent goal: {goal[:200]}" if goal else "")
-            + f"\n\nMode: {self.mode} — click Allow to proceed or Block to skip."
+            + (
+                "\n\nThis action cannot be undone — review carefully before allowing."
+                if tier_label == "IRREVERSIBLE"
+                else f"\n\nMode: {self.mode} — click Allow to proceed or Block to skip."
+            )
         )
-        logger.warning(f"⛔ Approval required ({self.mode}/{tier_label}): {text[:100]}")
+        logger.warning(f"⛔ Approval required ({tier_label}): {text[:100]}")
         _send_notification(
             title=f"Autobot needs your approval ({tier_label})",
             body=f"{text[:120]}\nOpen the Autobot dashboard to Allow or Block.",

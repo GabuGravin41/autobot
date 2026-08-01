@@ -14,17 +14,78 @@ from pathlib import Path
 
 
 def _load_env() -> None:
-    """Load .env from project root."""
+    """Load .env from project root.
+
+    encoding="utf-8-sig" is deliberate and load-bearing on Windows. Windows
+    PowerShell 5.1's `Out-File -Encoding utf8` writes a UTF-8 BOM, and with a
+    plain utf-8 read that BOM becomes part of the FIRST variable's name —
+    "﻿OPENROUTER_API_KEY" instead of "OPENROUTER_API_KEY". The result is
+    maddening to debug: every setting in the file works except the first one,
+    which silently reads as unset. "utf-8-sig" strips the BOM if present and
+    is a no-op otherwise.
+    """
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
         try:
             from dotenv import load_dotenv
-            load_dotenv(env_path)
+            load_dotenv(env_path, encoding="utf-8-sig")
         except ImportError:
             pass
 
 
+def _make_stdout_unicode_safe() -> None:
+    """Stop the CLI from dying on its own log characters.
+
+    Autobot's output is full of box-drawing rules and emoji status markers.
+    Windows Terminal negotiates UTF-8 so they render fine there, but a plain
+    console — or ANY redirect to a file or pipe — falls back to cp1252, where
+    printing them raises UnicodeEncodeError and takes the whole run down
+    before a single agent step executes:
+
+        print("\\u2500" * 50)
+        UnicodeEncodeError: 'charmap' codec can't encode characters...
+
+    errors="replace" matters as much as the encoding: if a console genuinely
+    cannot render a glyph we want a '?' in the log, never a crashed run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass  # not a real TTY / already wrapped — nothing to do
+
+
+def _use_system_certificates() -> None:
+    """Make Python trust the OS certificate store, like browsers do.
+
+    On networks that intercept TLS (campus/corporate proxies, antivirus with
+    HTTPS scanning), the interceptor installs its root CA into the Windows
+    certificate store. Chrome therefore works fine, while Python fails with
+    CERTIFICATE_VERIFY_FAILED — because Python ships its own bundled CA list
+    (certifi) and never consults the OS store.
+
+    `truststore` redirects Python's TLS verification to the OS store, so the
+    same certificates the rest of the machine already trusts are honoured
+    here too. This keeps verification ON — unlike disabling it, which would
+    hand the API key to whatever is doing the intercepting.
+
+    Optional dependency: if it isn't installed we carry on unchanged.
+    """
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+        logger_msg = "Using the OS certificate store for TLS verification."
+    except ImportError:
+        return
+    except Exception as e:
+        logger_msg = f"Could not enable OS certificate store ({e}); using bundled CAs."
+    import logging
+    logging.getLogger(__name__).debug(logger_msg)
+
+
 def main() -> None:
+    _make_stdout_unicode_safe()
+    _use_system_certificates()
     _load_env()
 
     parser = argparse.ArgumentParser(
@@ -46,6 +107,11 @@ def main() -> None:
         "--setup",
         action="store_true",
         help="Run initial setup (install playwright browsers, etc.)",
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Diagnose the environment (deps, Chrome/CDP, API keys) without running a task",
     )
     parser.add_argument(
         "--host",
@@ -70,6 +136,10 @@ def main() -> None:
         print("autobot 0.1.0")
         return
 
+    if args.doctor:
+        from autobot.diagnostics import main as doctor_main
+        sys.exit(doctor_main())
+
     if args.setup:
         _run_setup()
         return
@@ -83,15 +153,23 @@ def main() -> None:
 def _run_setup() -> None:
     """Run initial environment setup."""
     print("🛠️ Running Autobot Setup...")
-    
-    # 1. Install Playwright browsers
-    print("📦 Installing Playwright browsers (chromium)...")
+
+    # NOTE: We deliberately do NOT run `playwright install chromium`.
+    # Autobot drives the user's REAL Chrome (with their real logins) by
+    # launching it with --remote-debugging-port and attaching via
+    # connect_over_cdp(). It never calls chromium.launch(), so Playwright's
+    # ~150MB bundled browser is never used. Downloading it is pure waste, and
+    # it fails outright on networks that intercept TLS (corporate proxies,
+    # HTTPS-scanning antivirus) because Playwright's bundled Node has its own
+    # CA store that doesn't include the intercepting certificate.
+    print("ℹ️  Skipping Playwright browser download — Autobot uses your real Chrome.")
+
+    # Verify the Playwright *driver* imports (this is what we actually need).
     try:
-        import subprocess
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-        print("✅ Playwright ready.")
-    except Exception as e:
-        print(f"❌ Playwright setup failed: {e}")
+        import playwright  # noqa: F401
+        print("✅ Playwright driver available.")
+    except ImportError:
+        print("❌ Playwright not installed. Run: pip install -r requirements.txt")
 
     # 2. Check for frontend build
     frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"

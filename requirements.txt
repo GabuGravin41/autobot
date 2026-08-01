@@ -19,6 +19,13 @@ pyautogui>=0.9.54
 httpx>=0.25.0
 websockets>=12.0
 
+# Makes Python verify TLS against the OS certificate store instead of its own
+# bundled CA list. Required on networks that intercept HTTPS (campus/corporate
+# proxies, antivirus with HTTPS scanning): those install their root CA into the
+# OS store, so browsers work while Python fails with CERTIFICATE_VERIFY_FAILED.
+# Keeps verification ON — the alternative (disabling it) would expose API keys.
+truststore>=0.9.0; python_version >= "3.10"
+
 # ── Desktop control (Linux) ───────────────────────────────────────
 # xdotool and wmctrl are system packages — install via:
 #   sudo apt install xdotool wmctrl   (Ubuntu/Debian)
@@ -34,10 +41,20 @@ cryptography>=41.0.0        # Fernet encryption for ~/.autobot/vault.json
 kaggle>=1.6.0
 
 # ── Windows UI automation (Windows only, skipped on Linux/macOS) ─
-# uiautomation>=2.0.29  # Uncomment on Windows only
+# Required for controlling NATIVE desktop apps (Artemis, VESTA, Excel, DICOM
+# viewers). Without it Autobot still drives the browser and raw mouse/keyboard,
+# but is blind to native window contents. The environment marker installs it
+# only on Windows, so this line is safe on Linux/macOS too.
+uiautomation>=2.0.29; sys_platform == "win32"
 
 # ── Numeric / ML ─────────────────────────────────────────────────
-numpy>=1.24.0,<2.0.0        # numpy 2.x has breaking changes with some deps
+# Unpinned upper bound on purpose. numpy is used in exactly one place
+# (agent/domain/dicom_synthesizer.py: np.sum) whose API is identical in 1.x
+# and 2.x, so the old `<2.0.0` cap bought nothing — but it DID force pip to
+# pick numpy 1.26.4 on new interpreters, which has no prebuilt wheel for
+# Python 3.13+ and therefore tried to compile from C source and failed on
+# any machine without MSVC build tools.
+numpy>=1.24.0
 
 # ── Packaging (dev/build only) ────────────────────────────────────
 # pyinstaller>=6.0.0        # Uncomment when building desktop AppImage

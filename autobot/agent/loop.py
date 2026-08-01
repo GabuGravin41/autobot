@@ -18,17 +18,21 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 
+from autobot.agent.approval import ApprovalGuard, RiskTier
 from autobot.agent.models import (
     ActionModel,
     ActionResult,
     AgentOutput,
     AgentStepInfo,
     ClickAction,
+    ComputerCallAction,
     DoneAction,
     InputTextAction,
     NavigateAction,
@@ -46,6 +50,14 @@ from autobot.knowledge.skill_distiller import SkillDistiller
 from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 
 logger = logging.getLogger(__name__)
+
+
+class LLMUnavailableError(RuntimeError):
+    """The LLM failed repeatedly, so no further progress is possible.
+
+    Raised to stop the run immediately rather than letting the agent spend its
+    whole step budget on requests that cannot succeed.
+    """
 
 
 class AgentLoop:
@@ -70,6 +82,7 @@ class AgentLoop:
         max_actions_per_step: int = 5,
         use_vision: bool = True,
         custom_instructions: str | None = None,
+        first_step_context: str | None = None,
     ):
         self.page = page
         self.llm_client = llm_client
@@ -79,16 +92,53 @@ class AgentLoop:
         self.max_actions_per_step = max_actions_per_step
         self.use_vision = use_vision
         self.custom_instructions = custom_instructions
+        # Big-picture context (e.g. full mission plan) injected only into the
+        # very first step's history slot — see MissionAgent, which gives each
+        # objective a brief per-step reminder via custom_instructions and the
+        # full mission picture once, here, so it doesn't eat context budget
+        # every step.
+        self.first_step_context = first_step_context
 
         # State
         self.step_number = 0
         self.history: list[StepHistoryEntry] = []
         self.previous_dom_state: DOMSerializedState | None = None
+        # Whether the agent's done() reported success — gates skill distillation.
+        self._last_done_success = False
+        # If the LLM is unreachable (bad key, no credit, network down), every
+        # step fails identically. Without a circuit breaker the agent silently
+        # burns its ENTIRE step budget re-issuing a doomed request and then
+        # reports "No steps were executed", which says nothing about the real
+        # cause. Track consecutive failures and abort early with the actual error.
+        self._consecutive_llm_failures = 0
+        self._last_llm_error: str = ""
+        self._max_consecutive_llm_failures = 3
+
+        # ── Vision cost control ──────────────────────────────────────────
+        # A screenshot is by far the most expensive part of a step (roughly
+        # 1-2k tokens each, versus a few hundred for the DOM text). Most
+        # browser steps don't need one: the DOM snapshot already names every
+        # interactive element. So send vision only when it actually adds
+        # information — see _should_use_vision().
+        #   always    — every step (most expensive; use when debugging)
+        #   auto      — first step, after a failure, or when the DOM is sparse
+        #   never     — text only (cheapest; blind to canvas/image-only UIs)
+        self.vision_mode = os.getenv("AUTOBOT_VISION_MODE", "auto").lower()
+        if self.vision_mode not in ("always", "auto", "never"):
+            logger.warning(f"Unknown AUTOBOT_VISION_MODE '{self.vision_mode}', using 'auto'")
+            self.vision_mode = "auto"
+        if not use_vision:
+            self.vision_mode = "never"
+        # Below this many interactive elements, the DOM probably failed to
+        # describe the page (SPA still rendering, canvas app) and a screenshot
+        # is worth its cost.
+        self._sparse_dom_threshold = 5
 
         # Computer API for OS-level tools
         self.computer = Computer()
         self.env_memory = EnvironmentMemory()
         self.skill_distiller = SkillDistiller()
+        self.approval_guard = ApprovalGuard()
 
         # Build system prompt
         tool_catalog = self.computer.get_tool_catalog()
@@ -121,10 +171,16 @@ class AgentLoop:
                 if result is not None:
                     # Agent called "done" — task is complete
                     logger.info(f"✅ Agent finished at step {self.step_number + 1}: {result}")
+                    self._distill_skill_if_successful(result)
                     return result
 
                 self.step_number += 1
 
+            except LLMUnavailableError:
+                # Not recoverable by retrying — the model itself is unreachable.
+                # Propagate so the user sees the real cause immediately instead
+                # of a spun-out step budget.
+                raise
             except Exception as e:
                 logger.error(f"❌ Step {self.step_number + 1} failed: {e}")
                 self.step_number += 1
@@ -133,6 +189,34 @@ class AgentLoop:
         # Hit max steps without completing
         logger.warning(f"⚠️ Agent hit max steps ({self.max_steps}) without completing")
         return self._summarize_history()
+
+    def _distill_skill_if_successful(self, result: str) -> None:
+        """
+        Save this run's working path as a reusable skill.
+
+        This closes the loop that makes repeated work cheap: without it,
+        get_skill_prompt_context() reads from a skills directory that nothing
+        ever writes to, so every run re-derives from scratch at full token
+        cost. Only genuine successes are recorded — an agent that gave up via
+        done(success=False) has nothing worth teaching the next run.
+
+        Never raises: failing to learn from a successful run must not turn it
+        into a failed one.
+        """
+        if not self._last_done_success:
+            logger.debug("Skipping skill distillation — run did not report success.")
+            return
+        try:
+            skill = self.skill_distiller.distill_from_run(
+                goal=self.goal, history=self.history, result=result
+            )
+            if skill:
+                logger.info(
+                    f"🎓 Distilled skill '{skill.name}' "
+                    f"({len(skill.proven_steps)} proven steps, seen {skill.success_count}x)"
+                )
+        except Exception as e:
+            logger.warning(f"Skill distillation failed (run still succeeded): {e}")
 
     async def _execute_step(self) -> str | None:
         """
@@ -154,6 +238,7 @@ class AgentLoop:
         dom_service = DOMExtractionService(
             self.page,
             previous_state=self.previous_dom_state,
+            capture_screenshot=self.vision_mode != "never",
         )
         browser_state = await dom_service.extract_state()
         url_before = browser_state.url
@@ -164,13 +249,32 @@ class AgentLoop:
             selector_map=browser_state.selector_map,
         )
 
+        # If the user's foreground window is a native app rather than the
+        # browser, the DOM snapshot above describes something the agent isn't
+        # actually looking at. Capture the native window's UI tree too.
+        native_context = await self._get_native_context()
+
         # ─── 2. THINK ───
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
-        agent_output = await self._call_llm(browser_state)
+        agent_output = await self._call_llm(browser_state, native_context=native_context)
 
         if agent_output is None:
-            logger.error("LLM returned no output")
+            self._consecutive_llm_failures += 1
+            logger.error(
+                f"LLM returned no output "
+                f"({self._consecutive_llm_failures}/{self._max_consecutive_llm_failures} consecutive)"
+            )
+            if self._consecutive_llm_failures >= self._max_consecutive_llm_failures:
+                raise LLMUnavailableError(
+                    f"The LLM failed {self._consecutive_llm_failures} times in a row, so "
+                    f"the agent cannot make progress. Last error:\n  {self._last_llm_error}\n\n"
+                    "Common causes: no credit on the API account, an invalid or revoked "
+                    "API key, no network access, or a model name that doesn't exist for "
+                    "this provider. Run 'autobot --doctor' to check configuration."
+                )
             return None
+
+        self._consecutive_llm_failures = 0
 
         logger.info(
             f"Step {self.step_number + 1}: "
@@ -186,7 +290,7 @@ class AgentLoop:
         )
 
         # ─── 4. RECORD ───
-        url_after = self.page.url
+        url_after = self._page_url()
         entry = StepHistoryEntry(
             step_number=self.step_number,
             agent_output=agent_output,
@@ -202,16 +306,99 @@ class AgentLoop:
         # Check if agent called "done"
         for action in agent_output.action:
             if action.done is not None:
+                self._last_done_success = action.done.success
                 return action.done.text
 
         return None
 
-    async def _call_llm(self, browser_state: BrowserState) -> AgentOutput | None:
+    # Window-title fragments that mean "this is the browser" — for these the
+    # DOM snapshot is the better description, so we skip native extraction
+    # (which is slow, and would give the LLM a second competing index space).
+    _BROWSER_TITLE_HINTS = ("chrome", "chromium", "edge", "firefox", "brave", "opera")
+
+    async def _get_native_context(self) -> str:
+        """
+        Extract the focused native window's UI tree, if the focus is on a
+        desktop app rather than the browser.
+
+        Returns "" when native UI control is unavailable (non-Windows, or the
+        optional `uiautomation` package isn't installed) or when the browser
+        is focused. Never raises — perception failing must not kill the run.
+        """
+        window = getattr(self.computer, "window", None)
+        if window is None:
+            return ""
+
+        try:
+            title = await asyncio.to_thread(window.active_title)
+            if not title:
+                return ""
+            if any(hint in title.lower() for hint in self._BROWSER_TITLE_HINTS):
+                return ""
+
+            tree = await asyncio.to_thread(window.extract_ui)
+            if not tree:
+                return ""
+
+            logger.info(f"🖥️  Native window in focus: '{title}' — extracted UI tree")
+            return (
+                f"FOCUSED NATIVE WINDOW: {title}\n"
+                "The browser state below does NOT describe this window. To act here use\n"
+                "  computer.window.click(N) / computer.window.type(N, 'text')\n"
+                "with the [N] indices from this tree (they are a SEPARATE index space\n"
+                "from the browser's DOM indices — do not mix them up):\n"
+                f"{tree}"
+            )
+        except Exception as e:
+            logger.debug(f"Native window extraction skipped: {e}")
+            return ""
+
+    def _should_use_vision(self, browser_state: BrowserState) -> bool:
+        """
+        Decide whether this step is worth a screenshot.
+
+        Sending an image every step is the single largest recurring cost in a
+        run, and on a well-described DOM page it usually tells the model
+        nothing the element list didn't already. We spend it where it pays:
+        orienting on the first step, recovering after something went wrong,
+        and whenever the text description looks too thin to act on.
+        """
+        if self.vision_mode == "never":
+            return False
+        if self.vision_mode == "always":
+            return True
+
+        # auto:
+        if self.step_number == 0:
+            return True  # orient once at the start
+
+        # The DOM didn't describe much — likely a canvas app, an image-only
+        # UI, or a page still rendering. Look at it directly.
+        if browser_state.num_interactive < self._sparse_dom_threshold:
+            return True
+
+        # Something failed last step: the text state evidently wasn't enough
+        # to choose a working action, so pay for eyes on the retry.
+        if self.history:
+            last = self.history[-1]
+            if any(not r.success for r in last.action_results):
+                return True
+
+        return False
+
+    async def _call_llm(
+        self, browser_state: BrowserState, native_context: str = ""
+    ) -> AgentOutput | None:
         """
         Call the LLM with the current state and parse the structured output.
         """
-        # Build agent history text from previous steps
-        history_text = self._build_history_text()
+        # Build agent history text from previous steps.
+        # At step 0 there's no history yet, so this is where a mission's
+        # full-picture context (if any) gets its one-time injection.
+        if self.step_number == 0 and self.first_step_context:
+            history_text = self.first_step_context
+        else:
+            history_text = self._build_history_text()
 
         # Get environment knowledge and learned skill context
         env_summary = self.env_memory.get_summary_text()
@@ -226,9 +413,13 @@ class AgentLoop:
             agent_history=history_text,
             environment_summary=env_summary,
             learned_skill_context=skill_context,
+            native_window_context=native_context,
         )
 
-        user_messages = step_builder.build_messages(use_vision=self.use_vision)
+        use_vision = self._should_use_vision(browser_state)
+        if not use_vision:
+            logger.debug(f"Step {self.step_number + 1}: text-only (vision skipped to save tokens)")
+        user_messages = step_builder.build_messages(use_vision=use_vision)
 
         # Construct full message list
         messages = [
@@ -238,9 +429,16 @@ class AgentLoop:
 
         try:
             response = await self._make_llm_call(messages)
-            return self._parse_agent_output(response)
+            parsed = self._parse_agent_output(response)
+            if parsed is None:
+                self._last_llm_error = (
+                    "the model replied, but its output was not valid JSON matching the "
+                    "required action schema"
+                )
+            return parsed
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            self._last_llm_error = f"{type(e).__name__}: {e}"
+            logger.error(f"LLM call failed: {self._last_llm_error}")
             return None
 
     async def _make_llm_call(self, messages: list[dict]) -> str:
@@ -305,14 +503,33 @@ class AgentLoop:
                 ))
                 break
 
+            # Risk-gate before executing. SAFE actions (the vast majority —
+            # click/navigate/scroll/etc.) return instantly with no overhead.
+            # IRREVERSIBLE-tier actions always pause for a live human Allow,
+            # in every approval mode including trusted — see approval.py.
+            element_context = self._element_context_for_action(action, browser_state)
+            tier = self.approval_guard.classify(action, element_context=element_context)
+            if tier != RiskTier.SAFE:
+                allowed = await self.approval_guard.gate(
+                    action, tier, goal=self.goal, element_context=element_context,
+                )
+                if not allowed:
+                    results.append(ActionResult(
+                        action_name=action.action_name,
+                        success=False,
+                        error=f"Blocked by approval guard ({tier.value})",
+                    ))
+                    logger.warning(f"Action {i + 1} ({action.action_name}) blocked by approval guard — stopping this step")
+                    break
+
             # Execute the action
-            url_before = self.page.url
+            url_before = self._page_url()
             result = await self._execute_single_action(action, browser_state)
             results.append(result)
 
             # Page change detection (adapted from Browser Use)
             # If the page changed, skip remaining actions
-            if result.page_changed or self.page.url != url_before:
+            if result.page_changed or self._page_url() != url_before:
                 remaining = len(actions) - i - 1
                 if remaining > 0:
                     logger.info(
@@ -327,6 +544,63 @@ class AgentLoop:
 
         return results
 
+    async def _execute_computer_call(self, call_action: ComputerCallAction) -> ActionResult:
+        """
+        Execute an OS-level tool call from the injected tool catalog.
+
+        This is the action that makes Autobot a computer-use agent rather than
+        a browser-only agent: native window focus, mouse/keyboard on desktop
+        apps, clipboard, filesystem, terminal. Parsing is structural and never
+        eval()'d — see computer/dispatch.py. Risk gating already happened in
+        _execute_actions before we got here.
+        """
+        from autobot.computer.dispatch import dispatch_computer_call
+
+        call_str = call_action.call
+        logger.info(f"🛠️  computer_call: {call_str}")
+        success, result_text = await dispatch_computer_call(self.computer, call_str)
+
+        return ActionResult(
+            action_name="computer_call",
+            success=success,
+            extracted_content=result_text if success else None,
+            error=None if success else result_text,
+        )
+
+    def _element_context_for_action(self, action: ActionModel, browser_state: BrowserState) -> str:
+        """
+        Build a string of the TARGET element's attributes for input_text actions,
+        so ApprovalGuard can detect credential fields (type="password", a
+        card-number label, etc.) from what's being filled in, not from the
+        arbitrary text being typed into it.
+        """
+        if action.input_text is None:
+            return ""
+        element = browser_state.selector_map.get(action.input_text.index)
+        if element is None:
+            return ""
+        attr_str = " ".join(f'{k}="{v}"' for k, v in element.attributes.items())
+        return f"<{element.tag_name} {attr_str}> {element.text}".strip()
+
+    def _page_url(self) -> str:
+        """Current page URL, or "" when no browser is attached.
+
+        AgentLoop can run without a browser (OS-only mode) — see
+        AgentRunner.run — so every page access has to tolerate page=None.
+        """
+        if self.page is None:
+            return ""
+        try:
+            return self._page_url()
+        except Exception:
+            return ""
+
+    # Actions that cannot work without an attached browser.
+    _BROWSER_ONLY_ACTIONS = (
+        "navigate", "click", "input_text", "scroll_down", "scroll_up",
+        "press_key", "switch_tab", "new_tab", "close_tab", "go_back",
+    )
+
     async def _execute_single_action(
         self,
         action: ActionModel,
@@ -339,6 +613,19 @@ class AgentLoop:
         """
         action_name = action.action_name
         action_data = action.action_data
+
+        if self.page is None and action_name in self._BROWSER_ONLY_ACTIONS:
+            return ActionResult(
+                action_name=action_name,
+                success=False,
+                error=(
+                    f"'{action_name}' needs a browser, but none is attached "
+                    "(OS-only mode). For desktop apps use computer_call instead, e.g. "
+                    '{"computer_call": {"call": "computer.window.focus(\'Notepad\')"}} '
+                    "then computer.window.extract_ui() to see its elements. "
+                    "To get a browser, start Chrome with --remote-debugging-port=9222."
+                ),
+            )
 
         try:
             if action.navigate is not None:
@@ -416,12 +703,26 @@ class AgentLoop:
                     extracted_content=f"Human input requested: {action.request_human_input.prompt}",
                 )
 
+            elif action.computer_call is not None:
+                return await self._execute_computer_call(action.computer_call)
+
             else:
-                return ActionResult(
-                    action_name="unknown",
-                    success=False,
-                    error=f"Unknown action: {action_name}",
-                )
+                # Tell the LLM exactly what it got wrong. Previously an
+                # unrecognized action name produced a bare "Unknown action:
+                # unknown", giving the model nothing to correct against — so
+                # it would often emit the same bad action again next step.
+                bad_keys = action.unrecognized_keys
+                if bad_keys:
+                    valid = ", ".join(n for n in action.model_fields)
+                    error = (
+                        f"Unrecognized action key(s): {', '.join(bad_keys)}. "
+                        f"Valid actions are: {valid}. "
+                        "To use an OS-level tool from the tool catalog, use "
+                        '{"computer_call": {"call": "computer.<module>.<method>(...)"}}'
+                    )
+                else:
+                    error = "Empty action — no action field was set."
+                return ActionResult(action_name="unknown", success=False, error=error)
 
         except Exception as e:
             logger.error(f"Action {action_name} failed: {e}")
@@ -429,15 +730,17 @@ class AgentLoop:
 
     async def _execute_click(self, click: ClickAction, browser_state: BrowserState) -> ActionResult:
         """
-        Click an element by its DOM index.
+        Click an element by its DOM index via CDP (computer.browser.click_element).
 
-        This is the key pattern from Browser Use: instead of guessing CSS selectors,
-        the LLM references elements by their numeric index from the DOM tree.
-        We resolve the index to an actual element using the accessibility tree.
+        The index comes from dom/extraction.py, which builds browser_state.selector_map
+        from the SAME CDP snapshot (dom/page_snapshot.py) that click_element() re-queries
+        by index — so [N] always means the same element in both places. click_element()
+        re-reads the element's current bounding-rect right before dispatching real CDP
+        mouse events, rather than trusting stale snapshot coordinates (DESIGN_PHILOSOPHY.md:
+        "CDP DOM Query First").
         """
         index = click.index
         element = browser_state.selector_map.get(index)
-
         if element is None:
             return ActionResult(
                 action_name="click",
@@ -446,51 +749,104 @@ class AgentLoop:
             )
 
         try:
-            # Strategy: Use accessibility role + name to find the element via Playwright
-            role = element.attributes.get("role", "")
-            text = element.text
-
-            if role and text:
-                await self.page.get_by_role(role, name=text).first.click(timeout=5000)
-            elif text:
-                await self.page.get_by_text(text, exact=False).first.click(timeout=5000)
-            elif element.tag_name == "a" and "href" in element.attributes:
-                await self.page.locator(f'a[href="{element.attributes["href"]}"]').first.click(timeout=5000)
-            else:
-                # Fallback: use tag + any identifying attribute
-                selector = element.tag_name
-                if "name" in element.attributes:
-                    selector = f'{element.tag_name}[name="{element.attributes["name"]}"]'
-                elif "aria-label" in element.attributes:
-                    selector = f'{element.tag_name}[aria-label="{element.attributes["aria-label"]}"]'
-
-                await self.page.locator(selector).first.click(timeout=5000)
-
-            logger.info(f"Clicked [{index}] <{element.tag_name}> '{text[:30]}'")
-
-            # Check if page changed
-            import asyncio
-            await asyncio.sleep(0.5)
-            page_changed = self.page.url != browser_state.url
-
-            return ActionResult(action_name="click", success=True, page_changed=page_changed)
-
+            result_text = await asyncio.to_thread(self.computer.browser.click_element, index)
         except Exception as e:
+            result_text = f"error: {e}"
+
+        if result_text.startswith("clicked "):
+            logger.info(f"Clicked [{index}]: {result_text}")
+            await asyncio.sleep(0.5)
             return ActionResult(
                 action_name="click",
-                success=False,
-                error=f"Click on [{index}] failed: {e}",
+                success=True,
+                page_changed=self._page_url() != browser_state.url,
             )
+
+        # The CDP click didn't land. Rather than report failure and let the
+        # model burn its next step re-issuing the identical click, escalate to
+        # a physically different interaction — an element can be present in the
+        # DOM but covered by an overlay, outside the viewport, or only
+        # responsive to a real OS-level mouse event.
+        return await self._click_fallback_ladder(index, element, browser_state, result_text)
+
+    async def _click_fallback_ladder(
+        self,
+        index: int,
+        element: Any,
+        browser_state: BrowserState,
+        first_error: str,
+    ) -> ActionResult:
+        """
+        Try progressively different ways of clicking the same element.
+
+        Each rung is a genuinely different mechanism, not a retry of the last
+        one — repeating an identical failing action is the single most common
+        way this agent used to waste its whole step budget.
+        """
+        attempts = [f"cdp_click: {first_error}"]
+
+        # Rung 1: scroll it into view, then click again. Handles elements that
+        # resolve fine but sit outside the current viewport.
+        try:
+            await asyncio.to_thread(self.computer.browser.scroll_to, index)
+            await asyncio.sleep(0.3)
+            retry = await asyncio.to_thread(self.computer.browser.click_element, index)
+            if retry.startswith("clicked "):
+                logger.info(f"Clicked [{index}] after scrolling into view")
+                await asyncio.sleep(0.5)
+                return ActionResult(
+                    action_name="click", success=True,
+                    page_changed=self._page_url() != browser_state.url,
+                    extracted_content="recovered: needed scroll into view first",
+                )
+            attempts.append(f"scroll+cdp_click: {retry}")
+        except Exception as e:
+            attempts.append(f"scroll+cdp_click: {e}")
+
+        # Rung 2: call the element's own .click() in JS. This dispatches no
+        # mouse events at coordinates, so it bypasses pointer hit-testing —
+        # the fix when the correct element is found but a transparent overlay,
+        # cookie banner, or sticky header is intercepting the real click.
+        try:
+            js_result = await asyncio.to_thread(self.computer.browser.click_via_js, index)
+            if js_result.startswith("js-clicked "):
+                logger.info(f"Clicked [{index}] via JS fallback (something was intercepting)")
+                await asyncio.sleep(0.5)
+                return ActionResult(
+                    action_name="click", success=True,
+                    page_changed=self._page_url() != browser_state.url,
+                    extracted_content="recovered: normal click was intercepted; used JS click",
+                )
+            attempts.append(f"js_click: {js_result}")
+        except Exception as e:
+            attempts.append(f"js_click: {e}")
+
+        # All rungs failed. Report every distinct thing that was tried, so the
+        # model picks a different STRATEGY next step (different element, scroll,
+        # dismiss an overlay) instead of the same click a third time.
+        return ActionResult(
+            action_name="click",
+            success=False,
+            error=(
+                f"Click on [{index}] <{element.tag_name}> '{element.text[:40]}' failed "
+                f"after {len(attempts)} different methods:\n  - " + "\n  - ".join(attempts)
+                + "\nDo NOT retry this same click. The element may be covered by an "
+                "overlay/modal, disabled, or inside an iframe. Try dismissing any "
+                "popup, scrolling, or targeting a different element."
+            ),
+        )
 
     async def _execute_input(self, input_action: InputTextAction, browser_state: BrowserState) -> ActionResult:
         """
-        Type text into an element by its DOM index.
-        Same index-based approach as click.
+        Type text into an element by its DOM index via CDP (computer.browser.fill).
+        Same index space and same reasoning as _execute_click above. fill() clears
+        the field, inserts text via CDP Input.insertText, then re-reads the field
+        to verify the text actually landed — we treat unverified fills as failures
+        so the agent retries instead of assuming success on a field that silently
+        rejected input (a common failure mode on rich-text editors like Grok/ChatGPT).
         """
         index = input_action.index
-        element = browser_state.selector_map.get(index)
-
-        if element is None:
+        if browser_state.selector_map.get(index) is None:
             return ActionResult(
                 action_name="input_text",
                 success=False,
@@ -498,31 +854,18 @@ class AgentLoop:
             )
 
         try:
-            role = element.attributes.get("role", "")
-            text = element.text
-            placeholder = element.attributes.get("placeholder", "")
-
-            if role in ("textbox", "searchbox", "combobox"):
-                locator = self.page.get_by_role(role, name=text or placeholder)
-            elif placeholder:
-                locator = self.page.get_by_placeholder(placeholder)
-            elif text:
-                locator = self.page.get_by_label(text)
-            else:
-                locator = self.page.locator(f'{element.tag_name}[name="{element.attributes.get("name", "")}"]')
-
-            await locator.first.click(timeout=5000)
-            await locator.first.fill(input_action.text, timeout=5000)
-
-            logger.info(f"Input [{index}] <{element.tag_name}>: '{input_action.text[:30]}'")
-            return ActionResult(action_name="input_text", success=True)
-
+            result_text = await asyncio.to_thread(self.computer.browser.fill, index, input_action.text)
         except Exception as e:
-            return ActionResult(
-                action_name="input_text",
-                success=False,
-                error=f"Input to [{index}] failed: {e}",
-            )
+            return ActionResult(action_name="input_text", success=False, error=f"Input to [{index}] failed: {e}")
+
+        success = result_text.startswith("filled ") and "verified: True" in result_text
+        logger.info(f"Input [{index}]: {result_text}")
+
+        return ActionResult(
+            action_name="input_text",
+            success=success,
+            error=None if success else result_text,
+        )
 
     def _build_history_text(self) -> str:
         """Build a text summary of all previous steps for the agent_history section."""

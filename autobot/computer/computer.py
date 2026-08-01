@@ -33,11 +33,28 @@ from autobot.computer.research_tool import Research
 from autobot.computer.vault import Vault
 from autobot.computer.anti_sleep import anti_sleep
 
-if platform.system() == 'Windows':
-    from autobot.computer.window import Window
-    import uiautomation as auto
-
 logger = logging.getLogger(__name__)
+
+# Windows native-app control (UIA) is optional. `uiautomation` is a Windows-only
+# COM package and is commented out in requirements.txt, so importing it
+# unconditionally here made `Computer()` — and therefore AgentLoop, and
+# therefore every entry point — fail at import on any Windows machine that
+# installed from requirements.txt. Degrade to browser+mouse/keyboard control
+# instead of taking the whole agent down with us.
+Window = None  # type: ignore[assignment]
+HAS_NATIVE_UI = False
+
+if platform.system() == 'Windows':
+    try:
+        from autobot.computer.window import Window  # type: ignore[assignment]
+        HAS_NATIVE_UI = True
+    except ImportError as e:
+        logger.warning(
+            "Native Windows UI control unavailable (%s). Browser and mouse/keyboard "
+            "control still work; native desktop apps (Artemis, VESTA, Excel...) do not. "
+            "Install with: pip install uiautomation",
+            e,
+        )
 
 
 class Computer:
@@ -63,7 +80,7 @@ class Computer:
         self.research = Research()
         self.vault = Vault()
         self.anti_sleep = anti_sleep
-        if platform.system() == 'Windows':
+        if HAS_NATIVE_UI and Window is not None:
             self.window = Window(self.mouse, self.keyboard)
 
     def _get_all_tools(self) -> list[Any]:

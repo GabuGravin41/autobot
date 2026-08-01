@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ─────────────────────────────────────────────
@@ -96,6 +96,19 @@ class RequestHumanInputAction(BaseModel):
     sensitive: bool = False
 
 
+class ComputerCallAction(BaseModel):
+    """Invoke any OS-level tool from the injected tool catalog.
+
+    This is what lets Autobot drive things that are not browser DOM elements:
+    native desktop apps (Artemis, VESTA, Excel), the clipboard, window focus,
+    the filesystem, the terminal. The `call` string is parsed structurally and
+    never eval()'d — see computer/dispatch.py for the security model.
+
+    Example: {"computer_call": {"call": "computer.window.focus('Artemis')"}}
+    """
+    call: str
+
+
 # ─────────────────────────────────────────────
 # Action Union — all possible actions the agent can take
 # ─────────────────────────────────────────────
@@ -112,7 +125,12 @@ class ActionModel(BaseModel):
         {"input_text": {"index": 2, "text": "hello"}}
         {"navigate": {"url": "https://google.com"}}
         {"run_command": {"command": "python script.py"}}
+        {"computer_call": {"call": "computer.mouse.click(x=640, y=400)"}}
     """
+    # extra="allow" so unknown keys are retained rather than silently dropped —
+    # see unrecognized_keys below.
+    model_config = ConfigDict(extra="allow")
+
     navigate: NavigateAction | None = None
     click: ClickAction | None = None
     input_text: InputTextAction | None = None
@@ -128,6 +146,7 @@ class ActionModel(BaseModel):
     go_back: GoBackAction | None = None
     run_command: RunCommandAction | None = None
     request_human_input: RequestHumanInputAction | None = None
+    computer_call: ComputerCallAction | None = None
 
     @property
     def action_name(self) -> str:
@@ -136,6 +155,18 @@ class ActionModel(BaseModel):
             if getattr(self, field_name) is not None:
                 return field_name
         return "unknown"
+
+    @property
+    def unrecognized_keys(self) -> list[str]:
+        """Keys the LLM sent that aren't real actions.
+
+        Pydantic silently drops unknown fields, so an LLM emitting a
+        hallucinated or misspelled action name previously produced an
+        all-None ActionModel that executed as a no-op — burning a step with
+        no feedback the model could learn from. Capturing them here lets the
+        loop tell the LLM exactly what it got wrong.
+        """
+        return list(self.__pydantic_extra__ or {})
 
     @property
     def action_data(self) -> BaseModel | None:

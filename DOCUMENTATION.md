@@ -55,11 +55,50 @@ graph TD
 ---
 
 ## 🛠️ Setup & Execution
+
+**Start here — before anything else:**
+```bash
+python -m pip install -r requirements.txt
+python -m autobot.cli --doctor   # checks deps, Chrome/CDP, API keys; tells you what's broken
+```
+
+> **Do not run `playwright install chromium`.** Autobot drives your *real*
+> Chrome — the one with your actual logins to Grok, Overleaf, Gmail — by
+> launching it with `--remote-debugging-port` and attaching over CDP. It
+> never calls `chromium.launch()`, so Playwright's bundled ~150MB browser is
+> never used. If you already tried and hit
+> `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, ignore it: that's Playwright's bundled
+> Node.js rejecting a TLS-intercepting certificate (corporate proxy or
+> HTTPS-scanning antivirus), and it has no effect on Autobot.
+`--doctor` makes no LLM calls and costs nothing. Fix every `[FAIL]` before
+running a task; `[WARN]` items reduce capability but still allow a run.
+
+**Then run the cheapest possible end-to-end test first:**
+```bash
+autobot "open Notepad and type hello"
+```
+This exercises window focus → native UI extraction → `computer_call` in about
+four steps, so if something breaks you learn which layer failed. Debugging a
+nine-phase benchmark tells you almost nothing by comparison.
+
+**Full setup:**
 1. **Bootstrap:** `python -m autobot.main` (Starts server on 8000).
 2. **Dashboard:** `npm run dev` in `/frontend` (Opens dashboard on 3000).
-3. **Configurations:** 
+3. **Configurations:**
    - Set `AUTOBOT_BROWSER_MODE=human_profile` for stealth.
    - Set `AUTOBOT_LLM_PROVIDER=openrouter` for the brain.
+
+### Controlling token spend
+
+| Variable | Values | Effect |
+| :--- | :--- | :--- |
+| `AUTOBOT_VISION_MODE` | `always` / `auto` / `never` | `auto` (default) sends a screenshot only on the first step, when the DOM is too sparse to act on, or after a failed action. `always` is the old behaviour and costs roughly 1-2k extra tokens *per step*. `never` is text-only and cheapest, but blind to canvas/image-only UIs. |
+| `AUTOBOT_APPROVAL_MODE` | `strict` / `balanced` / `trusted` | How often the agent pauses for permission. IRREVERSIBLE actions (deletion, payments, credentials, sending under your identity) always pause, in every mode. |
+| `AUTOBOT_STEPS_PER_OBJECTIVE` | integer | Step budget per mission objective. |
+
+The largest saving isn't a setting: repeated tasks get distilled into
+**learned skills** (`autobot/knowledge/skills/`) and replayed instead of
+re-reasoned. `autobot --doctor` reports how many you've accumulated.
 
 ---
 

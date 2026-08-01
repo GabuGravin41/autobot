@@ -21,7 +21,11 @@ for _env_path in (p for p in _env_candidates if p):
     if _env_path.exists():
         try:
             from dotenv import load_dotenv
-            load_dotenv(_env_path, override=False)
+            # utf-8-sig strips a UTF-8 BOM if present. Windows PowerShell 5.1's
+            # `Out-File -Encoding utf8` writes one, and without this the BOM
+            # binds to the first variable's NAME, making only that one setting
+            # silently unreadable. See the fuller note in cli.py::_load_env.
+            load_dotenv(_env_path, override=False, encoding="utf-8-sig")
         except ImportError:
             pass
         break

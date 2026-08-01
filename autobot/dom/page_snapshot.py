@@ -36,6 +36,7 @@ _JS_EXTRACT = """
     // 1. Interactive elements
     const INTERACTIVE = 'a[href], button, input:not([type="hidden"]), select, textarea, [contenteditable="true"], [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"]';
     const elements = [];
+    const elements_data = [];
     let idx = 1;
 
     document.querySelectorAll(INTERACTIVE).forEach(el => {
@@ -72,8 +73,9 @@ _JS_EXTRACT = """
         if (role) desc += ` role="${role}"`;
         desc += `> @${cx},${cy}`;
 
+        const disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
         const flags = [];
-        if (el.disabled || el.getAttribute('aria-disabled') === 'true') flags.push('DISABLED');
+        if (disabled) flags.push('DISABLED');
         if (el.required || el.getAttribute('aria-required') === 'true') flags.push('req');
         if (el.readOnly) flags.push('ro');
         if ((isInput || isContentEditable) && rawValue.trim()) flags.push(`${rawValue.length}ch`);
@@ -86,6 +88,24 @@ _JS_EXTRACT = """
         if (href && href !== '#' && !href.startsWith('javascript')) desc += ` → ${href.slice(0, 40)}`;
 
         elements.push(desc);
+        // Structured twin of the same element, same index — this is what
+        // DOMExtractionService uses to build DOMElementNode objects, so the
+        // LLM's [N] and computer.browser.click_element(N)'s [N] never diverge.
+        elements_data.push({
+            index: idx,
+            tag: tag,
+            role: role,
+            type: type,
+            name: name,
+            text: text,
+            href: href,
+            x: cx,
+            y: cy,
+            disabled: disabled,
+            is_input: isInput,
+            is_content_editable: isContentEditable,
+            value: rawValue.slice(0, 300),
+        });
         idx++;
     });
 
@@ -121,6 +141,7 @@ _JS_EXTRACT = """
         url: window.location.href,
         title: document.title,
         elements: elements,
+        elements_data: elements_data,
         dialogs: dialogs,
         text: bodyText,
         num_interactive: elements.length,
@@ -141,12 +162,16 @@ class PageSnapshot:
     num_inputs: int
     dialogs: list[dict] = None   # [{"title": "...", "buttons": ["OK", "Cancel"]}]
     landmarks: list[str] = None  # ["main", "navigation:\"Primary\"", "search"]
+    elements_data: list[dict] = None  # Structured twin of `elements`, same [N] indices —
+                                       # consumed by DOMExtractionService instead of re-parsing strings
 
     def __post_init__(self):
         if self.dialogs is None:
             self.dialogs = []
         if self.landmarks is None:
             self.landmarks = []
+        if self.elements_data is None:
+            self.elements_data = []
 
     @property
     def has_popup(self) -> bool:
@@ -334,6 +359,7 @@ async def get_page_snapshot(timeout: float = 4.0, url_hint: str | None = None) -
                 num_inputs=data.get("num_inputs", 0),
                 dialogs=data.get("dialogs", []),
                 landmarks=data.get("landmarks", []),
+                elements_data=data.get("elements_data", []),
             )
 
         except Exception as e:
