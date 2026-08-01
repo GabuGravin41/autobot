@@ -291,15 +291,20 @@ def _create_llm_client() -> Any | None:
     Create an OpenAI-compatible client from environment variables.
 
     Supports:
+    - Anthropic Claude (ANTHROPIC_API_KEY)
     - OpenRouter (OPENROUTER_API_KEY) — default
     - OpenAI (OPENAI_API_KEY)
-    - Any OpenAI-compatible API
+    - Gemini (GEMINI_API_KEY or GOOGLE_API_KEY)
     """
     from openai import OpenAI
+    from autobot.agent.anthropic_adapter import get_anthropic_llm_client
 
-    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter").lower()
+    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "auto").lower()
 
-    if provider == "openrouter":
+    if provider == "anthropic":
+        return get_anthropic_llm_client()
+
+    elif provider == "openrouter":
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             return None
@@ -324,7 +329,11 @@ def _create_llm_client() -> Any | None:
         )
 
     else:
-        # Fallback priority: OpenRouter -> Gemini (Google AI Studio) -> OpenAI
+        # Fallback priority: Anthropic -> OpenRouter -> Gemini (Google AI Studio) -> OpenAI
+        anth_client = get_anthropic_llm_client()
+        if anth_client:
+            return anth_client
+
         api_key = os.getenv("OPENROUTER_API_KEY")
         if api_key:
             return OpenAI(

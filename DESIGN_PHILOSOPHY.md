@@ -90,4 +90,45 @@ When executing complex benchmarks:
 
 ---
 
+## 🔬 6. Testing Methodology & Multimodal Visual Intelligence
+
+### Root Cause Analysis: Why Static Coordinate Scripts Fail
+1. **Static Coordinate Illusion**: Hardcoding $(x, y)$ coordinates — even when measured accurately from a past screenshot — is fundamentally flawed. Web applications (Overleaf, Grok, Chrome UI) dynamically alter layout geometry due to cookie consent overlays, banner notifications, scroll offsets, font rendering latency, and window resizing.
+2. **False Verification**: Saving a screenshot *after* an unverified action without feeding that screenshot back into an active visual reasoning model creates the illusion of logging, but the execution engine remains blind to state failures.
+
+### The Non-Negotiable Multimodal Execution Loop
+To ensure Autobot never executes blind actions during testing or live agent loops, all UI interactions must strictly adhere to the **Perceive $\rightarrow$ Reason $\rightarrow$ Act $\rightarrow$ Verify** cycle:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. PERCEIVE: Capture live screenshot & query DOM via CDP    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. REASON: LLM Vision / DOM Inspector reads current element │
+│    bounding box (x, y, w, h) & text labels                  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. ACT: Focus target window & execute precise click/type    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 4. VERIFY: Capture post-action screenshot & confirm state   │
+│    transition (e.g. Dropdown visible? Modal opened?)        │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            │                                     │
+      [State Confirmed]                   [Anomaly / No Change]
+            │                                     │
+            ▼                                     ▼
+   Proceed to Next Step             Pause, Diagnose & Re-Perceive
+```
+
+---
+
 *Autobot Architecture Team — Sovereignty through Visual & Pragmatic Automation.*

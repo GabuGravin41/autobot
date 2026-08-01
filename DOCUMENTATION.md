@@ -19,6 +19,8 @@ We have achieved a highly robust, unified architecture. The system is now ready 
 
 ### What works:
 - ✅ **Unified Control:** A single `autobot --server` command handles both backend and frontend.
+- ✅ **Anthropic Claude Integration:** Direct native support for `ANTHROPIC_API_KEY` via `AnthropicOpenAIAdapter`, eliminating OpenRouter credit costs.
+- ✅ **Strict "No Blind Actions" Policy:** Full documentation of visual truth and interactive perceive-reason-act-verify loop in [DESIGN_PHILOSOPHY.md](file:///c:/Users/User%201/OneDrive/Desktop/projects/django%20projects/personal%20projects/autobot/DESIGN_PHILOSOPHY.md).
 - ✅ **Extension Mastery:** Real-time visual "Mini-Peek" overlay that tracks the agent across all tabs.
 - ✅ **Kaggle Baseline:** Native API support for listing, downloading, and submitting to Kaggle competitions.
 - ✅ **Resilient Loops:** Intelligent API-to-UI fallback ensures the agent doesn't give up if an API fails.
