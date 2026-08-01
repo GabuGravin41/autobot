@@ -18,12 +18,24 @@ from __future__ import annotations
 
 import inspect
 import logging
+import platform
 from typing import Any
 
 from autobot.computer.mouse import Mouse
 from autobot.computer.keyboard import Keyboard
 from autobot.computer.display import Display
 from autobot.computer.clipboard import Clipboard
+from autobot.computer.browser import Browser
+from autobot.computer.files import Files
+from autobot.computer.terminal import Terminal
+from autobot.computer.kaggle_tool import Kaggle
+from autobot.computer.research_tool import Research
+from autobot.computer.vault import Vault
+from autobot.computer.anti_sleep import anti_sleep
+
+if platform.system() == 'Windows':
+    from autobot.computer.window import Window
+    import uiautomation as auto
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +56,34 @@ class Computer:
         self.keyboard = Keyboard()
         self.display = Display()
         self.clipboard = Clipboard()
+        self.browser = Browser()
+        self.files = Files()
+        self.terminal = Terminal()
+        self.kaggle = Kaggle()
+        self.research = Research()
+        self.vault = Vault()
+        self.anti_sleep = anti_sleep
+        if platform.system() == 'Windows':
+            self.window = Window(self.mouse, self.keyboard)
 
     def _get_all_tools(self) -> list[Any]:
         """Get all tool submodules."""
-        return [
+        tools = [
             self.mouse,
             self.keyboard,
             self.display,
             self.clipboard,
+            self.browser,
+            self.files,
+            self.terminal,
+            self.vault,
+            self.kaggle,
+            self.research,
+            self.anti_sleep,
         ]
+        if hasattr(self, 'window'):
+            tools.append(self.window)
+        return tools
 
     def get_tool_catalog(self) -> str:
         """
@@ -90,7 +121,7 @@ class Computer:
         """
         methods: list[dict[str, str]] = []
 
-        for name, method in inspect.getmembers(tool, predicate=inspect.ismethod):
+        for name, method in inspect.getmembers(tool, predicate=lambda m: inspect.ismethod(m) or inspect.isfunction(m) or isinstance(m, staticmethod)):
             # Skip private/dunder methods
             if name.startswith("_"):
                 continue
@@ -119,5 +150,4 @@ class Computer:
                 "signature": signature,
                 "description": description,
             })
-
         return methods

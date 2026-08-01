@@ -1,12 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
     Terminal, Play, CheckCircle2, AlertCircle, Activity, Zap, Monitor,
     Download, PlusCircle, Search, ChevronRight, FileText, Mail,
+    Maximize2, Minimize2, X, Move, Brain, ExternalLink, Code2,
 } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, BackendAdapter, getBrowserScreenshotUrl } from '../services/apiService';
+import { BackendStatus, BackendAdapter, QueuedTask, ScreenLockStatus, ScheduleStatus, getBrowserScreenshotUrl, runLeetCodeMission, runOrchestrated, getLearningStats, LearningStats, pauseRun, resumeRun, sendAgentMessage, getHealth, HealthStatus } from '../services/apiService';
+import TaskQueuePanel from './TaskQueuePanel';
+import { Cpu, Wifi, WifiOff } from 'lucide-react';
 
 interface DashboardPageProps {
     backendOnline: boolean;
@@ -20,14 +23,120 @@ interface DashboardPageProps {
     onAbortRun: () => void;
     onSelectRun: (run: RunHistory) => void;
     onSelectArtifact: (artifact: any) => void;
+    scheduledTasks: QueuedTask[];
+    screenLockStatus: ScreenLockStatus | null;
+    scheduleStatus: ScheduleStatus | null;
+    onAddTask: (goal: string) => void;
+    onCancelTask: (id: string) => void;
+    onRefreshTasks: () => void;
+    onPlanFirst: (goal: string) => void;
 }
 
 export default function DashboardPage({
     backendOnline, backendStatus, activeRun, liveRuns, liveAdapters,
     liveLogLines, screenshotUrl, onRefreshScreenshot, onAbortRun,
-    onSelectRun, onSelectArtifact,
+    onSelectRun, onSelectArtifact, scheduledTasks, screenLockStatus,
+    scheduleStatus, onAddTask, onCancelTask, onRefreshTasks, onPlanFirst,
 }: DashboardPageProps) {
     const navigate = useNavigate();
+    const [isScreenPopout, setIsScreenPopout] = useState(false);
+    const [feedbackText, setFeedbackText] = useState('');
+    const [feedbackSending, setFeedbackSending] = useState(false);
+    const [feedbackSent, setFeedbackSent] = useState(false);
+    const [leetcodeProblems, setLeetcodeProblems] = useState(5);
+    const [leetcodeLaunching, setLeetcodeLaunching] = useState(false);
+    const [orchestratedGoal, setOrchestratedGoal] = useState('');
+    const [orchestratedLaunching, setOrchestratedLaunching] = useState(false);
+    const [learningStats, setLearningStats] = useState<LearningStats | null>(null);
+    const [healthStatus, setHealthStatus] = useState<HealthStatus | null>(null);
+    const [healthChecking, setHealthChecking] = useState(false);
+
+    const runHealthCheck = async () => {
+        setHealthChecking(true);
+        try {
+            const result = await getHealth();
+            setHealthStatus(result);
+        } catch { setHealthStatus(null); } finally { setHealthChecking(false); }
+    };
+
+    // Health check on mount and after each run completes
+    React.useEffect(() => { runHealthCheck(); }, []);
+
+    // Fetch learning stats on mount and auto-refresh every 30s during active runs
+    React.useEffect(() => {
+        getLearningStats().then(setLearningStats).catch(() => {});
+        const interval = setInterval(() => {
+            getLearningStats().then(setLearningStats).catch(() => {});
+        }, 30_000);
+        return () => clearInterval(interval);
+    }, [activeRun?.id]);
+    const [popoutPos, setPopoutPos] = useState({ x: 100, y: 100 });
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+    const [popoutSize, setPopoutSize] = useState<'medium' | 'large'>('medium');
+
+    const handleDragStart = (e: React.MouseEvent) => {
+        setIsDragging(true);
+        setDragOffset({ x: e.clientX - popoutPos.x, y: e.clientY - popoutPos.y });
+    };
+
+    const handleDrag = (e: React.MouseEvent) => {
+        if (!isDragging) return;
+        setPopoutPos({ x: e.clientX - dragOffset.x, y: e.clientY - dragOffset.y });
+    };
+
+    const handleDragEnd = () => setIsDragging(false);
+
+    const openScreenInNewWindow = () => {
+        const goal = activeRun?.planName || backendStatus?.browser?.url || 'Autobot Live Screen';
+        const escapedGoal = goal.replace(/`/g, '\\`').replace(/\\/g, '\\\\');
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>${goal.replace(/</g, '&lt;').replace(/>/g, '&gt;')} — Autobot Screen</title>
+  <meta charset="utf-8" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #e2e8f0; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #111827; border-bottom: 1px solid #1f2937; flex-shrink: 0; }
+    .title { font-size: 11px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: #94a3b8; }
+    .goal { font-size: 13px; font-weight: 600; color: #e2e8f0; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .close-btn { padding: 5px 14px; background: #dc2626; color: white; border: none; border-radius: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; }
+    .close-btn:hover { background: #b91c1c; }
+    .screen-wrap { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; animation: pulse 1.5s infinite; display: inline-block; margin-right: 6px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="title"><span class="live-dot"></span>Live Screen — Autobot</div>
+      <div class="goal" id="goal-text"></div>
+    </div>
+    <button class="close-btn" onclick="window.close()">Close</button>
+  </header>
+  <div class="screen-wrap">
+    <img id="screen-img" src="" alt="Live screen" />
+  </div>
+  <script>
+    document.getElementById('goal-text').textContent = \`${escapedGoal}\`;
+    const BASE = '${getBrowserScreenshotUrl().replace(/\?t=\d+$/, '')}';
+    function refresh() {
+      document.getElementById('screen-img').src = BASE + '?t=' + Date.now();
+    }
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>`;
+        const win = window.open('', '_blank', 'width=1280,height=800,menubar=no,toolbar=no,location=no,status=no');
+        if (win) {
+            win.document.write(html);
+            win.document.close();
+        }
+    };
 
     const runArtifacts = activeRun?.artifacts ? Object.entries(activeRun.artifacts).map(([k, v]) => ({
         id: k,
@@ -45,6 +154,101 @@ export default function DashboardPage({
             exit={{ opacity: 0, y: -20 }}
             className="space-y-8"
         >
+            {/* Health status banner — shows pre-flight system readiness */}
+            {healthStatus && (
+                <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`glass-panel p-4 rounded-2xl border flex items-center gap-4 ${
+                        healthStatus.overall_ok
+                            ? 'border-emerald-500/30 bg-emerald-500/5'
+                            : 'border-amber-500/30 bg-amber-500/5'
+                    }`}
+                >
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                        healthStatus.overall_ok ? 'bg-emerald-500/20' : 'bg-amber-500/20'
+                    }`}>
+                        {healthStatus.overall_ok
+                            ? <CheckCircle2 size={16} className="text-emerald-400" />
+                            : <AlertCircle size={16} className="text-amber-400" />
+                        }
+                    </div>
+                    <div className="flex-1 flex flex-wrap items-center gap-4 min-w-0">
+                        {/* LLM status */}
+                        <div className="flex items-center gap-2">
+                            <Cpu size={12} className={healthStatus.llm.ok ? 'text-emerald-400' : 'text-amber-400'} />
+                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                healthStatus.llm.ok ? 'text-emerald-400' : 'text-amber-400'
+                            }`}>
+                                {healthStatus.llm.ok ? 'LLM ✓' : 'LLM ✗'}
+                            </span>
+                            <span className="text-[9px] text-[var(--base-text-muted)] font-mono truncate max-w-[160px]">
+                                {healthStatus.llm.ok
+                                    ? `${healthStatus.llm.provider}/${healthStatus.llm.model.split('/').pop()}`
+                                    : healthStatus.llm.error.slice(0, 50)
+                                }
+                            </span>
+                        </div>
+                        {/* CDP status */}
+                        <div className="flex items-center gap-2">
+                            {healthStatus.cdp.ok
+                                ? <Wifi size={12} className="text-emerald-400" />
+                                : <WifiOff size={12} className="text-amber-400" />
+                            }
+                            <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                healthStatus.cdp.ok ? 'text-emerald-400' : 'text-amber-400'
+                            }`}>
+                                {healthStatus.cdp.ok ? `CDP ✓ (${healthStatus.cdp.tabs} tab${healthStatus.cdp.tabs !== 1 ? 's' : ''})` : 'CDP ✗'}
+                            </span>
+                            {!healthStatus.cdp.ok && (
+                                <span className="text-[9px] text-amber-400/70">Start Chrome with --remote-debugging-port=9222</span>
+                            )}
+                        </div>
+                        {/* Vision */}
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+                            healthStatus.config.vision_enabled
+                                ? 'bg-purple-500/20 text-purple-400'
+                                : 'bg-gray-500/20 text-gray-400'
+                        }`}>
+                            {healthStatus.config.vision_enabled ? '👁 Vision ON' : 'Vision OFF'}
+                        </span>
+                    </div>
+                    <button
+                        onClick={runHealthCheck}
+                        disabled={healthChecking}
+                        className="shrink-0 px-2 py-1 rounded-lg text-[9px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] hover:text-[var(--brand-primary)] transition-colors disabled:opacity-40"
+                    >
+                        {healthChecking ? '…' : '↻ Check'}
+                    </button>
+                </motion.div>
+            )}
+
+            {/* Auth notification banner */}
+            {backendStatus?.auth_notification && (
+                <motion.div
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="glass-panel p-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 flex items-center gap-4"
+                >
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center shrink-0">
+                        <span className="text-xl">🔐</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <div className="text-xs font-bold uppercase tracking-widest text-amber-400 mb-0.5">Login Detected</div>
+                        <p className="text-sm text-[var(--base-text-muted)] truncate">{backendStatus.auth_notification.message}</p>
+                        <p className="text-[10px] text-amber-400/60 font-mono mt-1">{backendStatus.auth_notification.url}</p>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                        <button
+                            onClick={onRefreshScreenshot}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500/20 text-amber-400 text-[10px] font-bold uppercase tracking-widest hover:bg-amber-500/30 transition-colors"
+                        >
+                            View Screen
+                        </button>
+                    </div>
+                </motion.div>
+            )}
+
             {/* Active run card */}
             {activeRun && (
                 <motion.div
@@ -96,6 +300,23 @@ export default function DashboardPage({
                                     </div>
                                 </div>
 
+                                {/* Agent narrative banner */}
+                                {backendStatus?.narrative && (
+                                    <motion.div
+                                        initial={{ opacity: 0, y: -6 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        className="flex items-start gap-3 px-4 py-3 rounded-2xl bg-[var(--brand-primary)]/10 border border-[var(--brand-primary)]/20"
+                                    >
+                                        <div className="shrink-0 mt-0.5 text-[var(--brand-primary)]">
+                                            <Brain size={16} />
+                                        </div>
+                                        <div>
+                                            <div className="text-[9px] font-bold uppercase tracking-widest text-[var(--brand-primary)] mb-1">What I'm doing</div>
+                                            <p className="text-sm text-[var(--base-text)] leading-relaxed">{backendStatus.narrative}</p>
+                                        </div>
+                                    </motion.div>
+                                )}
+
                                 {/* Log terminal */}
                                 <div className="glass-panel bg-[var(--base-border)] rounded-2xl p-6 h-[280px] flex flex-col">
                                     <div className="flex items-center justify-between mb-4 pb-4 border-b border-[var(--base-border)]">
@@ -126,15 +347,30 @@ export default function DashboardPage({
                                     <div className="space-y-4">
                                         <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] flex items-center gap-2 justify-between">
                                             <span className="flex items-center gap-2"><Monitor size={12} /> Screen preview</span>
-                                            <button
-                                                onClick={onRefreshScreenshot}
-                                                className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[10px] font-bold uppercase tracking-wider transition-colors"
-                                            >
-                                                {screenshotUrl ? 'Refresh' : 'See current screen'}
-                                            </button>
+                                            <div className="flex items-center gap-2">
+                                                {screenshotUrl && (
+                                                    <button
+                                                        onClick={openScreenInNewWindow}
+                                                        className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1"
+                                                        title="Pop out to new window"
+                                                    >
+                                                        <ExternalLink size={10} />
+                                                    </button>
+                                                )}
+                                                <button
+                                                    onClick={onRefreshScreenshot}
+                                                    className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--base-border)] text-[10px] font-bold uppercase tracking-wider transition-colors"
+                                                >
+                                                    {screenshotUrl ? 'Refresh' : 'See current screen'}
+                                                </button>
+                                            </div>
                                         </div>
                                         {screenshotUrl ? (
-                                            <div className="relative aspect-video rounded-2xl overflow-hidden border border-[var(--base-border)]">
+                                            <div
+                                                className="relative aspect-video rounded-2xl overflow-hidden border border-[var(--base-border)] cursor-pointer group/screen"
+                                                onClick={() => setIsScreenPopout(true)}
+                                                title="Click to pop out"
+                                            >
                                                 <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
                                                     onError={(e) => (e.currentTarget.style.display = 'none')} />
                                                 {backendStatus?.browser?.active && (
@@ -143,6 +379,9 @@ export default function DashboardPage({
                                                         <span className="text-[8px] font-bold text-[var(--base-text)] tracking-widest uppercase">Live</span>
                                                     </div>
                                                 )}
+                                                <div className="absolute inset-0 bg-black/0 group-hover/screen:bg-black/30 transition-colors flex items-center justify-center opacity-0 group-hover/screen:opacity-100">
+                                                    <Maximize2 size={24} className="text-white drop-shadow-lg" />
+                                                </div>
                                             </div>
                                         ) : (
                                             <div className="aspect-video rounded-2xl border border-dashed border-[var(--base-border)] flex items-center justify-center text-[var(--base-text-muted)] text-sm">
@@ -160,14 +399,81 @@ export default function DashboardPage({
                                     </div>
                                 </div>
 
-                                {/* Abort button */}
-                                {activeRun.status === 'running' && (
-                                    <button
-                                        onClick={onAbortRun}
-                                        className="w-full py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 transition-colors"
-                                    >
-                                        ■ Abort Run
-                                    </button>
+                                {/* Pause / Abort controls */}
+                                {(activeRun.status === 'running' || backendStatus?.paused) && (
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={async () => {
+                                                try {
+                                                    if (backendStatus?.paused) {
+                                                        await resumeRun();
+                                                    } else {
+                                                        await pauseRun();
+                                                    }
+                                                } catch (e) { console.error(e); }
+                                            }}
+                                            className="flex-1 py-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] font-bold uppercase tracking-widest hover:bg-amber-500/20 transition-colors flex items-center justify-center gap-2"
+                                        >
+                                            {backendStatus?.paused ? '▶ Resume' : '⏸ Pause'}
+                                        </button>
+                                        <button
+                                            onClick={onAbortRun}
+                                            className="flex-1 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 transition-colors"
+                                        >
+                                            ■ Abort
+                                        </button>
+                                    </div>
+                                )}
+
+                                {/* Human feedback input — visible while agent is running or paused */}
+                                {(activeRun.status === 'running' || backendStatus?.paused) && (
+                                    <div className="space-y-2">
+                                        <div className="text-[9px] font-bold uppercase tracking-widest text-[var(--brand-primary)] flex items-center gap-1">
+                                            <Brain size={10} /> Send feedback to agent
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <textarea
+                                                value={feedbackText}
+                                                onChange={e => { setFeedbackText(e.target.value); setFeedbackSent(false); }}
+                                                onKeyDown={async e => {
+                                                    if (e.key === 'Enter' && !e.shiftKey && feedbackText.trim()) {
+                                                        e.preventDefault();
+                                                        setFeedbackSending(true);
+                                                        try {
+                                                            await sendAgentMessage(feedbackText.trim());
+                                                            setFeedbackText('');
+                                                            setFeedbackSent(true);
+                                                            setTimeout(() => setFeedbackSent(false), 3000);
+                                                        } catch (e) { console.error(e); }
+                                                        finally { setFeedbackSending(false); }
+                                                    }
+                                                }}
+                                                placeholder="Tell the agent what to do… (Enter to send, Shift+Enter for newline)"
+                                                rows={2}
+                                                className="flex-1 bg-[var(--base-bg)] border border-[var(--brand-primary)]/30 rounded-xl px-3 py-2 text-xs text-[var(--base-text)] placeholder-[var(--base-text-muted)] resize-none focus:outline-none focus:border-[var(--brand-primary)]/60 transition-colors"
+                                            />
+                                            <button
+                                                onClick={async () => {
+                                                    if (!feedbackText.trim()) return;
+                                                    setFeedbackSending(true);
+                                                    try {
+                                                        await sendAgentMessage(feedbackText.trim());
+                                                        setFeedbackText('');
+                                                        setFeedbackSent(true);
+                                                        setTimeout(() => setFeedbackSent(false), 3000);
+                                                    } catch (e) { console.error(e); }
+                                                    finally { setFeedbackSending(false); }
+                                                }}
+                                                disabled={!feedbackText.trim() || feedbackSending}
+                                                className="px-3 py-2 rounded-xl bg-[var(--brand-primary)]/20 border border-[var(--brand-primary)]/30 text-[var(--brand-primary)] text-[10px] font-bold uppercase tracking-widest hover:bg-[var(--brand-primary)]/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed self-end"
+                                            >
+                                                {feedbackSending ? '…' : feedbackSent ? '✓ Sent' : 'Send'}
+                                            </button>
+                                        </div>
+                                        <p className="text-[9px] text-[var(--base-text-muted)]">
+                                            Agent picks this up at the next step. Use this to redirect it when it gets stuck.
+                                        </p>
+                                    </div>
                                 )}
                             </div>
                         </div>
@@ -235,71 +541,182 @@ export default function DashboardPage({
                             View All
                         </button>
                     </div>
-                    <div className="space-y-4">
-                        {liveRuns.map(run => (
-                            <div
-                                key={run.id}
-                                onClick={() => onSelectRun(run as any)}
-                                className="glass-panel p-6 rounded-3xl border-[var(--base-border)] hover:border-brand-500/30 transition-all group cursor-pointer"
-                            >
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                                    <div className="flex items-center gap-4">
-                                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${run.status === 'running' ? 'bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] animate-pulse'
+                    <div className="max-h-[400px] overflow-y-auto custom-scrollbar pr-1">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {liveRuns.map(run => (
+                                <div
+                                    key={run.id}
+                                    onClick={() => onSelectRun(run as any)}
+                                    className="glass-panel p-4 rounded-2xl border-[var(--base-border)] hover:border-brand-500/30 transition-all group cursor-pointer"
+                                >
+                                    <div className="flex items-center gap-3 mb-3">
+                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${run.status === 'running' ? 'bg-[var(--brand-primary)]/20 text-[var(--brand-primary)] animate-pulse'
                                             : run.status === 'success' ? 'bg-emerald-500/10 text-emerald-400'
                                                 : 'bg-red-500/10 text-red-400'
                                             }`}>
-                                            {run.status === 'running' ? <Play size={20} />
-                                                : run.status === 'success' ? <CheckCircle2 size={20} />
-                                                    : <AlertCircle size={20} />}
+                                            {run.status === 'running' ? <Play size={16} />
+                                                : run.status === 'success' ? <CheckCircle2 size={16} />
+                                                    : <AlertCircle size={16} />}
                                         </div>
-                                        <div>
-                                            <div className="font-bold group-hover:text-[var(--brand-primary)] transition-colors">{run.planName}</div>
-                                            <div className="text-[10px] text-[var(--base-text-muted)] uppercase tracking-widest flex items-center gap-2 mt-1">
-                                                <span>{run.id}</span>
-                                                <span className="w-1 h-1 rounded-full bg-[var(--base-border)]" />
-                                                <span>{run.timestamp}</span>
+                                        <div className="min-w-0">
+                                            <div className="font-bold text-sm truncate group-hover:text-[var(--brand-primary)] transition-colors">{run.planName}</div>
+                                            <div className="text-[9px] text-[var(--base-text-muted)] uppercase tracking-widest truncate mt-0.5">
+                                                {run.timestamp}
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex items-center gap-6">
-                                        <div className="text-right hidden xs:block">
-                                            <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-1">Progress</div>
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-24 h-1.5 bg-[var(--base-border)] rounded-full overflow-hidden">
-                                                    <div className="h-full bg-[var(--brand-primary)] transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
-                                                </div>
-                                                <span className="text-xs font-mono">{run.progress ?? 0}%</span>
-                                            </div>
+                                    <div className="flex items-center gap-3">
+                                        <div className="flex-1 h-1.5 bg-[var(--base-border)] rounded-full overflow-hidden">
+                                            <div className="h-full bg-[var(--brand-primary)] transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
                                         </div>
-                                        <ChevronRight size={16} className="text-[var(--base-text-muted)] group-hover:text-[var(--brand-primary)] transition-colors" />
+                                        <span className="text-[10px] font-mono text-[var(--base-text-muted)]">{run.progress ?? 0}%</span>
+                                        <ChevronRight size={14} className="text-[var(--base-text-muted)] group-hover:text-[var(--brand-primary)] transition-colors shrink-0" />
                                     </div>
                                 </div>
-                            </div>
-                        ))}
-                        {liveRuns.length === 0 && !activeRun && (
-                            <div className="glass-panel p-10 rounded-3xl border-dashed border-[var(--base-border)] text-center text-[var(--base-text-muted)] text-sm">
-                                No runs yet — start a workflow from the AI Planner or Workflows tab.
-                            </div>
-                        )}
+                            ))}
+                            {liveRuns.length === 0 && !activeRun && (
+                                <div className="col-span-full glass-panel p-10 rounded-3xl border-dashed border-[var(--base-border)] text-center text-[var(--base-text-muted)] text-sm">
+                                    No runs yet — start a workflow from the AI Planner or Workflows tab.
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Task Queue */}
+                    <div className="mt-12">
+                        <TaskQueuePanel
+                            tasks={scheduledTasks}
+                            lockStatus={screenLockStatus}
+                            scheduleStatus={scheduleStatus}
+                            onAddTask={onAddTask}
+                            onCancelTask={onCancelTask}
+                            onRefresh={onRefreshTasks}
+                            onPlanFirst={onPlanFirst}
+                        />
                     </div>
                 </div>
 
                 {/* Artifacts sidebar */}
                 <div className="space-y-6">
-                    {backendOnline && screenshotUrl && (
-                        <div className="glass-panel p-4 rounded-3xl border-[var(--base-border)]">
-                            <div className="flex items-center justify-between gap-2 mb-3">
-                                <h3 className="text-sm font-bold tracking-tight flex items-center gap-2"><Monitor size={14} /> Screen</h3>
-                                <button onClick={onRefreshScreenshot} className="px-2 py-1 rounded-lg bg-[var(--brand-primary)]/20 hover:bg-[var(--brand-primary)]/20 text-[10px] font-bold uppercase tracking-wider transition-colors">
-                                    Refresh
-                                </button>
-                            </div>
-                            <div className="relative aspect-video rounded-xl overflow-hidden border border-[var(--base-border)]">
-                                <img src={screenshotUrl} alt="Current screen" className="w-full h-full object-cover"
-                                    onError={(e) => (e.currentTarget.style.display = 'none')} />
+                    {/* Quick Launch */}
+                    <div className="glass-panel p-5 rounded-3xl border-[var(--base-border)]">
+                        <h3 className="text-sm font-bold tracking-tight flex items-center gap-2 mb-4">
+                            <Zap size={14} className="text-amber-400" /> Quick Launch
+                        </h3>
+                        <div className="space-y-3">
+                            {/* LeetCode multi-AI mission */}
+                            <div className="flex items-center gap-3 p-3 rounded-xl bg-[var(--base-border)]/50">
+                                <Code2 size={18} className="text-orange-400 shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                    <div className="text-xs font-bold">LeetCode Solver</div>
+                                    <div className="text-[9px] text-[var(--base-text-muted)] uppercase tracking-wider">Multi-AI · Claude + Grok + DeepSeek</div>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0">
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={50}
+                                        value={leetcodeProblems}
+                                        onChange={e => setLeetcodeProblems(Math.max(1, Math.min(50, Number(e.target.value))))}
+                                        className="w-12 text-center text-xs font-mono rounded-lg border border-[var(--base-border)] bg-[var(--base-bg)] px-1 py-1 focus:outline-none focus:border-[var(--brand-primary)]"
+                                        title="Number of problems to solve"
+                                    />
+                                    <button
+                                        disabled={leetcodeLaunching || !backendOnline}
+                                        onClick={async () => {
+                                            setLeetcodeLaunching(true);
+                                            try {
+                                                await runLeetCodeMission(leetcodeProblems, 'python3');
+                                                navigate('/history');
+                                            } catch (err) {
+                                                console.error('LeetCode launch failed:', err);
+                                            } finally {
+                                                setLeetcodeLaunching(false);
+                                            }
+                                        }}
+                                        className="btn-primary py-1 px-3 text-[9px] uppercase tracking-widest flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        {leetcodeLaunching ? (
+                                            <Activity size={10} className="animate-spin" />
+                                        ) : (
+                                            <Play size={10} />
+                                        )}
+                                        {leetcodeLaunching ? 'Launching…' : 'Run'}
+                                    </button>
+                                </div>
                             </div>
                         </div>
-                    )}
+                    </div>
+
+                    {/* Multi-Agent Orchestrator */}
+                    <div className="glass-panel rounded-2xl border border-[var(--base-border)] overflow-hidden">
+                        <div className="px-4 py-3 border-b border-[var(--base-border)] flex items-center gap-2">
+                            <Brain size={14} className="text-purple-400" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">Multi-Agent Orchestrator</span>
+                        </div>
+                        <div className="p-4 space-y-3">
+                            <p className="text-[10px] text-[var(--base-text-muted)]">
+                                Automatically routes complex tasks to specialist agents: WebNavigator, CodeExecutor, DataExtractor, FormFiller.
+                            </p>
+                            <div className="flex gap-2">
+                                <input
+                                    type="text"
+                                    value={orchestratedGoal}
+                                    onChange={e => setOrchestratedGoal(e.target.value)}
+                                    placeholder="Complex goal (e.g. 'find 3 LeetCode problems, solve them, then submit')"
+                                    className="flex-1 text-xs rounded-xl border border-[var(--base-border)] bg-[var(--base-bg)] px-3 py-2 focus:outline-none focus:border-[var(--brand-primary)] placeholder-[var(--base-text-muted)]"
+                                    onKeyDown={e => e.key === 'Enter' && !orchestratedLaunching && orchestratedGoal.trim() && (async () => {
+                                        setOrchestratedLaunching(true);
+                                        try { await runOrchestrated(orchestratedGoal); navigate('/history'); }
+                                        catch (err) { console.error('Orchestrated launch failed:', err); }
+                                        finally { setOrchestratedLaunching(false); }
+                                    })()}
+                                />
+                                <button
+                                    disabled={orchestratedLaunching || !backendOnline || !orchestratedGoal.trim()}
+                                    onClick={async () => {
+                                        setOrchestratedLaunching(true);
+                                        try { await runOrchestrated(orchestratedGoal); navigate('/history'); }
+                                        catch (err) { console.error('Orchestrated launch failed:', err); }
+                                        finally { setOrchestratedLaunching(false); }
+                                    }}
+                                    className="btn-primary py-2 px-4 text-[9px] uppercase tracking-widest flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                                >
+                                    {orchestratedLaunching ? <Activity size={10} className="animate-spin" /> : <Zap size={10} />}
+                                    {orchestratedLaunching ? 'Launching…' : 'Orchestrate'}
+                                </button>
+                            </div>
+
+                            {/* RL Learning stats */}
+                            {learningStats && learningStats.rl_enabled && (
+                                <div className="mt-2 pt-2 border-t border-[var(--base-border)] flex flex-wrap items-center gap-4 text-[9px] text-[var(--base-text-muted)]">
+                                    <span className="flex items-center gap-1">
+                                        <Activity size={9} className="text-green-400" />
+                                        {learningStats.total_experiences.toLocaleString()} experiences
+                                    </span>
+                                    <span className="flex items-center gap-1">
+                                        <Brain size={9} className="text-purple-400" />
+                                        {learningStats.learned_contexts} learned contexts
+                                    </span>
+                                    <span className="flex items-center gap-1">
+                                        <CheckCircle2 size={9} className="text-blue-400" />
+                                        {learningStats.total_policy_observations} policy obs
+                                    </span>
+                                    {learningStats.memory_entries !== undefined && (
+                                        <span className="flex items-center gap-1">
+                                            <FileText size={9} className="text-amber-400" />
+                                            {learningStats.memory_entries} memories
+                                            {(learningStats.memory_high_value ?? 0) > 0 && (
+                                                <span className="text-amber-400">
+                                                    ({learningStats.memory_high_value} high-value)
+                                                </span>
+                                            )}
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
 
                     <h3 className="text-xl font-bold tracking-tight px-2">Recent Artifacts</h3>
                     <div className="glass-panel p-6 rounded-3xl border-[var(--base-border)] space-y-6">
@@ -326,6 +743,76 @@ export default function DashboardPage({
                     </div>
                 </div>
             </div>
+            {/* Floating pop-out screen viewer */}
+            <AnimatePresence>
+                {isScreenPopout && screenshotUrl && (
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        className="fixed z-[200] shadow-2xl shadow-black/50 rounded-2xl overflow-hidden border border-[var(--base-border)] bg-[var(--base-bg)]"
+                        style={{
+                            left: popoutPos.x,
+                            top: popoutPos.y,
+                            width: popoutSize === 'large' ? '80vw' : '50vw',
+                            maxWidth: popoutSize === 'large' ? '1200px' : '800px',
+                        }}
+                        onMouseMove={handleDrag}
+                        onMouseUp={handleDragEnd}
+                        onMouseLeave={handleDragEnd}
+                    >
+                        {/* Title bar — draggable */}
+                        <div
+                            className="flex items-center justify-between px-4 py-2 bg-[var(--base-border)] cursor-move select-none"
+                            onMouseDown={handleDragStart}
+                        >
+                            <div className="flex items-center gap-2">
+                                <Move size={14} className="text-[var(--base-text-muted)]" />
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)]">
+                                    Live Screen Preview
+                                </span>
+                                {backendStatus?.browser?.active && (
+                                    <div className="flex items-center gap-1.5 ml-2">
+                                        <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                                        <span className="text-[8px] font-bold text-red-400 tracking-widest uppercase">Live</span>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <button
+                                    onClick={onRefreshScreenshot}
+                                    className="px-2 py-1 rounded bg-[var(--base-border)] hover:bg-[var(--brand-primary)]/20 text-[9px] font-bold uppercase tracking-wider transition-colors"
+                                >
+                                    Refresh
+                                </button>
+                                <button
+                                    onClick={() => setPopoutSize(s => s === 'medium' ? 'large' : 'medium')}
+                                    className="p-1.5 rounded hover:bg-[var(--brand-primary)]/20 transition-colors"
+                                    title={popoutSize === 'medium' ? 'Enlarge' : 'Shrink'}
+                                >
+                                    {popoutSize === 'medium' ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+                                </button>
+                                <button
+                                    onClick={() => setIsScreenPopout(false)}
+                                    className="p-1.5 rounded hover:bg-red-500/20 text-red-400 transition-colors"
+                                    title="Close"
+                                >
+                                    <X size={14} />
+                                </button>
+                            </div>
+                        </div>
+                        {/* Screenshot */}
+                        <div className="relative">
+                            <img
+                                src={screenshotUrl}
+                                alt="Live screen"
+                                className="w-full h-auto"
+                                onError={(e) => (e.currentTarget.style.display = 'none')}
+                            />
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </motion.div>
     );
 }

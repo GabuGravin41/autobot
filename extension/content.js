@@ -27,7 +27,14 @@
             <div id="autobot-header-status">idle</div>
           </div>
         </div>
-        <button id="autobot-close-btn" title="Minimize">✕</button>
+        <div id="autobot-header-actions">
+           <button id="autobot-mini-peek-toggle" title="Toggle Mini-Peek">🖼️</button>
+           <button id="autobot-close-btn" title="Minimize">✕</button>
+        </div>
+      </div>
+      <div id="autobot-mini-peek" class="hidden">
+        <img id="autobot-peek-img" src="" alt="Agent View" />
+        <div id="autobot-peek-overlay">LIVE VIEW</div>
       </div>
       <div id="autobot-page-context">📄 Loading page context...</div>
       <div id="autobot-logs"><span class="autobot-log-empty">Logs will appear here...</span></div>
@@ -57,20 +64,30 @@
     const goalInput = document.getElementById("autobot-goal-input");
     const runBtn = document.getElementById("autobot-run-btn");
     const stopBtn = document.getElementById("autobot-stop-btn");
+    const peekToggle = document.getElementById("autobot-mini-peek-toggle");
+    const miniPeek = document.getElementById("autobot-mini-peek");
+    const peekImg = document.getElementById("autobot-peek-img");
 
     // ── State ────────────────────────────────────────────────────────────────
     let serverUrl = "http://127.0.0.1:8000";
     let wsUrl = "ws://127.0.0.1:8000";
     let ws = null;
     let isRunning = false;
+    let showPeek = false;
 
     // ── Load server URL from storage ─────────────────────────────────────────
-    chrome.storage.sync.get(["autobotServerUrl"], (result) => {
+    chrome.storage.sync.get(["autobotServerUrl", "autobotShowPeek"], (result) => {
         if (result.autobotServerUrl) {
             serverUrl = result.autobotServerUrl.replace(/\/$/, "");
             wsUrl = serverUrl.replace(/^http/, "ws");
+            chrome.runtime.sendMessage({ type: "SET_SERVER_URL", url: serverUrl });
+        }
+        if (result.autobotShowPeek !== undefined) {
+            showPeek = result.autobotShowPeek;
+            if (showPeek) miniPeek.classList.remove("hidden");
         }
         updateContext();
+        startStatusPoll();
     });
 
     // ── Page context ─────────────────────────────────────────────────────────
@@ -82,7 +99,6 @@
 
     function getPageText() {
         try {
-            // Grab visible body text, limit to 8000 chars to avoid huge payloads
             const el = document.body || document.documentElement;
             return el.innerText.slice(0, 8000);
         } catch (_) {
@@ -93,7 +109,6 @@
     // ── Log helpers ───────────────────────────────────────────────────────────
     function addLog(text) {
         if (!logsEl) return;
-        // Clear placeholder
         const placeholder = logsEl.querySelector(".autobot-log-empty");
         if (placeholder) placeholder.remove();
 
@@ -108,6 +123,11 @@
         line.textContent = text;
         logsEl.appendChild(line);
         logsEl.scrollTop = logsEl.scrollHeight;
+
+        // Peak logs to keep only last 100
+        while (logsEl.children.length > 100) {
+            logsEl.removeChild(logsEl.firstChild);
+        }
     }
 
     function clearLogs() {
@@ -122,28 +142,33 @@
             if (e.data && e.data !== "__ping__") addLog(e.data);
         };
         ws.onclose = () => {
-            if (isRunning) setTimeout(connectWs, 2000); // reconnect while running
+            if (isRunning) setTimeout(connectWs, 2000);
         };
         ws.onerror = () => { ws = null; };
     }
 
-    // ── Status polling ────────────────────────────────────────────────────────
+    // ── Status polling (uses background sync) ─────────────────────────────────
     let statusPoll = null;
     function startStatusPoll() {
         stopStatusPoll();
-        statusPoll = setInterval(async () => {
-            try {
-                const r = await fetch(`${serverUrl}/api/autonomous/status`);
-                const data = await r.json();
-                const s = data.status || "idle";
-                if (statusEl) statusEl.textContent = s === "running"
-                    ? `⟳ Phase ${(data.current_phase_index ?? 0) + 1}/${(data.phase_plan || []).length || "?"}`
-                    : s;
-                if (s !== "running") {
-                    setIdle();
+        statusPoll = setInterval(() => {
+            chrome.runtime.sendMessage({ type: "GET_AUTOBOT_STATUS" }, (status) => {
+                if (!status) return;
+                
+                const s = status.status || "idle";
+                if (statusEl) statusEl.textContent = s;
+
+                if (s === "running" && !isRunning) {
+                   setRunning(false); // sync local state without re-triggering API
+                } else if (s !== "running" && isRunning) {
+                   setIdle();
                 }
-            } catch (_) { }
-        }, 2000);
+
+                if (showPeek && status.browser_active) {
+                    peekImg.src = `${serverUrl}/api/browser/screenshot?t=${Date.now()}`;
+                }
+            });
+        }, 3000);
     }
 
     function stopStatusPoll() {
@@ -151,14 +176,13 @@
     }
 
     // ── Run / Stop ────────────────────────────────────────────────────────────
-    function setRunning() {
+    function setRunning(triggerApi = true) {
         isRunning = true;
         if (runBtn) runBtn.disabled = true;
         if (stopBtn) stopBtn.disabled = false;
         if (goalInput) goalInput.disabled = true;
-        if (statusEl) statusEl.textContent = "⟳ Starting...";
+        if (statusEl) statusEl.textContent = triggerApi ? "⟳ Starting..." : "running";
         connectWs();
-        startStatusPoll();
     }
 
     function setIdle() {
@@ -166,7 +190,6 @@
         if (runBtn) runBtn.disabled = false;
         if (stopBtn) stopBtn.disabled = true;
         if (goalInput) goalInput.disabled = false;
-        stopStatusPoll();
         if (ws) { try { ws.close(); } catch (_) { } ws = null; }
     }
 
@@ -177,7 +200,7 @@
             return;
         }
         clearLogs();
-        setRunning();
+        setRunning(true);
         addLog(`🤖 Goal: ${goal}`);
 
         const payload = {
@@ -187,47 +210,39 @@
                 title: document.title,
                 text: getPageText(),
             },
-            max_hours: 8.0,
         };
 
-        try {
-            const resp = await fetch(`${serverUrl}/api/run_autonomous`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            if (!resp.ok) {
-                const err = await resp.json();
-                addLog(`❌ Error: ${err.detail || resp.statusText}`);
+        // We use the background script to bypass CORS if needed
+        chrome.runtime.sendMessage({
+            type: "AUTOBOT_API_CALL",
+            url: `${serverUrl}/api/tasks`,
+            method: "POST",
+            body: { goal: goal }
+        }, (resp) => {
+            if (!resp || !resp.ok) {
+                addLog(`❌ Error: ${resp?.error || "Could not reach backend"}`);
                 setIdle();
                 return;
             }
-            const data = await resp.json();
-            addLog(`✓ Run started: ${data.run_id}`);
-        } catch (e) {
-            addLog(`❌ Cannot reach Autobot at ${serverUrl}. Is it running?`);
-            setIdle();
-        }
+            addLog(`✓ Task added to queue.`);
+        });
     }
 
     async function stopGoal() {
-        try {
-            await fetch(`${serverUrl}/api/autonomous/cancel`, { method: "POST" });
-            addLog("⚠ Stop requested.");
-        } catch (e) {
-            addLog(`❌ Could not cancel: ${e.message}`);
-        }
+        chrome.runtime.sendMessage({
+            type: "AUTOBOT_API_CALL",
+            url: `${serverUrl}/api/agent/cancel`,
+            method: "POST"
+        }, () => {
+             addLog("⚠ Stop requested.");
+        });
         setIdle();
     }
 
-    // ── Panel toggle ──────────────────────────────────────────────────────────
+    // ── UI Events ─────────────────────────────────────────────────────────────
     fab?.addEventListener("click", () => {
         panel?.classList.toggle("open");
         updateContext();
-        if (!isRunning) {
-            // Ping backend to warm ws connection
-            fetch(`${serverUrl}/api/status`).catch(() => { });
-        }
     });
     closeBtn?.addEventListener("click", () => {
         panel?.classList.remove("open");
@@ -235,7 +250,12 @@
     runBtn?.addEventListener("click", runGoal);
     stopBtn?.addEventListener("click", stopGoal);
 
-    // Ctrl+Enter submits
+    peekToggle?.addEventListener("click", () => {
+        showPeek = !showPeek;
+        chrome.storage.sync.set({ autobotShowPeek: showPeek });
+        miniPeek.classList.toggle("hidden", !showPeek);
+    });
+
     goalInput?.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && e.ctrlKey) runGoal();
     });

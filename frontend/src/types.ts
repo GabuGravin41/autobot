@@ -38,6 +38,7 @@ export interface WorkflowPlan {
 export interface RunHistory {
   id: string;
   planName?: string;
+  goal?: string;
   timestamp: string;
   status: 'success' | 'failed' | 'running' | 'cancelled';
   stepsCompleted: number;

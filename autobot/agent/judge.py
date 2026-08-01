@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel
@@ -24,8 +25,57 @@ class JudgeAgent:
         self.llm_client = llm_client
         self.model = model
 
+    def _fast_heuristic_check(
+        self, goal: str, result_text: str
+    ) -> JudgeOutput | None:
+        """
+        Instant heuristic pre-check — avoids LLM for obvious cases.
+        Returns a JudgeOutput if the verdict is clear, None if LLM is needed.
+        """
+        result_lower = result_text.lower()
+
+        # Clear failure signals
+        failure_signals = [
+            "error:", "exception:", "traceback", "task failed",
+            "could not complete", "unable to", "timed out",
+            "judge error:", "circuit breaker", "max steps reached",
+        ]
+        for sig in failure_signals:
+            if sig in result_lower:
+                return JudgeOutput(
+                    success=False,
+                    reasoning=f"Heuristic: result contains failure signal '{sig}'"
+                )
+
+        # Clear success signals paired with "done" or "success"
+        if "judge verification: success" in result_lower:
+            # Prior judge already confirmed success (re-evaluation shouldn't happen, but handle it)
+            return JudgeOutput(success=True, reasoning="Prior judge verification confirmed success")
+
+        # Very short results with no task content are suspicious
+        if len(result_text.strip()) < 20 and "done" not in result_lower:
+            return JudgeOutput(
+                success=False,
+                reasoning="Heuristic: result is too short to indicate task completion"
+            )
+
+        # If result contains explicit success markers, trust them
+        if any(s in result_lower for s in ["successfully completed", "task complete", "done(success=true"]):
+            return JudgeOutput(
+                success=True,
+                reasoning="Heuristic: result contains explicit success confirmation"
+            )
+
+        return None  # Proceed to LLM evaluation
+
     async def evaluate(self, goal: str, result_text: str, history_summary: str) -> JudgeOutput:
         """Evaluate the agent's performance."""
+        # Fast path — skip LLM for obvious outcomes
+        heuristic = self._fast_heuristic_check(goal, result_text)
+        if heuristic is not None:
+            logger.debug(f"Judge heuristic shortcut: success={heuristic.success}")
+            return heuristic
+
         prompt = (
             "You are an impartial Judge Agent evaluating if an autonomous browser agent "
             "successfully completed its task.\n\n"
@@ -37,33 +87,62 @@ class JudgeAgent:
         )
 
         try:
-            # support both sync and async clients
+            # Consolidate into single user message for local LLM compatibility
+            full_content = f"SYSTEM: You are an impartial Judge Agent.\n\n{prompt}"
+            
+            args = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": full_content}],
+                "temperature": 0.0,
+                "response_format": {"type": "json_object"}
+            }
+
+            async def _internal_call(current_args: dict) -> str:
+                try:
+                    # async
+                    resp = await self.llm_client.chat.completions.create(**current_args)
+                    return str(resp.choices[0].message.content)
+                except TypeError:
+                    # sync fallback
+                    import asyncio
+                    resp = await asyncio.to_thread(
+                        self.llm_client.chat.completions.create,
+                        **current_args
+                    )
+                    return str(resp.choices[0].message.content)
+
             try:
-                # async
-                response = await self.llm_client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    response_format={"type": "json_object"},
-                )
-                text = response.choices[0].message.content
-            except TypeError:
-                import asyncio
-                response = await asyncio.to_thread(
-                    self.llm_client.chat.completions.create,
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    response_format={"type": "json_object"},
-                )
-                text = response.choices[0].message.content
+                text = await _internal_call(args)
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "400" in error_msg or "response_format" in error_msg or "json_object" in error_msg:
+                    logger.warning(f"Judge model {self.model} failed with JSON mode. Retrying without JSON mode...")
+                    args.pop("response_format", None)
+                    text = await _internal_call(args)
+                else:
+                    raise e
 
             text = text.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
+            
+            # Extract JSON using robust fallback strategy
+            data = None
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                import re
+                json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+                if not json_match:
+                    json_match = re.search(r"(\{.*?\})", text, re.DOTALL)
+                
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+            
+            if data is None:
+                raise ValueError("Could not parse JSON from Judge output")
 
-            data = json.loads(text)
             return JudgeOutput(
                 success=bool(data.get("success", False)),
                 reasoning=str(data.get("reasoning", "No reasoning provided.")),

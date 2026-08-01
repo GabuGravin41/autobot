@@ -3,10 +3,10 @@
  * All page content lives in src/components/*.tsx
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'motion/react';
-import { Bot, MousePointer2, Keyboard, ExternalLink, LogOut } from 'lucide-react';
+import { Bot, MousePointer2, Keyboard, ExternalLink, LogOut, Sparkles } from 'lucide-react';
 
 // Types
 import {
@@ -15,11 +15,13 @@ import {
 
 // Services
 import {
-  getStatus, getAdapters, getRuns, getWorkflows, runPlan, cancelRun,
-  connectLogStream, updateSettings, getBrowserScreenshotUrl, submitHumanInput,
+  getStatus, getAdapters, getRuns, getWorkflows, getTasks, cancelTask, addTask,
+  getScreenLockStatus, getScheduleStatus, runPlan, cancelRun,
+  connectLogStream, connectEventStream, updateSettings, getBrowserScreenshotUrl, submitHumanInput,
   getRun as apiGetRun, deleteRun as apiDeleteRun, sendChat,
   runAutonomous, cancelAutonomous, getAutonomousStatus,
   BackendStatus, BackendAdapter, BackendRun, BackendWorkflow,
+  QueuedTask, ScreenLockStatus, ScheduleStatus, submitOnboarding,
 } from './services/apiService';
 
 // Components
@@ -58,6 +60,11 @@ export default function App() {
   const [liveAdapters, setLiveAdapters] = useState<BackendAdapter[]>([]);
   const [liveRuns, setLiveRuns] = useState<RunHistory[]>([]);
   const [liveLogLines, setLiveLogLines] = useState<string[]>([]);
+  const [scheduledTasks, setScheduledTasks] = useState<QueuedTask[]>([]);
+  const [screenLockStatus, setScreenLockStatus] = useState<ScreenLockStatus | null>(null);
+  const [scheduleStatus, setScheduleStatus] = useState<ScheduleStatus | null>(null);
+
+  const refreshTimer = useRef<NodeJS.Timeout | null>(null);
   const [workflows, setWorkflows] = useState<BackendWorkflow[]>([]);
   const [backendOnline, setBackendOnline] = useState(false);
   const [screenshotUrl, setScreenshotUrl] = useState('');
@@ -73,9 +80,22 @@ export default function App() {
   const [selectedModelId, setSelectedModelId] = useState('google/gemini-2.0-flash-001');
 
   // ── Chat / planner ────────────────────────────────────────────────────────
-  const [chatMessages, setChatMessages] = useState<any[]>([
-    { role: 'bot', content: 'Hello! I am Autobot. How can I help you automate your computer today?' },
-  ]);
+  const _CHAT_KEY = 'autobot_chat_history';
+  const _initChat = () => {
+    try {
+      const saved = sessionStorage.getItem(_CHAT_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore parse errors */ }
+    return [{ role: 'bot', content: 'Hello! I am Autobot. How can I help you automate your computer today?' }];
+  };
+  const [chatMessages, _setChatMessages] = useState<any[]>(_initChat);
+  const setChatMessages = (updater: any[] | ((prev: any[]) => any[])) => {
+    _setChatMessages(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      try { sessionStorage.setItem(_CHAT_KEY, JSON.stringify(next.slice(-100))); } catch { /* quota */ }
+      return next;
+    });
+  };
   const [chatInput, setChatInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [showReasoning, setShowReasoning] = useState<Record<number, boolean>>({});
@@ -84,30 +104,93 @@ export default function App() {
   const [selectedRun, setSelectedRun] = useState<RunHistory | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<any | null>(null);
 
+  // ── Onboarding ────────────────────────────────────────────────────────────
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingName, setOnboardingName] = useState('');
+  const [onboardingKaggle, setOnboardingKaggle] = useState('');
+  const [onboardingEditor, setOnboardingEditor] = useState('');
+  const [onboardingAiTools, setOnboardingAiTools] = useState('');
+  const [onboardingLanguage, setOnboardingLanguage] = useState('');
+
   // ── Effects ───────────────────────────────────────────────────────────────
   useEffect(() => {
-    let disconnect: (() => void) | null = null;
+    // Full poll — used on startup and as a 30s heartbeat fallback
     const poll = async () => {
       try {
-        const [status, adapters, runs, wfs] = await Promise.all([
+        const [status, adapters, runs, wfs, tasksResp, lockStatus, sched] = await Promise.all([
           getStatus(), getAdapters(), getRuns(),
           getWorkflows().catch(() => ({ workflows: [] })),
+          getTasks().catch(() => ({ tasks: [] })),
+          getScreenLockStatus().catch(() => null),
+          getScheduleStatus().catch(() => null),
         ]);
         setBackendStatus(status);
         setLiveAdapters(adapters.adapters);
         setLiveRuns(runs.runs as any as RunHistory[]);
         if (wfs.workflows?.length) setWorkflows(wfs.workflows);
+        setScheduledTasks(tasksResp.tasks);
+        setScreenLockStatus(lockStatus);
+        setScheduleStatus(sched);
         setBackendOnline(true);
       } catch { setBackendOnline(false); }
     };
+
     poll();
-    const interval = setInterval(poll, 5000);
-    disconnect = connectLogStream(
+    // Reduced to 30s — real-time updates come from /ws/events, not this poll
+    const interval = setInterval(poll, 30_000);
+
+    // Real-time event stream: all clients (laptop, phone, tablet) stay in sync
+    // because the backend pushes to all of them simultaneously on every change.
+    const disconnectEvents = connectEventStream((event) => {
+      if (event.type === 'snapshot') {
+        // Initial sync on connect — bring this client up to date immediately
+        if (event.run_status) {
+          setBackendStatus((prev: BackendStatus | null) => prev
+            ? { ...prev, run_status: event.run_status as BackendStatus['run_status'], active_run_id: event.active_run_id ?? null }
+            : null
+          );
+        }
+        if (event.logs) {
+          setLiveLogLines(event.logs.map((l: string) => {
+            const pipe = l.indexOf('|');
+            return pipe > 0 ? l.substring(pipe + 1) : l;
+          }).slice(-200));
+        }
+        if (event.screenshot_ts) {
+          setScreenshotUrl(`/api/browser/screenshot?t=${event.screenshot_ts}`);
+        }
+        setBackendOnline(true);
+      } else if (event.type === 'status') {
+        // Run status changed — update immediately without waiting for poll
+        setBackendStatus((prev: BackendStatus | null) => prev
+          ? { ...prev, run_status: event.run_status as BackendStatus['run_status'], active_run_id: event.active_run_id ?? null }
+          : null
+        );
+        setBackendOnline(true);
+        // Refresh full status on run start/end to get complete data
+        poll();
+      } else if (event.type === 'log' && event.line) {
+        setLiveLogLines((prev: string[]) => [...prev.slice(-199), event.line!]);
+      } else if (event.type === 'screenshot' && event.ts) {
+        // All clients receive this at the same time → all show the same screenshot
+        setScreenshotUrl(`/api/browser/screenshot?t=${event.ts}`);
+      } else if (event.type === 'narrative' && event.text) {
+        setBackendStatus((prev: BackendStatus | null) => prev ? { ...prev, narrative: event.text } : null);
+      }
+    });
+
+    // Keep /ws/logs connected for polling fallback on clients that can't reach /ws/events
+    const disconnectLogs = connectLogStream(
       (line) => setLiveLogLines(prev => [...prev.slice(-199), line]),
       undefined,
       { usePollingFallback: true, onLogsSnapshot: (logs) => setLiveLogLines(logs.slice(-200)) },
     );
-    return () => { clearInterval(interval); disconnect?.(); };
+
+    return () => {
+      clearInterval(interval);
+      disconnectEvents();
+      disconnectLogs();
+    };
   }, []);
 
   useEffect(() => {
@@ -146,30 +229,62 @@ export default function App() {
     }
   }, [backendStatus?.run_status, backendStatus?.active_run_id, liveLogLines]);
 
+  // Screenshot URL is now pushed via /ws/events (type: "screenshot") so all clients
+  // update simultaneously. This effect only sets the initial URL on first connect.
   useEffect(() => {
     if (!backendOnline || !backendStatus?.browser?.active) return;
     setScreenshotUrl(getBrowserScreenshotUrl());
-    const interval = setInterval(() => setScreenshotUrl(getBrowserScreenshotUrl()), 3000);
-    return () => clearInterval(interval);
   }, [backendOnline, backendStatus?.browser?.active]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    if (!localStorage.getItem('autobot_onboarded')) {
+      const t = setTimeout(() => setShowOnboarding(true), 1000);
+      return () => clearTimeout(t);
+    }
+  }, [isAuthenticated]);
+
+  const dismissOnboarding = () => {
+    localStorage.setItem('autobot_onboarded', '1');
+    setShowOnboarding(false);
+  };
+
+  const handleOnboardingSave = async () => {
+    try {
+      await submitOnboarding({
+        name: onboardingName || undefined,
+        kaggle_username: onboardingKaggle || undefined,
+        editor: onboardingEditor || undefined,
+        ai_tools: onboardingAiTools || undefined,
+        language: onboardingLanguage || undefined,
+      });
+    } catch (_) { /* best-effort — don't block onboarding if backend fails */ }
+    dismissOnboarding();
+  };
+
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleSendMessage = async () => {
     if (!chatInput.trim() || isGenerating) return;
     const userMsg = chatInput.trim();
     setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    const updatedMessages = [...chatMessages, { role: 'user' as const, content: userMsg }];
+    setChatMessages(updatedMessages);
     setIsGenerating(true);
     try {
+      // Build history from previous messages (skip greeting + error messages)
+      const history = updatedMessages
+        .filter((m, i) => !(i === 0 && m.role === 'bot'))
+        .filter(m => !m.content?.startsWith("Sorry, I couldn't reach"))
+        .map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.content }));
 
       const { reply, plan } = await sendChat(userMsg, {
         browser_mode: backendStatus?.browser?.mode,
         llm_enabled: backendStatus?.llm_enabled,
-      });
+      }, history);
       setChatMessages(prev => [...prev, { role: 'bot', content: reply, plan: plan ? { id: plan.id, name: plan.name, description: plan.description, steps: plan.steps } : undefined }]);
     } catch (error) {
       setChatMessages(prev => [...prev, { role: 'bot', content: `Sorry, I couldn't reach the Autobot backend. Error: ${error instanceof Error ? error.message : 'Unknown'}` }]);
@@ -262,6 +377,35 @@ export default function App() {
                   onAbortRun={handleAbortRun}
                   onSelectRun={handleViewDetails}
                   onSelectArtifact={setSelectedArtifact}
+                  scheduledTasks={scheduledTasks}
+                  screenLockStatus={screenLockStatus}
+                  scheduleStatus={scheduleStatus}
+                  onAddTask={async (goal) => {
+                    await addTask(goal);
+                    const [resp, sched] = await Promise.all([
+                      getTasks().catch(() => ({ tasks: [] })),
+                      getScheduleStatus().catch(() => null),
+                    ]);
+                    setScheduledTasks(resp.tasks);
+                    setScheduleStatus(sched);
+                  }}
+                  onCancelTask={async (id) => {
+                    await cancelTask(id);
+                    const resp = await getTasks().catch(() => ({ tasks: [] }));
+                    setScheduledTasks(resp.tasks);
+                  }}
+                  onRefreshTasks={async () => {
+                    const [resp, sched] = await Promise.all([
+                      getTasks().catch(() => ({ tasks: [] })),
+                      getScheduleStatus().catch(() => null),
+                    ]);
+                    setScheduledTasks(resp.tasks);
+                    setScheduleStatus(sched);
+                  }}
+                  onPlanFirst={(goal) => {
+                    setChatInput(goal);
+                    navigate('/planner');
+                  }}
                 />
               } />
               <Route path="/planner" element={
@@ -270,6 +414,10 @@ export default function App() {
                   isGenerating={isGenerating} onSend={handleSendMessage}
                   onExecutePlan={executePlan}
                   showReasoning={showReasoning} setShowReasoning={setShowReasoning}
+                  onClearChat={() => {
+                    setChatMessages([{ role: 'bot', content: 'Hello! I am Autobot. Tell me what you\'d like to automate and I\'ll help you plan it. I may ask a few questions to make sure I understand exactly what you need.' }]);
+                    setChatInput('');
+                  }}
                 />
               } />
               <Route path="/workflows" element={
@@ -279,6 +427,7 @@ export default function App() {
                   onRunStart={setActiveRun}
                   onRunIdUpdate={(id) => setActiveRun(prev => prev ? { ...prev, id } : null)}
                   onRunError={(msg) => setActiveRun(prev => prev ? { ...prev, status: 'failed', logs: [...(prev.logs || []), 'Failed: ' + msg] } : null)}
+                  onWorkflowsChange={setWorkflows}
                 />
               } />
               <Route path="/history" element={
@@ -332,6 +481,76 @@ export default function App() {
         selectedRun={selectedRun} onCloseRun={() => setSelectedRun(null)}
         selectedArtifact={selectedArtifact} onCloseArtifact={() => setSelectedArtifact(null)}
       />
+
+      {/* Onboarding overlay */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[300] flex items-center justify-center p-6"
+            style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)' }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.92, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.92, y: 20 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+              className="glass-panel rounded-3xl p-10 w-full max-w-lg space-y-8 relative"
+            >
+              {/* Header */}
+              <div className="flex flex-col items-center gap-3 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-[var(--brand-primary)] flex items-center justify-center shadow-xl shadow-[var(--brand-primary)]/30">
+                  <Sparkles className="text-white" size={26} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold tracking-tight">Let's set up Autobot</h2>
+                  <p className="text-sm text-[var(--base-text-muted)] mt-1">I'll remember this so you never have to repeat yourself</p>
+                </div>
+              </div>
+
+              {/* Fields */}
+              <div className="space-y-4">
+                {[
+                  { label: 'Your name', placeholder: 'e.g. Sarah', value: onboardingName, onChange: setOnboardingName },
+                  { label: 'Kaggle username', placeholder: 'e.g. sarah_ml', value: onboardingKaggle, onChange: setOnboardingKaggle },
+                  { label: 'Primary code editor', placeholder: 'e.g. VS Code, PyCharm', value: onboardingEditor, onChange: setOnboardingEditor },
+                  { label: 'AI tools you use', placeholder: 'e.g. ChatGPT, Claude, Gemini', value: onboardingAiTools, onChange: setOnboardingAiTools },
+                  { label: 'Preferred language', placeholder: 'e.g. Python, JavaScript', value: onboardingLanguage, onChange: setOnboardingLanguage },
+                ].map(({ label, placeholder, value, onChange }) => (
+                  <div key={label}>
+                    <label className="block text-[10px] font-bold uppercase tracking-widest text-[var(--base-text-muted)] mb-1.5">{label}</label>
+                    <input
+                      type="text"
+                      placeholder={placeholder}
+                      value={value}
+                      onChange={e => onChange(e.target.value)}
+                      className="input-field w-full"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={handleOnboardingSave}
+                  className="btn-primary w-full py-3.5 text-sm uppercase tracking-widest"
+                >
+                  Save &amp; Get Started
+                </button>
+                <button
+                  onClick={dismissOnboarding}
+                  className="text-[11px] text-[var(--base-text-muted)] hover:text-[var(--base-text)] transition-colors text-center underline underline-offset-2"
+                >
+                  Skip for now
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

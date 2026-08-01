@@ -2,7 +2,8 @@ import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, CheckCircle2, XCircle, Mail, FileText } from 'lucide-react';
 import { RunHistory } from '../types';
-import { BackendStatus, submitHumanInput } from '../services/apiService';
+import { BackendStatus, submitHumanInput, ApprovalPending } from '../services/apiService';
+import { ShieldAlert, ShieldCheck, ShieldX } from 'lucide-react';
 import { useState } from 'react';
 
 interface ModalsProps {
@@ -18,9 +19,71 @@ export default function Modals({
 }: ModalsProps) {
     const [humanInputValue, setHumanInputValue] = useState('');
     const [humanInputSubmitting, setHumanInputSubmitting] = useState(false);
+    const [approvalSubmitting, setApprovalSubmitting] = useState<'allow' | 'block' | null>(null);
+
+    const handleApproval = async (pending: ApprovalPending, decision: 'allow' | 'block') => {
+        setApprovalSubmitting(decision);
+        try {
+            await submitHumanInput(pending.key, decision);
+        } catch (e) {
+            alert('Failed to submit: ' + (e instanceof Error ? e.message : 'Unknown'));
+        } finally {
+            setApprovalSubmitting(null);
+        }
+    };
 
     return (
         <AnimatePresence>
+            {/* Approval modal — Allow / Block for risky actions */}
+            {backendStatus?.human_approval_pending && (
+                <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                        className="w-full max-w-md glass-panel p-8 rounded-3xl relative z-10"
+                    >
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-12 h-12 rounded-2xl bg-amber-500/15 flex items-center justify-center">
+                                <ShieldAlert size={24} className="text-amber-400" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold">Action Requires Approval</h3>
+                                <p className="text-xs text-[var(--base-text-muted)] uppercase tracking-widest">Agent is paused</p>
+                            </div>
+                        </div>
+                        <div className="p-4 rounded-2xl bg-[var(--base-border)] mb-6">
+                            <p className="text-sm text-[var(--base-text)] leading-relaxed whitespace-pre-wrap">
+                                {backendStatus.human_approval_pending.message}
+                            </p>
+                        </div>
+                        <div className="flex gap-3">
+                            <button
+                                onClick={() => handleApproval(backendStatus.human_approval_pending!, 'block')}
+                                disabled={approvalSubmitting !== null}
+                                className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-colors text-sm font-bold uppercase tracking-widest disabled:opacity-50"
+                            >
+                                <ShieldX size={16} />
+                                {approvalSubmitting === 'block' ? 'Blocking...' : 'Block'}
+                            </button>
+                            <button
+                                onClick={() => handleApproval(backendStatus.human_approval_pending!, 'allow')}
+                                disabled={approvalSubmitting !== null}
+                                className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/25 transition-colors text-sm font-bold uppercase tracking-widest disabled:opacity-50"
+                            >
+                                <ShieldCheck size={16} />
+                                {approvalSubmitting === 'allow' ? 'Allowing...' : 'Allow'}
+                            </button>
+                        </div>
+                        <p className="text-[10px] text-[var(--base-text-muted)] text-center mt-3">
+                            No response within 2 minutes will auto-block this action.
+                        </p>
+                    </motion.div>
+                </div>
+            )}
+
             {/* Human input modal */}
             {backendStatus?.human_input_pending && (
                 <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
