@@ -44,6 +44,14 @@ class AntiSleepManager:
                     break
                 time.sleep(1)
 
+    def __call__(self):
+        """Single keep-awake nudge — the documented `computer.anti_sleep()`
+        usage in a wait loop (see computer/browser.py's is_generating() example
+        and system_prompt.md). Distinct from start()/stop(), which run a
+        background thread; this is a one-shot call for a single poll iteration.
+        """
+        self.move_mouse()
+
     def move_mouse(self):
         """Perform a subtle mouse movement."""
         try:

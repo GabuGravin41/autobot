@@ -28,24 +28,35 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _VAULT_PATH = Path.home() / ".autobot" / "vault.json"
+_SALT_PATH = Path.home() / ".autobot" / "vault.salt"
 
 
-def _derive_key() -> bytes:
+def _get_machine_id() -> str:
+    """Best-effort machine identifier, used as one input among several.
+
+    THIS ALONE IS NOT WHAT MAKES THE VAULT SAFE — see _get_or_create_local_salt()
+    below. Originally _derive_key() had a Linux branch (/etc/machine-id) and a
+    macOS branch (IOPlatformUUID) but NO Windows branch at all, so on Windows
+    machine_id was always "" and every installation silently fell through to
+    the identical hardcoded seed "autobot-vault-default-user" (the USER env var
+    is also POSIX-only; Windows uses USERNAME, which was never checked either).
+    The result: every Windows installation of Autobot derived the exact same
+    encryption key, so a vault.json copied from any Windows machine could be
+    decrypted on any other, with zero access to the source machine required —
+    a complete defeat of the "tied to the device" claim in this module's
+    original docstring, on the one platform this project actually ships to.
     """
-    Derive a 32-byte encryption key from machine-specific identifiers.
-
-    This ties the vault to the device — the encrypted vault file is not
-    portable without the same machine. Not a substitute for a proper
-    password manager, but good enough for desktop automation credentials.
-    """
-    # Use a combination of machine-id + username as the key material
-    machine_id = ""
+    system = platform.system()
     try:
-        if platform.system() == "Linux":
+        if system == "Windows":
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+                return winreg.QueryValueEx(key, "MachineGuid")[0]
+        elif system == "Linux":
             mid_path = Path("/etc/machine-id")
             if mid_path.exists():
-                machine_id = mid_path.read_text().strip()
-        elif platform.system() == "Darwin":
+                return mid_path.read_text().strip()
+        elif system == "Darwin":
             import subprocess
             r = subprocess.run(
                 ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
@@ -53,13 +64,57 @@ def _derive_key() -> bytes:
             )
             for line in r.stdout.splitlines():
                 if "IOPlatformUUID" in line:
-                    machine_id = line.split('"')[-2]
-                    break
-    except Exception:
-        pass
+                    return line.split('"')[-2]
+    except Exception as e:
+        logger.debug(f"Machine ID lookup failed ({system}): {e}")
+    return ""
 
-    seed = f"autobot-vault-{machine_id or 'default'}-{os.getenv('USER', 'user')}"
-    return hashlib.sha256(seed.encode()).digest()  # 32 bytes
+
+def _get_or_create_local_salt() -> bytes:
+    """32 random bytes, generated once and persisted next to the vault.
+
+    This — not the machine ID above — is what actually makes the key
+    unpredictable: it is never derived from anything guessable or readable by
+    another party, unlike a registry GUID or username. Machine ID is mixed in
+    as a second factor so the vault also isn't portable to a copied disk
+    without this file, matching the module's original intent; but the salt is
+    the one property that MUST hold even if a future platform's machine-ID
+    lookup breaks again, the way Windows's did before this fix.
+    """
+    try:
+        if _SALT_PATH.exists():
+            data = _SALT_PATH.read_bytes()
+            if len(data) == 32:
+                return data
+        _SALT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        salt = os.urandom(32)
+        _SALT_PATH.write_bytes(salt)
+        try:
+            os.chmod(_SALT_PATH, 0o600)  # no-op on Windows; restricts on POSIX
+        except Exception:
+            pass
+        return salt
+    except Exception as e:
+        # Filesystem unavailable/read-only — fall back to a fixed value rather
+        # than crashing. This degrades to the old "predictable key" behavior,
+        # but only when the salt genuinely cannot be persisted at all.
+        logger.warning(f"Could not persist vault salt ({e}); vault key will not be unique to this install.")
+        return b"autobot-vault-fallback-salt-no-fs\x00" * 1  # 32 bytes, constant
+
+
+def _derive_key() -> bytes:
+    """
+    Derive a 32-byte encryption key. Primary entropy is a random salt
+    generated once per installation (_get_or_create_local_salt); machine ID
+    and username are mixed in as a second factor so the vault also isn't
+    portable to a bare copy of the disk. See both helpers' docstrings for why
+    machine ID alone (the original design) was not sufficient.
+    """
+    salt = _get_or_create_local_salt()
+    machine_id = _get_machine_id()
+    username = os.getenv("USERNAME") or os.getenv("USER") or "user"  # USERNAME=Windows, USER=POSIX
+    seed = salt + f"autobot-vault-{machine_id or 'default'}-{username}".encode()
+    return hashlib.sha256(seed).digest()  # 32 bytes
 
 
 def _get_fernet():

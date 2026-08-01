@@ -63,7 +63,7 @@ PROMPTS = [
     "Derive the mathematical framework (Hamiltonian, polariton dispersion, rate equations) for perovskite polariton exciton optical memory.",
     "Detail device architecture & materials specifications (e.g. CH3NH3PbI3, room-temperature operation, optical switching threshold).",
     "Provide key academic references and bibtex entries for perovskite polariton optical memory research.",
-    "Synthesize a full, complete, compilation-ready LaTeX document (\documentclass{article}, preamble, equations, tables, sectioning, references) compiling all research findings from above."
+    r"Synthesize a full, complete, compilation-ready LaTeX document (\documentclass{article}, preamble, equations, tables, sectioning, references) compiling all research findings from above."
 ]
 
 def send_prompt(prompt_text, turn_num):

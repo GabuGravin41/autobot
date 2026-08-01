@@ -134,7 +134,11 @@ class NativeExtractionService:
         try:
             if hasattr(control, "GetValuePattern"):
                 value = control.GetValuePattern().Value or ""
-        except:
+        except Exception:
+            # A stale/disappeared UIA control raises COMError here routinely —
+            # elements can vanish mid-traversal. But bare `except:` also
+            # swallows KeyboardInterrupt/SystemExit, which would make Ctrl+C
+            # silently do nothing during a slow tree walk. Narrowed to Exception.
             pass
 
         # Determine if interactive
@@ -162,7 +166,9 @@ class NativeExtractionService:
                 child_node = self._build_node(child, depth + 1)
                 if child_node:
                     node.children.append(child_node)
-        except:
+        except Exception:
+            # Same reasoning as above: real UIA failures happen here often
+            # (a container closes while being walked), but must not eat Ctrl+C.
             pass
 
         # Prune branches that have no text and no interactive children

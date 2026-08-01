@@ -45,6 +45,15 @@ _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
 _liveness = SystemLivenessManager()
 
+# Guards the check-then-set on _agent_status/_agent_runner in start_agent_run().
+# Route handlers here are sync `def`s, which FastAPI dispatches to its worker
+# threadpool — so two near-simultaneous POST /api/agent/run requests can both
+# observe _agent_status != "running" before either writes "running", and both
+# proceed to start a background run. The second silently overwrites
+# _agent_runner, orphaning the first run: it keeps executing (and can still
+# act on the real computer) with no reference left to cancel or query it.
+_run_start_lock = threading.Lock()
+
 
 # ── Logging + WebSocket broadcast ────────────────────────────────────────────
 
@@ -132,21 +141,24 @@ def start_agent_run(req: AgentRunRequest):
     """
     global _agent_runner, _agent_status, _active_run_id, _run_log
 
-    if _agent_status == "running":
-        raise HTTPException(status_code=409, detail="A run is already in progress.")
-
     if not req.goal.strip():
         raise HTTPException(status_code=400, detail="Goal cannot be empty.")
 
-    run_id = f"agent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-    _active_run_id = run_id
-    _agent_status = "running"
-    _run_log.clear()
+    # Check-then-set must be one atomic step, or two near-simultaneous
+    # requests can both pass the "not already running" check before either
+    # marks status "running" — see _run_start_lock's comment above.
+    with _run_start_lock:
+        if _agent_status == "running":
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+
+        run_id = f"agent_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        _active_run_id = run_id
+        _agent_status = "running"
+        _run_log.clear()
+        _agent_runner = AgentRunner.from_env(log_callback=_log)
 
     # Enable system sleep prevention
     _liveness.enable_liveness()
-
-    _agent_runner = AgentRunner.from_env(log_callback=_log)
 
     def _run_in_thread():
         global _agent_status
@@ -361,8 +373,14 @@ def get_run(run_id: str):
             "logs": list(_run_log),
             "active": True,
         }
-    runs_root = Path(__file__).resolve().parent.parent.parent / "runs"
-    run_dir = runs_root / run_id
+    runs_root = (Path(__file__).resolve().parent.parent.parent / "runs").resolve()
+    run_dir = (runs_root / run_id).resolve()
+    # run_id comes straight from the URL path with no validation. Without this
+    # check, a request like GET /api/run/..%2F..%2F..%2FWindows%2FSystem32%2Fsome_dir
+    # resolves outside runs_root entirely — reading history.json/console.log
+    # from anywhere on disk that happens to contain files with those names.
+    if runs_root not in run_dir.parents and run_dir != runs_root:
+        raise HTTPException(status_code=400, detail="Invalid run_id")
     if not run_dir.is_dir():
         raise HTTPException(status_code=404, detail="Run not found")
     history_file = run_dir / "history.json"
