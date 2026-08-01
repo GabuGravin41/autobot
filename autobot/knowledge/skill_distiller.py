@@ -176,24 +176,53 @@ class SkillDistiller:
         words = re.findall(r"[a-z0-9]{3,}", goal.lower())
         return SkillDistiller._dedupe([w for w in words if w not in stop])[:8]
 
+    # A skill must match this fraction of its keywords to be considered
+    # relevant. Returning on the FIRST keyword hit made a skill with generic
+    # keywords like ["list", "windows"] fire on unrelated goals such as
+    # "list the files in my project" — injecting misleading proven-steps and
+    # stale lessons into a task they have nothing to do with. Wrong guidance
+    # is worse than none: it actively steers the agent down a bad path.
+    _MIN_KEYWORD_OVERLAP = 0.5
+
     def find_matching_skill(self, goal: str) -> LearnedSkill | None:
         """
-        Find a previously learned skill that matches the current goal.
+        Find the previously learned skill that best matches the current goal.
+
+        Scores every candidate by what fraction of its keywords appear in the
+        goal and returns the strongest match above _MIN_KEYWORD_OVERLAP, rather
+        than whichever file happened to be read first.
         """
-        goal_lower = goal.lower()
+        goal_words = set(re.findall(r"[a-z0-9]{3,}", goal.lower()))
+        best: LearnedSkill | None = None
+        best_score = 0.0
+
         for filepath in self.skills_dir.glob("*.json"):
             try:
                 data = json.loads(filepath.read_text(encoding="utf-8"))
                 skill = LearnedSkill.from_dict(data)
-
-                # Check keyword match
-                for kw in skill.keywords:
-                    if kw.lower() in goal_lower:
-                        logger.info(f"💡 Learned Skill Match Found: '{skill.name}' for goal '{goal[:40]}'")
-                        return skill
             except Exception as e:
                 logger.debug(f"Error loading skill file {filepath}: {e}")
+                continue
 
+            if not skill.keywords:
+                continue
+            hits = sum(1 for kw in skill.keywords if kw.lower() in goal_words)
+            # One word in common is coincidence; two is signal. Without this
+            # floor, a two-keyword skill matches on a single generic word
+            # ("list", "open", "file") at exactly the overlap threshold.
+            min_hits = 1 if len(skill.keywords) == 1 else 2
+            if hits < min_hits:
+                continue
+            score = hits / len(skill.keywords)
+            if score > best_score:
+                best, best_score = skill, score
+
+        if best is not None and best_score >= self._MIN_KEYWORD_OVERLAP:
+            logger.info(
+                f"💡 Learned Skill Match: '{best.name}' "
+                f"({best_score:.0%} keyword overlap) for goal '{goal[:40]}'"
+            )
+            return best
         return None
 
     def get_skill_prompt_context(self, goal: str) -> str:

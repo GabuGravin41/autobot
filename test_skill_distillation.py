@@ -76,6 +76,7 @@ try:
     check("unrelated goal does not match",
           d.find_matching_skill("check the weather in Nairobi") is None)
 
+
     # ---- second success bumps count, keeps shorter path ----
     shorter = [step("Do it in one go", [result("navigate", True)])]
     again = d.distill_from_run(goal=GOAL, history=shorter, result="ok")
@@ -87,6 +88,22 @@ try:
     nasty = "Research: perovskites? <part 1> | v2 *draft*"
     s2 = d.distill_from_run(goal=nasty, history=history, result="ok")
     check("illegal filename chars handled", s2 is not None and (tmp / f"{d._safe_name(nasty)}.json").exists())
+
+    # ---- REGRESSION: one generic word in common must not trigger a match ----
+    # find_matching_skill used to return on the FIRST keyword hit, so a skill
+    # with keywords like ["list","windows"] fired on "list the files...",
+    # injecting irrelevant proven-steps and stale lessons into an unrelated
+    # task. Misleading guidance is worse than none.
+    generic = d.distill_from_run(
+        goal="list the open windows",
+        history=[step("List windows", [result("computer_call", True)])],
+        result="ok")
+    check("generic skill saved for the test", generic is not None)
+    check("single shared word does not match",
+          d.find_matching_skill("list the files in my project directory") is None,
+          str(getattr(d.find_matching_skill("list the files in my project directory"), "name", None)))
+    check("genuinely matching goal still matches",
+          d.find_matching_skill("list the open windows on screen") is not None)
 
     # ---- no successful steps -> nothing saved ----
     before = len(list(tmp.glob("*.json")))
