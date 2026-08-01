@@ -31,42 +31,69 @@ class JudgeAgent:
         """
         Instant heuristic pre-check — avoids LLM for obvious cases.
         Returns a JudgeOutput if the verdict is clear, None if LLM is needed.
+
+        Every failure signal here matches the EXACT, STRUCTURAL wording this
+        codebase actually produces on a real failure (verified against
+        runner.py's exception handler and loop.py's _summarize_history/
+        LLMUnavailableError), not a bare word that could appear anywhere.
+
+        The previous version matched loose substrings like "error:",
+        "timed out", "unable to", and "could not complete" ANYWHERE in the
+        text — including inside the agent's own free-form summary of what it
+        did. A run that researched and wrote a paper discussing, say,
+        measurement error or a switching threshold would get silently
+        marked as FAILED before the LLM ever saw it, for a task that had
+        nothing to do with the agent failing at anything. Precision matters
+        more than recall here: the LLM judge exists specifically to handle
+        exactly the ambiguous cases this heuristic used to guess wrong on;
+        this pre-check should only fire when the wording is nearly
+        impossible to produce except by the real failure path it names.
         """
-        result_lower = result_text.lower()
+        stripped = result_text.strip()
+        result_lower = stripped.lower()
 
-        # Clear failure signals
-        failure_signals = [
-            "error:", "exception:", "traceback", "task failed",
-            "could not complete", "unable to", "timed out",
-            "judge error:", "circuit breaker", "max steps reached",
-        ]
-        for sig in failure_signals:
-            if sig in result_lower:
-                return JudgeOutput(
-                    success=False,
-                    reasoning=f"Heuristic: result contains failure signal '{sig}'"
-                )
+        # AgentRunner.run()'s except block: `f"Error: {e}\n\nTraceback:\n{tb}"`
+        # — always the first characters of the string on that path, never
+        # merely mentioned mid-sentence.
+        if result_lower.startswith("error:"):
+            return JudgeOutput(success=False, reasoning="Heuristic: result begins with an Error: wrapper")
 
-        # Clear success signals paired with "done" or "success"
+        # Python's own fixed-format stack trace header — for this to appear
+        # coincidentally in prose would be extraordinary.
+        if "traceback (most recent call last)" in result_lower:
+            return JudgeOutput(success=False, reasoning="Heuristic: result contains a Python traceback")
+
+        # loop.py's _summarize_history(): "Agent ran N steps without calling
+        # 'done'." — the loop hit max_steps without the agent ever finishing.
+        if "without calling 'done'" in result_lower:
+            return JudgeOutput(success=False, reasoning="Heuristic: agent hit max steps without completing")
+
+        # loop.py's LLMUnavailableError message.
+        if "failed" in result_lower and "times in a row" in result_lower and "llm" in result_lower:
+            return JudgeOutput(success=False, reasoning="Heuristic: LLM was unavailable for the run")
+
+        # Judge's own error wrapper, only at the start — guards against
+        # re-evaluation loops, not a bare mention of the word "judge".
+        if result_lower.startswith("judge error:"):
+            return JudgeOutput(success=False, reasoning="Heuristic: a prior judge call itself errored")
+
+        # A prior judge already confirmed success (re-evaluation shouldn't
+        # happen, but handle it rather than paying for a second LLM call).
         if "judge verification: success" in result_lower:
-            # Prior judge already confirmed success (re-evaluation shouldn't happen, but handle it)
             return JudgeOutput(success=True, reasoning="Prior judge verification confirmed success")
 
-        # Very short results with no task content are suspicious
-        if len(result_text.strip()) < 20 and "done" not in result_lower:
-            return JudgeOutput(
-                success=False,
-                reasoning="Heuristic: result is too short to indicate task completion"
-            )
+        # Genuinely empty output — not "shorter than some arbitrary length",
+        # since a real short success ("Sent the email.", "Fixed.") is
+        # entirely plausible and shouldn't be second-guessed by a length
+        # threshold with nothing to do with correctness.
+        if len(stripped) < 3:
+            return JudgeOutput(success=False, reasoning="Heuristic: result is empty or near-empty")
 
-        # If result contains explicit success markers, trust them
+        # Explicit, high-confidence success phrasing.
         if any(s in result_lower for s in ["successfully completed", "task complete", "done(success=true"]):
-            return JudgeOutput(
-                success=True,
-                reasoning="Heuristic: result contains explicit success confirmation"
-            )
+            return JudgeOutput(success=True, reasoning="Heuristic: result contains explicit success confirmation")
 
-        return None  # Proceed to LLM evaluation
+        return None  # Ambiguous — let the LLM judge decide.
 
     async def evaluate(self, goal: str, result_text: str, history_summary: str) -> JudgeOutput:
         """Evaluate the agent's performance."""

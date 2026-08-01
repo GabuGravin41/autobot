@@ -150,6 +150,22 @@ class AgentLoop:
         self.system_prompt = self.system_prompt_builder.build()
         self.pending_override: str | None = None
 
+    @property
+    def last_done_success(self) -> bool:
+        """Whether the run ended via an explicit done(success=True).
+
+        Reliable across all three ways a run can end, because the underlying
+        flag defaults to False at construction and is only ever set True by
+        an explicit done(success=True) call:
+          - Agent called done()          -> reflects what the LLM set
+          - Agent hit max_steps          -> stays False (done() never called)
+          - AgentLoop.run() raised       -> stays False (done() never called)
+        This is the signal MissionAgent uses to decide per-objective
+        success — see its docstring for why that matters more than it might
+        look like from one property.
+        """
+        return self._last_done_success
+
     def push_override(self, new_instruction: str) -> None:
         """Mid-flight intervention: update goal or inject instruction from remote human input."""
         logger.info(f"🔄 Mid-flight override received: '{new_instruction}'")

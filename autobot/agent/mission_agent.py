@@ -121,11 +121,20 @@ class MissionAgent:
                 logger.error(f"Objective failed with exception: {e}")
 
             # 3. EVALUATE OBJECTIVE — be generous, don't fail on partial success
-            is_failure = (
-                result.lower().startswith("error:")
-                or "impossible" in result.lower()
-                or ("fail" in result.lower() and "success" not in result.lower())
-            )
+            #
+            # Previously guessed from the free-form text via substring match
+            # ("fail"/"impossible" anywhere in it) — so an objective that
+            # legitimately wrote something like "verified the mechanism did
+            # not fail under stress testing" or "achieved near-impossible
+            # precision" (completely normal language for a research
+            # objective) was marked failed without checking what actually
+            # happened. agent.last_done_success is the LLM's own explicit
+            # signal from calling done(success=...), and it's reliable
+            # across every way a run can end: it starts False and is only
+            # ever set True by that explicit call, so an exception or a
+            # max-steps timeout (done() never called) correctly reads as
+            # failure without any special-casing here.
+            is_failure = not agent.last_done_success
 
             if is_failure:
                 self.manager.fail_current_objective(result)
