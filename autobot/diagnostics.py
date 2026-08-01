@@ -290,14 +290,45 @@ def check_llm_connectivity() -> list[Check]:
     return checks
 
 
-def check_proxy_env() -> Check:
-    """Report proxy variables, which silently change where requests go."""
+def check_proxy_env() -> list[Check]:
+    """Report proxy/CA variables, which silently change where requests go.
+
+    A CA path that doesn't exist is worse than not setting one at all: httpx
+    raises FileNotFoundError while merely CONSTRUCTING the client, so the run
+    dies with a bare traceback before any task logic executes.
+    """
+    checks: list[Check] = []
     names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
     set_vars = {n: os.getenv(n) for n in names if os.getenv(n)}
+
     if not set_vars:
-        return Check("proxy / CA environment", OK, "none set")
-    detail = "; ".join(f"{k}={v}" for k, v in set_vars.items())
-    return Check("proxy / CA environment", OK, detail)
+        checks.append(Check("proxy / CA environment", OK, "none set"))
+    else:
+        detail = "; ".join(f"{k}={v}" for k, v in set_vars.items())
+        checks.append(Check("proxy / CA environment", OK, detail))
+
+    for var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        path = os.getenv(var)
+        if path and not Path(path).is_file():
+            checks.append(Check(
+                f"{var} points to a real file", FAIL,
+                f"{path} does not exist",
+                f"Every HTTPS call will crash with FileNotFoundError. Either point "
+                f"{var} at a real CA bundle, or clear it: Remove-Item Env:{var}",
+            ))
+
+    # truststore is how we cope with TLS-intercepting networks.
+    if _module_present("truststore"):
+        checks.append(Check("OS certificate store (truststore)", OK,
+                            "Python will trust the same CAs as your browser"))
+    else:
+        checks.append(Check(
+            "OS certificate store (truststore)", WARN,
+            "not installed - Python uses its own bundled CA list",
+            "If HTTPS fails on this network but works in Chrome, run: "
+            "pip install truststore",
+        ))
+    return checks
 
 
 def check_approval_mode() -> Check:
@@ -402,7 +433,7 @@ def run_all() -> list[Check]:
         check_optional_packages,
         lambda: [check_env_file()],
         check_llm_config,
-        lambda: [check_proxy_env()],
+        check_proxy_env,
         check_llm_connectivity,
         lambda: [check_approval_mode()],
         lambda: [check_chrome()],

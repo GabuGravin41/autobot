@@ -55,8 +55,37 @@ def _make_stdout_unicode_safe() -> None:
             pass  # not a real TTY / already wrapped — nothing to do
 
 
+def _use_system_certificates() -> None:
+    """Make Python trust the OS certificate store, like browsers do.
+
+    On networks that intercept TLS (campus/corporate proxies, antivirus with
+    HTTPS scanning), the interceptor installs its root CA into the Windows
+    certificate store. Chrome therefore works fine, while Python fails with
+    CERTIFICATE_VERIFY_FAILED — because Python ships its own bundled CA list
+    (certifi) and never consults the OS store.
+
+    `truststore` redirects Python's TLS verification to the OS store, so the
+    same certificates the rest of the machine already trusts are honoured
+    here too. This keeps verification ON — unlike disabling it, which would
+    hand the API key to whatever is doing the intercepting.
+
+    Optional dependency: if it isn't installed we carry on unchanged.
+    """
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+        logger_msg = "Using the OS certificate store for TLS verification."
+    except ImportError:
+        return
+    except Exception as e:
+        logger_msg = f"Could not enable OS certificate store ({e}); using bundled CAs."
+    import logging
+    logging.getLogger(__name__).debug(logger_msg)
+
+
 def main() -> None:
     _make_stdout_unicode_safe()
+    _use_system_certificates()
     _load_env()
 
     parser = argparse.ArgumentParser(

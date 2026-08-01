@@ -19,6 +19,13 @@ pyautogui>=0.9.54
 httpx>=0.25.0
 websockets>=12.0
 
+# Makes Python verify TLS against the OS certificate store instead of its own
+# bundled CA list. Required on networks that intercept HTTPS (campus/corporate
+# proxies, antivirus with HTTPS scanning): those install their root CA into the
+# OS store, so browsers work while Python fails with CERTIFICATE_VERIFY_FAILED.
+# Keeps verification ON — the alternative (disabling it) would expose API keys.
+truststore>=0.9.0; python_version >= "3.10"
+
 # ── Desktop control (Linux) ───────────────────────────────────────
 # xdotool and wmctrl are system packages — install via:
 #   sudo apt install xdotool wmctrl   (Ubuntu/Debian)
