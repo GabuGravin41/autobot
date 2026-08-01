@@ -33,12 +33,16 @@ from autobot.agent.models import (
     InputTextAction,
     NavigateAction,
     PressKeyAction,
+    RequestHumanInputAction,
+    RunCommandAction,
     ScrollAction,
     StepHistoryEntry,
 )
 from autobot.computer.computer import Computer
 from autobot.dom.extraction import DOMExtractionService
 from autobot.dom.models import BrowserState, DOMSerializedState
+from autobot.knowledge.environment_memory import EnvironmentMemory
+from autobot.knowledge.skill_distiller import SkillDistiller
 from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 
 logger = logging.getLogger(__name__)
@@ -83,6 +87,8 @@ class AgentLoop:
 
         # Computer API for OS-level tools
         self.computer = Computer()
+        self.env_memory = EnvironmentMemory()
+        self.skill_distiller = SkillDistiller()
 
         # Build system prompt
         tool_catalog = self.computer.get_tool_catalog()
@@ -92,6 +98,12 @@ class AgentLoop:
             tool_catalog=tool_catalog,
         )
         self.system_prompt = self.system_prompt_builder.build()
+        self.pending_override: str | None = None
+
+    def push_override(self, new_instruction: str) -> None:
+        """Mid-flight intervention: update goal or inject instruction from remote human input."""
+        logger.info(f"🔄 Mid-flight override received: '{new_instruction}'")
+        self.pending_override = new_instruction
 
     async def run(self) -> str:
         """
@@ -130,6 +142,12 @@ class AgentLoop:
             Result text if the agent called "done", None otherwise.
         """
         step_start = time.time()
+
+        # Apply any mid-flight intervention overrides
+        if self.pending_override:
+            logger.info(f"⚡ Applying mid-flight override: {self.pending_override}")
+            self.goal = f"{self.goal}\n\n[HUMAN INTERVENTION / RE-PIVOT]: {self.pending_override}"
+            self.pending_override = None
 
         # ─── 1. OBSERVE ───
         logger.debug(f"Step {self.step_number + 1}: Observing...")
@@ -195,6 +213,10 @@ class AgentLoop:
         # Build agent history text from previous steps
         history_text = self._build_history_text()
 
+        # Get environment knowledge and learned skill context
+        env_summary = self.env_memory.get_summary_text()
+        skill_context = self.skill_distiller.get_skill_prompt_context(self.goal)
+
         # Build the step prompt
         step_builder = StepPromptBuilder(
             browser_state=browser_state,
@@ -202,6 +224,8 @@ class AgentLoop:
             step_number=self.step_number,
             max_steps=self.max_steps,
             agent_history=history_text,
+            environment_summary=env_summary,
+            learned_skill_context=skill_context,
         )
 
         user_messages = step_builder.build_messages(use_vision=self.use_vision)
@@ -381,6 +405,17 @@ class AgentLoop:
             elif action.screenshot is not None:
                 return ActionResult(action_name="screenshot", success=True)
 
+            elif action.run_command is not None:
+                return await self._execute_run_command(action.run_command)
+
+            elif action.request_human_input is not None:
+                logger.info(f"❓ Human input requested: '{action.request_human_input.prompt}'")
+                return ActionResult(
+                    action_name="request_human_input",
+                    success=True,
+                    extracted_content=f"Human input requested: {action.request_human_input.prompt}",
+                )
+
             else:
                 return ActionResult(
                     action_name="unknown",
@@ -528,3 +563,50 @@ class AgentLoop:
             f"Agent ran {len(self.history)} steps without calling 'done'.\n"
             f"Last steps:\n" + "\n".join(steps_text)
         )
+
+    async def _execute_run_command(self, cmd_action: RunCommandAction) -> ActionResult:
+        """Execute a local shell command safely."""
+        import asyncio
+        from pathlib import Path
+
+        cmd = cmd_action.command
+        logger.info(f"💻 Running local command: {cmd}")
+
+        scratch_dir = Path.cwd() / "tmp" / "autobot_scratch"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(scratch_dir),
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=float(cmd_action.timeout)
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                return ActionResult(
+                    action_name="run_command",
+                    success=False,
+                    error=f"Command timed out after {cmd_action.timeout}s: {cmd}",
+                )
+
+            stdout_str = stdout.decode("utf-8", errors="replace").strip()
+            stderr_str = stderr.decode("utf-8", errors="replace").strip()
+            output = f"STDOUT:\n{stdout_str}\n\nSTDERR:\n{stderr_str}" if stderr_str else stdout_str
+
+            return ActionResult(
+                action_name="run_command",
+                success=process.returncode == 0,
+                extracted_content=output[:2000],
+                error=f"Exit code {process.returncode}" if process.returncode != 0 else None,
+            )
+        except Exception as e:
+            return ActionResult(
+                action_name="run_command",
+                success=False,
+                error=f"Failed to execute command: {e}",
+            )

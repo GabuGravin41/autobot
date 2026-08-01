@@ -59,3 +59,12 @@ automation_data/
 *.bak
 *.swp
 *~
+
+# Temporary test outputs and cloned reference repos
+tmp/
+openclaw/
+openclaw_repo/
+openclaw_src/
+*.sqlite
+*.png
+

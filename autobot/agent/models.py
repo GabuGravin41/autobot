@@ -84,6 +84,18 @@ class CloseTabAction(BaseModel):
     pass
 
 
+class RunCommandAction(BaseModel):
+    """Execute a local terminal/shell command."""
+    command: str
+    timeout: int = 60
+
+
+class RequestHumanInputAction(BaseModel):
+    """Pause execution and request input, password, or approval from the human user."""
+    prompt: str
+    sensitive: bool = False
+
+
 # ─────────────────────────────────────────────
 # Action Union — all possible actions the agent can take
 # ─────────────────────────────────────────────
@@ -99,6 +111,7 @@ class ActionModel(BaseModel):
         {"click": {"index": 4}}
         {"input_text": {"index": 2, "text": "hello"}}
         {"navigate": {"url": "https://google.com"}}
+        {"run_command": {"command": "python script.py"}}
     """
     navigate: NavigateAction | None = None
     click: ClickAction | None = None
@@ -113,6 +126,8 @@ class ActionModel(BaseModel):
     done: DoneAction | None = None
     screenshot: ScreenshotAction | None = None
     go_back: GoBackAction | None = None
+    run_command: RunCommandAction | None = None
+    request_human_input: RequestHumanInputAction | None = None
 
     @property
     def action_name(self) -> str:
@@ -236,6 +251,10 @@ class StepHistoryEntry(BaseModel):
                     action_desc = f"navigate(url='{data.url[:50]}')"
                 elif isinstance(data, DoneAction):
                     action_desc = f"done(success={data.success})"
+                elif isinstance(data, RunCommandAction):
+                    action_desc = f"run_command('{data.command[:40]}')"
+                elif isinstance(data, RequestHumanInputAction):
+                    action_desc = f"request_human_input('{data.prompt[:40]}')"
 
             error_text = f" Error: {result.error}" if result.error else ""
             lines.append(f"  Action {i + 1}: {status} {action_desc}{error_text}")

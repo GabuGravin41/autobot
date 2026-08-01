@@ -70,23 +70,100 @@ class AsyncBrowserLauncher:
 
     async def start(self) -> Any:
         """
-        Launch Chrome with CDP and connect Playwright.
+        Launch Chrome with CDP or native Playwright persistent context.
 
         Returns:
             Playwright Page object with full DOM access.
         """
-        # Step 1: Launch Chrome with debugging port
-        await self._launch_chrome()
+        try:
+            # Attempt 1: Try CDP launch & connection
+            await self._launch_chrome()
+            await self._connect_playwright()
+            logger.info(
+                f"✅ Browser connected via CDP (port {self.debug_port}). "
+                f"Page: {self._page.url if self._page else 'none'}"
+            )
+            return self._page
+        except Exception as e:
+            logger.warning(f"CDP connection attempt hit limitation ({e}). Switching to Playwright Native Persistent Context...")
+            return await self._launch_native_persistent_context()
 
-        # Step 2: Connect Playwright via CDP
-        await self._connect_playwright()
+    async def _launch_native_persistent_context(self) -> Any:
+        """Launch Playwright Chromium using native persistent context with mirrored user session cookies."""
+        from playwright.async_api import async_playwright
 
-        logger.info(
-            f"✅ Browser connected via CDP (port {self.debug_port}). "
-            f"Page: {self._page.url if self._page else 'none'}"
+        self._playwright = await async_playwright().start()
+        
+        # Mirror real logged-in sessions (Cookies, Local Storage) into Autobot Automation profile
+        real_dir = _real_chrome_user_data_dir()
+        target_dir = _default_user_data_dir()
+        if real_dir:
+            self._mirror_user_session_stores(real_dir, target_dir)
+
+        logger.info(f"🌐 Launching Playwright Persistent Context with Mirrored Sessions (dir: '{target_dir}')...")
+        
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=target_dir,
+            executable_path=self.chrome_path,
+            headless=self.headless,
+            args=["--no-first-run", "--no-default-browser-check"],
         )
 
+        pages = self._context.pages
+        self._page = pages[0] if pages else await self._context.new_page()
+        logger.info(f"✅ Mirrored Session Browser Connected! Page: {self._page.url}")
         return self._page
+
+    def _mirror_user_session_stores(self, real_user_data_dir: str, target_user_data_dir: str) -> None:
+        """Merge active session stores across ALL user Chrome profiles into Autobot Automation profile."""
+        import shutil
+
+        real_base = Path(real_user_data_dir)
+        target_default = Path(target_user_data_dir) / "Default"
+
+        if not real_base.exists():
+            return
+
+        target_default.mkdir(parents=True, exist_ok=True)
+
+        session_files = [
+            "Cookies",
+            "Cookies-journal",
+            "Network/Cookies",
+            "Network/Cookies-journal",
+            "Local Storage",
+            "Session Storage",
+            "IndexedDB",
+        ]
+
+        # Scan all profile subfolders (Default, Profile 1, Profile 2, etc.)
+        profile_folders = [f for f in real_base.iterdir() if f.is_dir() and (f.name == "Default" or f.name.startswith("Profile "))]
+
+        copied = 0
+        for prof_folder in profile_folders:
+            for rel_p in session_files:
+                src = prof_folder / rel_p
+                dst = target_default / rel_p
+                if src.exists():
+                    try:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        if src.is_dir():
+                            # Merge directories without overwriting if already populated by a richer profile
+                            for sub in src.rglob("*"):
+                                if sub.is_file():
+                                    sub_rel = sub.relative_to(src)
+                                    target_file = dst / sub_rel
+                                    if not target_file.exists():
+                                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(sub, target_file)
+                        else:
+                            if not dst.exists():
+                                shutil.copy2(src, dst)
+                        copied += 1
+                    except Exception as e:
+                        logger.debug(f"Could not mirror {rel_p} from {prof_folder.name}: {e}")
+
+        logger.info(f"🔄 Merrored {copied} session stores across {len(profile_folders)} Chrome profiles into Autobot master session!")
 
     async def _launch_chrome(self) -> None:
         """Launch Chrome with --remote-debugging-port."""
@@ -101,10 +178,24 @@ class AsyncBrowserLauncher:
             logger.info(f"Chrome already running with CDP on port {self.debug_port}")
             return
 
+        # Attempt to kill lingering non-CDP Chrome processes on Windows to release profile lock
+        try:
+            if os.name == "nt":
+                subprocess.run("taskkill /F /IM chrome.exe", shell=True, capture_output=True)
+                logger.info("🧹 Closed background Chrome processes to release profile lock for CDP.")
+                await _async_sleep(1.0)
+        except Exception as e:
+            logger.debug(f"Taskkill check: {e}")
+
+        # Target the real user profile directory strictly
+        target_dir = self.user_data_dir or _real_chrome_user_data_dir()
+        if not target_dir:
+            target_dir = _default_user_data_dir()
+
         args = [
             self.chrome_path,
             f"--remote-debugging-port={self.debug_port}",
-            f"--user-data-dir={self.user_data_dir}",
+            f"--user-data-dir={target_dir}",
             f"--profile-directory={self.profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -113,7 +204,7 @@ class AsyncBrowserLauncher:
         if self.headless:
             args.append("--headless=new")
 
-        logger.info(f"Launching Chrome: {' '.join(args[:3])}...")
+        logger.info(f"🌐 Launching Real Chrome Profile (dir: '{target_dir}')...")
 
         try:
             self._chrome_process = subprocess.Popen(
@@ -122,18 +213,18 @@ class AsyncBrowserLauncher:
                 stderr=subprocess.DEVNULL,
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to launch Chrome: {e}")
+            raise RuntimeError(f"Failed to launch Chrome with profile '{target_dir}': {e}")
 
-        # Wait for Chrome to start and CDP to become available
+        # Wait up to 15 seconds for CDP to respond
         for attempt in range(15):
             if await self._is_cdp_available():
-                logger.info(f"Chrome CDP available after {attempt + 1} attempts")
+                logger.info(f"✅ Real Chrome CDP successfully connected on port {self.debug_port}")
                 return
             await _async_sleep(1.0)
 
         raise RuntimeError(
-            f"Chrome launched but CDP not available on port {self.debug_port} after 15s. "
-            "Is another Chrome instance using this profile? Close it first."
+            f"Could not connect to Chrome CDP on port {self.debug_port}. "
+            "Please close open Chrome instances or run Chrome with --remote-debugging-port=9222."
         )
 
     async def _connect_playwright(self) -> None:

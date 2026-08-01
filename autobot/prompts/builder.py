@@ -81,38 +81,35 @@ class StepPromptBuilder:
         step_number: int,
         max_steps: int,
         agent_history: str | None = None,
+        environment_summary: str | None = None,
+        learned_skill_context: str | None = None,
     ):
         self.browser_state = browser_state
         self.task = task
         self.step_number = step_number
         self.max_steps = max_steps
         self.agent_history = agent_history
+        self.environment_summary = environment_summary
+        self.learned_skill_context = learned_skill_context
 
     def build_text(self) -> str:
         """
         Build the text portion of the user message.
-
-        Output structure (following Browser Use's XML tag pattern):
-            <agent_history>...</agent_history>
-            <agent_state>
-                <user_request>...</user_request>
-                <step_info>...</step_info>
-            </agent_state>
-            <browser_state>
-                <page_stats>...</page_stats>
-                Tabs: ...
-                Interactive elements:
-                [1] <button> "Submit"
-                ...
-            </browser_state>
         """
         parts: list[str] = []
 
-        # 1. Agent history
+        # 1. Learned Skill & Environment Knowledge Context
+        if self.learned_skill_context:
+            parts.append(f"<learned_skill>\n{self.learned_skill_context}\n</learned_skill>")
+
+        if self.environment_summary:
+            parts.append(f"<environment_knowledge>\n{self.environment_summary}\n</environment_knowledge>")
+
+        # 2. Agent history
         if self.agent_history:
             parts.append(f"<agent_history>\n{self.agent_history}\n</agent_history>")
 
-        # 2. Agent state
+        # 3. Agent state
         date_str = datetime.now().strftime("%Y-%m-%d")
         agent_state = f"""<agent_state>
 <user_request>
@@ -122,7 +119,7 @@ class StepPromptBuilder:
 </agent_state>"""
         parts.append(agent_state)
 
-        # 3. Browser state
+        # 4. Browser state
         browser_state_text = self._build_browser_state()
         parts.append(f"<browser_state>\n{browser_state_text}\n</browser_state>")
 

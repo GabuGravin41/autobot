@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..agent.runner import AgentRunner
+from ..computer.liveness import SystemLivenessManager
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -42,6 +43,7 @@ _active_run_id: str | None = None
 _run_log: list[str] = []
 _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
+_liveness = SystemLivenessManager()
 
 
 # ── Logging + WebSocket broadcast ────────────────────────────────────────────
@@ -104,6 +106,10 @@ class AgentRunRequest(BaseModel):
     use_vision: bool = True
 
 
+class AgentOverrideRequest(BaseModel):
+    instruction: str
+
+
 class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
@@ -132,6 +138,9 @@ def start_agent_run(req: AgentRunRequest):
     _agent_status = "running"
     _run_log.clear()
 
+    # Enable system sleep prevention
+    _liveness.enable_liveness()
+
     _agent_runner = AgentRunner.from_env(log_callback=_log)
 
     def _run_in_thread():
@@ -148,6 +157,7 @@ def start_agent_run(req: AgentRunRequest):
             _agent_status = "failed"
             _save_run_history(run_id, req.goal, False, str(ex))
         finally:
+            _liveness.disable_liveness()
             try:
                 loop.close()
             except Exception:
@@ -155,6 +165,18 @@ def start_agent_run(req: AgentRunRequest):
 
     threading.Thread(target=_run_in_thread, daemon=True, name=f"agent-{run_id}").start()
     return {"run_id": run_id, "status": "started", "goal": req.goal}
+
+
+@app.post("/api/agent/override")
+def push_agent_override(req: AgentOverrideRequest):
+    """
+    Push a mid-flight goal override / intervention to the active running agent.
+    """
+    if _agent_status != "running" or not _agent_runner:
+        raise HTTPException(status_code=400, detail="No active agent run to override.")
+
+    _agent_runner.push_override(req.instruction)
+    return {"status": "ok", "override": req.instruction}
 
 
 @app.get("/api/agent/status")
@@ -175,6 +197,7 @@ def get_agent_status():
         "agent_status": _agent_status,
         "run_id": _active_run_id,
         "active_run_id": _active_run_id,  # Legacy
+        "liveness_active": _liveness.is_active,
         "browser": {
             "active": _agent_status == "running",
             "mode": "cdp",
@@ -193,6 +216,7 @@ def cancel_agent(run_id: str = ""):
     if _agent_runner:
         _agent_runner.cancel()
     _agent_status = "cancelled"
+    _liveness.disable_liveness()
     if _active_run_id:
         _save_run_history(_active_run_id, "Cancelled", False, "Cancelled by user")
     _log("⚠️ Agent run cancelled.")

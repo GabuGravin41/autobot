@@ -59,7 +59,15 @@ class AgentRunner:
     def from_env(cls, log_callback: Callable[[str], None] | None = None) -> "AgentRunner":
         """Create runner from environment variables."""
         llm_client = _create_llm_client()
-        model = os.getenv("AUTOBOT_LLM_MODEL", "gpt-4o")
+        provider = os.getenv("AUTOBOT_LLM_PROVIDER", "").lower()
+        has_gemini = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+        if provider == "gemini" or (has_gemini and not os.getenv("OPENROUTER_API_KEY")):
+            default_model = "gemini-1.5-flash"
+        else:
+            default_model = "gpt-4o"
+
+        model = os.getenv("AUTOBOT_LLM_MODEL") or default_model
 
         return cls(
             llm_client=llm_client,
@@ -181,6 +189,12 @@ class AgentRunner:
             self._agent_loop.max_steps = 0
         self.log("⚠️ Task cancelled")
 
+    def push_override(self, new_instruction: str) -> None:
+        """Push mid-flight intervention to active agent loop."""
+        if self._agent_loop:
+            self._agent_loop.push_override(new_instruction)
+            self.log(f"⚡ Mid-flight pivot pushed: {new_instruction}")
+
     def get_status(self) -> dict[str, Any]:
         """Get current runner status for the dashboard API."""
         return {
@@ -224,12 +238,27 @@ def _create_llm_client() -> Any | None:
             return None
         return OpenAI(api_key=api_key)
 
+    elif provider == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return None
+        return OpenAI(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=api_key,
+        )
+
     else:
-        # Try OpenRouter first, then OpenAI
+        # Fallback priority: OpenRouter -> Gemini (Google AI Studio) -> OpenAI
         api_key = os.getenv("OPENROUTER_API_KEY")
         if api_key:
             return OpenAI(
                 base_url="https://openrouter.ai/api/v1",
+                api_key=api_key,
+            )
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if api_key:
+            return OpenAI(
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
                 api_key=api_key,
             )
         api_key = os.getenv("OPENAI_API_KEY")

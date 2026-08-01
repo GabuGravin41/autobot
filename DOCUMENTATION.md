@@ -6,10 +6,11 @@ Welcome to the **Autobot** mission control. This project is not just a collectio
 
 ## 🎯 The Vision
 Most automation today is "brittle." It breaks when a button moves 5 pixels. It fails when it hits a login screen. Our vision is to create an agent that **thinks before it clicks**:
-- **Human-Parallelism:** Navigating using a real Chrome profile with real cookies and real passwords.
-- **Visual Intelligence:** Using `browser_snapshot` to "see" the UI tree and `screenshot` to verify actions.
-- **Multi-Phase Planning:** Breaking complex goals (like entering a Kaggle competition) into 30+ granular, verifiable steps.
+- **Human-Parallelism:** Navigating using real Chrome profiles (`Default` = `daltonomondi588@gmail.com`) with authentic sessions.
+- **Visual Intelligence:** Using screenshots on every step to perceive visual truth and eliminate blind navigation.
+- **Tool Synergy:** Combining DOM tools, visual perception, and OS desktop controls (mouse/keyboard).
 - **Local Sovereignty:** Running entirely on your machine, with your data, using your tools.
+- **Core Design Philosophy:** See [DESIGN_PHILOSOPHY.md](file:///c:/Users/User%201/OneDrive/Desktop/projects/django%20projects/personal%20projects/autobot/DESIGN_PHILOSOPHY.md) for full architectural guidelines.
 
 ---
 

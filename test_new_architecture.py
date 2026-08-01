@@ -27,10 +27,12 @@ async def test_layer_1_imports():
         ("autobot.dom.models", "DOMElementNode, SelectorMap, BrowserState"),
         ("autobot.dom.extraction", "DOMExtractionService"),
         ("autobot.prompts.builder", "SystemPromptBuilder, StepPromptBuilder"),
-        ("autobot.agent.models", "AgentOutput, ActionModel, ActionResult"),
+        ("autobot.agent.models", "AgentOutput, ActionModel, ActionResult, RunCommandAction, RequestHumanInputAction"),
         ("autobot.agent.loop", "AgentLoop"),
         ("autobot.agent.runner", "AgentRunner"),
         ("autobot.computer.computer", "Computer"),
+        ("autobot.computer.liveness", "SystemLivenessManager"),
+        ("autobot.agent.whatsapp_listener", "WhatsAppListener"),
         ("autobot.browser.launcher", "AsyncBrowserLauncher"),
     ]
 
@@ -191,6 +193,8 @@ async def test_layer_4_agent_step(page):
 
 
 async def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     print("🤖 Autobot New Architecture — End-to-End Tests")
     print("=" * 60)
 
