@@ -124,6 +124,14 @@ class AgentOverrideRequest(BaseModel):
     instruction: str
 
 
+class AgentMessageRequest(BaseModel):
+    text: str
+
+
+class AntiSleepRequest(BaseModel):
+    enabled: bool
+
+
 class ApprovalResponse(BaseModel):
     key: str
     response: str  # "allow" | "block"
@@ -200,6 +208,30 @@ def push_agent_override(req: AgentOverrideRequest):
 
     _agent_runner.push_override(req.instruction)
     return {"status": "ok", "override": req.instruction}
+
+
+@app.post("/api/agent/message")
+def send_agent_message(req: AgentMessageRequest):
+    """
+    Inject a human message into the running agent's next step.
+
+    apiService.ts's own docstring for this claims it "works whether the
+    agent is running or paused (also auto-resumes if paused)". No such
+    single-agent pause/resume exists — AgentLoop only has cancel — so this
+    implements the running-agent case faithfully via the SAME mechanism as
+    /api/agent/override (AgentLoop.push_override(), already proven to work:
+    _execute_step folds it into the goal before the next LLM call) rather
+    than human_gate.inject_user_message()/pop_user_messages(), which despite
+    existing and looking purpose-built for this, is never actually consumed
+    anywhere in AgentLoop — wiring a route to it would have created a new
+    "looks fixed, silently does nothing" bug of exactly the kind this
+    project has had repeatedly.
+    """
+    if _agent_status != "running" or not _agent_runner:
+        raise HTTPException(status_code=400, detail="No active agent run to message.")
+
+    _agent_runner.push_override(req.text)
+    return {"status": "ok", "text": req.text}
 
 
 @app.get("/api/agent/status")
@@ -716,6 +748,23 @@ def get_schedule_status_route():
 def get_screen_lock_status_route():
     from ..agent.resource_manager import screen_lock
     return screen_lock.get_status()
+
+
+@app.post("/api/utils/anti-sleep")
+def set_anti_sleep(req: AntiSleepRequest):
+    """Toggle the background mouse-nudge that keeps the machine from sleeping.
+
+    Uses the module-level `anti_sleep` singleton directly (not a full
+    Computer() instance, which exists per-AgentLoop, not as a standalone
+    service the web layer can reach) — the same singleton
+    computer.get_tool_catalog() advertises to the LLM as `computer.anti_sleep`.
+    """
+    from ..computer.anti_sleep import anti_sleep
+    if req.enabled:
+        anti_sleep.start()
+    else:
+        anti_sleep.stop()
+    return {"status": "ok", "enabled": req.enabled}
 
 
 _frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
