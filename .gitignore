@@ -68,3 +68,6 @@ openclaw_src/
 *.sqlite
 *.png
 
+
+# uiautomation debug log (written into CWD as a side effect)
+@AutomationLog.txt
