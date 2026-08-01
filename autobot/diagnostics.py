@@ -198,6 +198,25 @@ def check_llm_config() -> list[Check]:
         names = ", ".join(k for k, _ in present)
         checks.append(Check("LLM API key", OK, f"set: {names}"))
 
+    # ANTHROPIC_API_KEY alone does not mean Claude will actually work: the
+    # native adapter (agent/anthropic_adapter.py) does `import anthropic`
+    # lazily, inside AnthropicOpenAIAdapter.__init__ — if that package isn't
+    # installed, get_anthropic_llm_client() catches the ImportError and
+    # returns None. Without this check, --doctor reports "LLM API key: OK"
+    # while the very first real run fails with "No LLM API key configured",
+    # which is actively misleading about what's actually wrong.
+    if os.getenv("ANTHROPIC_API_KEY"):
+        if _module_present("anthropic"):
+            checks.append(Check("package: anthropic", OK))
+        else:
+            checks.append(Check(
+                "package: anthropic", FAIL,
+                "ANTHROPIC_API_KEY is set, but the 'anthropic' package isn't installed — "
+                "the adapter will silently fail and Autobot will report "
+                '"No LLM API key configured", which is misleading about the real cause',
+                "pip install anthropic",
+            ))
+
     configured = os.getenv("AUTOBOT_LLM_PROVIDER", "(auto-detect)")
     model = os.getenv("AUTOBOT_LLM_MODEL", "(provider default)")
     checks.append(Check("LLM provider / model", OK, f"provider={configured}  model={model}"))

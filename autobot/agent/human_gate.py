@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,19 @@ async def wait_for_approval(
     _messages[key] = message
     logger.info(f"[HumanGate] Waiting for approval: {key} — {message[:100]}")
 
+    # Also offer a terminal prompt when stdin looks interactive. Without this,
+    # a run started via `autobot.cli "..."` — which never starts the FastAPI
+    # dashboard — has NO caller of respond() at all: the dashboard's
+    # POST /api/human_input/respond is the only other one, and it only exists
+    # under `autobot --server`. Every gated action in a plain CLI run would
+    # silently wait out the full timeout and auto-block, with genuinely no
+    # way to approve anything, however badly the user wanted to. isatty()
+    # correctly stays False under non-interactive contexts (subprocess with
+    # captured stdin, CI, tests), so this never adds a hang risk there.
+    terminal_task: asyncio.Task | None = None
+    if sys.stdin.isatty():
+        terminal_task = asyncio.create_task(_offer_terminal_prompt(key, message))
+
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
         response = _responses.get(key, "block")
@@ -103,9 +117,57 @@ async def wait_for_approval(
         logger.warning(f"[HumanGate] {key} timed out after {timeout}s — defaulting to block")
         return False
     finally:
+        if terminal_task is not None:
+            terminal_task.cancel()
         _events.pop(key, None)
         _responses.pop(key, None)
         _messages.pop(key, None)
+
+
+async def _offer_terminal_prompt(key: str, message: str) -> None:
+    """Block on a y/n terminal prompt in a worker thread, then respond().
+
+    Races safely against a dashboard approval of the same key: whichever
+    answers first wins, since respond() no-ops once wait_for_approval's
+    finally block has already popped the key from _events. Never raises —
+    any input error is treated as 'block', matching this project's
+    fail-closed default for everything approval-related.
+
+    Caveat, accepted deliberately: cancelling this task (because the
+    dashboard answered first) cannot interrupt an in-flight blocking
+    input() call — the underlying thread keeps waiting for a keypress. If
+    the user then types an answer to a prompt that's already been resolved,
+    respond() harmlessly discards it. A stray waiting thread is a fair
+    trade against building a second, more complex non-blocking stdin reader
+    for what should be a rare race in a single-user CLI tool.
+    """
+    def _ask() -> str:
+        try:
+            # `message` is built from goal text and action content — it can
+            # legitimately contain non-ASCII (research goals in other
+            # languages, LaTeX/math symbols) that a plain Windows console
+            # (cp1252) can't encode. A raw print() of it would raise
+            # UnicodeEncodeError inside this bare except-and-block, silently
+            # masking a real approval prompt as an auto-block with no visible
+            # error — confirmed live with a much simpler case: this prompt's
+            # own banner originally used '⛔' and failed exactly this way
+            # before the character was even user content. Encode defensively
+            # so content we don't control can't take down the prompt too.
+            safe_message = message.encode(
+                sys.stdout.encoding or "utf-8", errors="replace"
+            ).decode(sys.stdout.encoding or "utf-8")
+            print("\n" + "=" * 60 + "\n[APPROVAL NEEDED]\n" + safe_message + "\n" + "=" * 60)
+            resp = input("Allow this action? [y/N]: ").strip().lower()
+            return "allow" if resp in ("y", "yes") else "block"
+        except Exception as e:
+            logger.warning(f"[HumanGate] Terminal prompt failed, defaulting to block: {e}")
+            return "block"
+
+    try:
+        answer = await asyncio.to_thread(_ask)
+        respond(key, answer)
+    except asyncio.CancelledError:
+        pass
 
 
 def respond(key: str, response: str) -> bool:

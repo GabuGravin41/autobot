@@ -7,6 +7,10 @@ python-dotenv>=1.0.0
 # ── LLM providers ────────────────────────────────────────────────
 openai>=1.0.0               # OpenAI + OpenRouter + xAI (all openai-compat)
 google-generativeai>=0.8.0  # Google Gemini direct API
+anthropic>=0.39.0           # Native Claude API, wrapped by agent/anthropic_adapter.py.
+                             # Without this installed, ANTHROPIC_API_KEY silently fails
+                             # at first LLM call — the adapter catches ImportError and
+                             # returns None, so add a --doctor check too, not just this.
 
 # ── Observability ────────────────────────────────────────────────
 agentops>=0.4.0             # Agent session tracking, LLM cost analysis & replay (app.agentops.ai)

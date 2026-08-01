@@ -127,7 +127,10 @@ class AgentRunner:
                 self.llm_client = _create_llm_client()
                 if self.llm_client is None:
                     raise RuntimeError(
-                        "No LLM API key configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
+                        "No usable LLM client. Either no API key is set (ANTHROPIC_API_KEY, "
+                        "OPENROUTER_API_KEY, or OPENAI_API_KEY in .env), or ANTHROPIC_API_KEY "
+                        "is set but the 'anthropic' package isn't installed (pip install anthropic). "
+                        "Run 'autobot --doctor' to see which."
                     )
 
             # 3. Route by complexity. A goal like "open Chrome, hold a 6-turn
@@ -147,17 +150,41 @@ class AgentRunner:
             else:
                 loop_result, history_summary = await self._run_single_loop(page, goal, steps)
 
-            # 4. Evaluate with Judge Agent
-            self.log("⚖️ Judge Agent evaluating outcome...")
-            from autobot.agent.judge import JudgeAgent
-            judge = JudgeAgent(llm_client=self.llm_client, model=self.model)
+            # 4. Evaluate outcome — either a real Judge LLM call, or, if the
+            # user has opted out of the extra API cost, a free heuristic
+            # using signals already computed by the run itself.
+            #
+            # The Judge is a genuinely SEPARATE LLM call on every single run
+            # — it roughly doubles token spend for the "was this actually
+            # correct" check, on top of whatever the task itself cost. That's
+            # worth paying for by default (it catches an agent that
+            # confidently believed it succeeded when it didn't), but it
+            # shouldn't be mandatory: AUTOBOT_VISION_MODE and
+            # AUTOBOT_APPROVAL_MODE already establish this project's pattern
+            # of cost/behavior knobs, and this is the same category.
+            if os.getenv("AUTOBOT_SKIP_JUDGE", "").lower() in ("1", "true", "yes"):
+                self.log("⚖️ Judge Agent skipped (AUTOBOT_SKIP_JUDGE) — using the run's own success signal")
+                judge_success = (
+                    self._agent_loop.last_done_success if self._agent_loop is not None
+                    else loop_result.startswith("Mission Success!")
+                )
+                from autobot.agent.judge import JudgeOutput
+                judge_output = JudgeOutput(
+                    success=judge_success,
+                    reasoning="Judge LLM call skipped (AUTOBOT_SKIP_JUDGE); "
+                              "verdict is the run's own done(success=...) signal, unverified by a second model.",
+                )
+            else:
+                self.log("⚖️ Judge Agent evaluating outcome...")
+                from autobot.agent.judge import JudgeAgent
+                judge = JudgeAgent(llm_client=self.llm_client, model=self.model)
 
-            judge_output = await judge.evaluate(
-                goal=goal,
-                result_text=loop_result,
-                history_summary=history_summary
-            )
-            
+                judge_output = await judge.evaluate(
+                    goal=goal,
+                    result_text=loop_result,
+                    history_summary=history_summary
+                )
+
             if judge_output.success:
                 self.log(f"🏆 Judge confirmed success: {judge_output.reasoning}")
                 self.status = "done"

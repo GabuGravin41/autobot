@@ -160,6 +160,116 @@ actually working (not just present).
   interception) — and if all fail, reports every method tried plus an
   explicit "do NOT retry this same click" with likely causes.
 
+### Round 4 — paranoid static audit (no live LLM/browser access this pass)
+
+No network access to openrouter.ai was available during this pass, so
+nothing here was verified by a live agent run — everything below is either
+(a) proven by direct execution of the affected code in isolation (the vault
+key derivation, the anti_sleep dispatch fix, the offline test suites), or
+(b) proven by tracing real import/call graphs with Grep across the whole
+tree, never by reading a docstring and assuming it's accurate. Where a claim
+below is a call-graph trace rather than an execution, it says so.
+
+**Security fixes (all confirmed by direct execution, not just reading):**
+- **`computer/vault.py` — every Windows install shared the same encryption
+  key.** `_derive_key()` had a Linux branch and a macOS branch but no
+  Windows branch, and read the POSIX-only `USER` env var (Windows uses
+  `USERNAME`). Result: on Windows — the only platform this project actually
+  ships to — `machine_id` was always empty and every install derived the
+  identical hardcoded seed, so a copied `vault.json` could be decrypted on
+  any other Windows machine with no access to the original required. Fixed
+  with a real Windows machine ID (registry `MachineGuid`) plus, more
+  importantly, a random 32-byte salt generated once and persisted
+  per-install — the salt is what actually provides security regardless of
+  whether any future platform's machine-ID lookup breaks again. **Breaking
+  change**: any vault entries stored before this fix will not decrypt with
+  the new key. Given the vault feature has no confirmed live use yet, this
+  was judged worth it over preserving a predictable key.
+- **`computer/clipboard.py` — PowerShell command injection.** The Windows
+  fallback built `Set-Clipboard -Value '{text}'` by string interpolation.
+  Any text containing a single quote — trivially reachable via
+  `clipboard.copy()` on scraped web content — broke out of the quoted
+  literal and executed arbitrary PowerShell. Fixed by passing text through
+  an environment variable (`$env:X` is a data reference, never re-parsed as
+  code) instead of ever interpolating it into the command string.
+- **`web/app.py` `GET /api/run/{run_id}` — path traversal.** `run_id` from
+  the URL was joined directly into a filesystem path with no containment
+  check. Fixed: both paths are resolved and the result must stay under
+  `runs_root`.
+- **`web/app.py` `POST /api/agent/run` — TOCTOU race on module globals.**
+  The "not already running" check and the writes that followed it were not
+  atomic; two near-simultaneous requests could both pass the check, and the
+  second silently overwrote `_agent_runner`, orphaning the first run with no
+  way to cancel or query it. Fixed with a lock around the whole
+  check-and-set.
+- **`web/app.py` `POST /api/chat` — SUSPECTED still a stub** (found by a
+  sub-agent, not yet independently re-verified line-by-line): always
+  returns the same canned reply regardless of `req.message`, never touching
+  the LLM, `TaskClassifier`, or `MissionAgent`. Same category as the
+  `/api/human_input` bug fixed earlier — worth fixing before anything is
+  built assuming this endpoint is real.
+
+**Correctness fixes:**
+- **`computer/computer.py` `get_tool_catalog()` derived each tool's
+  dispatchable name from `tool.__class__.__name__.lower()` instead of its
+  real attribute name.** This happened to match for most tools (`Mouse` ->
+  `mouse`) but not `anti_sleep` (an `AntiSleepManager` instance), so the
+  catalog advertised `computer.antisleepmanager.start()` — a name
+  `dispatch.py`'s `getattr(computer, ...)` can never resolve. The entire
+  anti-sleep feature (the background mouse-mover that keeps a long run's
+  machine awake) was unreachable from any LLM-emitted call. Fixed generally
+  — catalog names now come from the real attribute, so this class of bug is
+  structurally impossible for any future tool, not just patched for this
+  one. Verified end-to-end via the dispatcher, not just read.
+- **`dom/native_extraction.py`** had two bare `except:` clauses during UIA
+  tree traversal, which also swallow `KeyboardInterrupt`/`SystemExit` —
+  meaning Ctrl+C during a slow native-window extraction would silently do
+  nothing. Narrowed to `except Exception:`.
+- **`run_grok_research_benchmark.py`** had a `\d` in a non-raw string
+  (`SyntaxWarning`, harmless today but silences a real signal for the next
+  actual bug of this kind).
+
+**Major finding — a second orphaned-code layer, confirmed by import-graph
+tracing (Grep for real `from ... import` statements, not just filename
+mentions):**
+
+The `MissionAgent`/`Orchestrator`/`ApprovalGuard`/`save_skill` orphaning
+found in earlier rounds was not the whole picture. Confirmed **zero external
+importers** for:
+- **The entire `learning/` package** — `rl_controller.py`, `policy_memory.py`,
+  `reward_computer.py`, `lesson_extractor.py`, `experience_store.py`. An
+  apparently complete RL training pipeline (git history: "add RL pipeline,
+  multi-agent orchestration, and adaptive waiting") that nothing in
+  `agent/loop.py`, `agent/runner.py`, or anywhere else ever calls.
+- **`agent/scheduler.py`'s `TaskScheduler`** — 486 lines, a real
+  multi-task concurrent scheduler with priority queueing, a concurrency
+  limit, and its own `AgentRunner` integration. It correctly imports and
+  uses `agent/resource_manager.py`'s `ScreenLock` for time-slicing screen
+  access between concurrent tasks — internally coherent — but nothing in
+  `web/app.py` or `cli.py` ever imports `scheduler.py` itself, so none of
+  this runs.
+- **`agent/resource_manager.py`'s `ScreenLock`** — used only by the orphaned
+  scheduler above; transitively unreachable.
+- **`agent/orchestrator.py`'s `Orchestrator` class** (distinct from its
+  `TaskClassifier`, which — see Round 3 — genuinely is wired into
+  `AgentRunner.run()` now). `Orchestrator` itself, with its task
+  decomposition and parallel sub-agent execution, is still never
+  instantiated anywhere.
+- **`agent/message_bus.py`** — used only by the orphaned `Orchestrator`;
+  transitively unreachable.
+- **`agent/evaluator.py`'s `EvaluationAgent`**, **`agent/planner.py`'s
+  `ComplexityEstimator`**, **`agent/diagnostician.py`'s
+  `TerminalStderrDiagnostician`**, **`agent/whatsapp_listener.py`'s
+  `WhatsAppListener`** — each fully self-contained, each with zero external
+  importers.
+
+Not fixed this pass, and deliberately so: wiring any of these in is a real
+design decision (should the RL pipeline actually train on live run data?
+should the scheduler replace or sit alongside `AgentRunner`?) that
+shouldn't be made unilaterally with zero live-run verification available.
+Recorded here so it's a decision made on purpose next time, not
+rediscovered by surprise a third time.
+
 ## Verification standard
 
 Everything above marked "done and tested" has behavioral tests that

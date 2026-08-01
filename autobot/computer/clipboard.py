@@ -204,9 +204,21 @@ class Clipboard:
                 proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
                 proc.communicate(text.encode())
             else:  # Windows
+                # Text must NEVER be interpolated into the PowerShell command
+                # string. The prior version did exactly that
+                # (f"Set-Clipboard -Value '{text}'"), so any text containing a
+                # single quote — trivially reachable via clipboard.copy() on
+                # scraped web content or LLM-composed text — breaks out of the
+                # quoted literal and executes arbitrary PowerShell. Passed via
+                # an environment variable instead: $env:X is a data reference
+                # to PowerShell, never re-parsed as code, so no value of text
+                # can escape it.
+                import os
+                env = {**os.environ, "AUTOBOT_CLIPBOARD_TEXT": text}
                 subprocess.run(
-                    ["powershell", "-command", f"Set-Clipboard -Value '{text}'"],
-                    capture_output=True, timeout=2,
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                     "Set-Clipboard -Value $env:AUTOBOT_CLIPBOARD_TEXT"],
+                    capture_output=True, timeout=5, env=env,
                 )
         except Exception as e:
             logger.warning(f"Clipboard fallback set failed: {e}")

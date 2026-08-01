@@ -97,6 +97,7 @@ nine-phase benchmark tells you almost nothing by comparison.
 | `AUTOBOT_VISION_MODE` | `always` / `auto` / `never` | `auto` (default) sends a screenshot only on the first step, when the DOM is too sparse to act on, or after a failed action. `always` is the old behaviour and costs roughly 1-2k extra tokens *per step*. `never` is text-only and cheapest, but blind to canvas/image-only UIs. |
 | `AUTOBOT_APPROVAL_MODE` | `strict` / `balanced` / `trusted` | How often the agent pauses for permission. IRREVERSIBLE actions (deletion, payments, credentials, sending under your identity) always pause, in every mode. |
 | `AUTOBOT_STEPS_PER_OBJECTIVE` | integer | Step budget per mission objective. |
+| `AUTOBOT_SKIP_JUDGE` | `1` to enable | Skips the Judge Agent's separate LLM call at the end of every run (it roughly doubles token spend on top of the task itself). Falls back to the run's own `done(success=...)` signal — a real cost/rigor tradeoff, not free: the Judge exists specifically to catch an agent that confidently believed it succeeded when it didn't. |
 
 The largest saving isn't a setting: repeated tasks get distilled into
 **learned skills** (`autobot/knowledge/skills/`) and replayed instead of

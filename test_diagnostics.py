@@ -73,6 +73,23 @@ finally:
           d.check_approval_mode().detail)
     del os.environ["AUTOBOT_APPROVAL_MODE"]
 
+# ---- ANTHROPIC_API_KEY set but the 'anthropic' package missing -> FAIL,
+# not a silent "OK" that only breaks at the first real run ----
+os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-value"
+try:
+    anth_checks = d.check_llm_config()
+    pkg_check = next((c for c in anth_checks if c.name == "package: anthropic"), None)
+    check("anthropic key without package triggers a check", pkg_check is not None)
+    # This environment has no network access to install `anthropic`, so this
+    # assertion is itself proof the check fires correctly when the package
+    # really is missing - not a mock.
+    if pkg_check is not None:
+        check("missing anthropic package reported as FAIL, not silent OK",
+              pkg_check.status == d.FAIL, pkg_check.detail)
+        check("that FAIL still has an actionable fix", bool(pkg_check.fix))
+finally:
+    del os.environ["ANTHROPIC_API_KEY"]
+
 # ---- exit code contract: nonzero only when something is blocking ----
 code = d.report(checks)
 has_fail = any(c.status == d.FAIL for c in checks)

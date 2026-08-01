@@ -150,6 +150,22 @@ class AgentLoop:
         self.system_prompt = self.system_prompt_builder.build()
         self.pending_override: str | None = None
 
+    @property
+    def last_done_success(self) -> bool:
+        """Whether the run ended via an explicit done(success=True).
+
+        Reliable across all three ways a run can end, because the underlying
+        flag defaults to False at construction and is only ever set True by
+        an explicit done(success=True) call:
+          - Agent called done()          -> reflects what the LLM set
+          - Agent hit max_steps          -> stays False (done() never called)
+          - AgentLoop.run() raised       -> stays False (done() never called)
+        This is the signal MissionAgent uses to decide per-objective
+        success — see its docstring for why that matters more than it might
+        look like from one property.
+        """
+        return self._last_done_success
+
     def push_override(self, new_instruction: str) -> None:
         """Mid-flight intervention: update goal or inject instruction from remote human input."""
         logger.info(f"🔄 Mid-flight override received: '{new_instruction}'")
@@ -754,7 +770,9 @@ class AgentLoop:
             )
 
         try:
-            result_text = await asyncio.to_thread(self.computer.browser.click_element, index)
+            result_text = await asyncio.to_thread(
+                self.computer.browser.click_element, index, browser_state.url
+            )
         except Exception as e:
             result_text = f"error: {e}"
 
@@ -793,9 +811,11 @@ class AgentLoop:
         # Rung 1: scroll it into view, then click again. Handles elements that
         # resolve fine but sit outside the current viewport.
         try:
-            await asyncio.to_thread(self.computer.browser.scroll_to, index)
+            await asyncio.to_thread(self.computer.browser.scroll_to, index, browser_state.url)
             await asyncio.sleep(0.3)
-            retry = await asyncio.to_thread(self.computer.browser.click_element, index)
+            retry = await asyncio.to_thread(
+                self.computer.browser.click_element, index, browser_state.url
+            )
             if retry.startswith("clicked "):
                 logger.info(f"Clicked [{index}] after scrolling into view")
                 await asyncio.sleep(0.5)
@@ -813,7 +833,9 @@ class AgentLoop:
         # the fix when the correct element is found but a transparent overlay,
         # cookie banner, or sticky header is intercepting the real click.
         try:
-            js_result = await asyncio.to_thread(self.computer.browser.click_via_js, index)
+            js_result = await asyncio.to_thread(
+                self.computer.browser.click_via_js, index, browser_state.url
+            )
             if js_result.startswith("js-clicked "):
                 logger.info(f"Clicked [{index}] via JS fallback (something was intercepting)")
                 await asyncio.sleep(0.5)
@@ -859,7 +881,9 @@ class AgentLoop:
             )
 
         try:
-            result_text = await asyncio.to_thread(self.computer.browser.fill, index, input_action.text)
+            result_text = await asyncio.to_thread(
+                self.computer.browser.fill, index, input_action.text, browser_state.url
+            )
         except Exception as e:
             return ActionResult(action_name="input_text", success=False, error=f"Input to [{index}] failed: {e}")
 

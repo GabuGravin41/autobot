@@ -83,24 +83,28 @@ class Computer:
         if HAS_NATIVE_UI and Window is not None:
             self.window = Window(self.mouse, self.keyboard)
 
-    def _get_all_tools(self) -> list[Any]:
-        """Get all tool submodules."""
-        tools = [
-            self.mouse,
-            self.keyboard,
-            self.display,
-            self.clipboard,
-            self.browser,
-            self.files,
-            self.terminal,
-            self.vault,
-            self.kaggle,
-            self.research,
-            self.anti_sleep,
-        ]
-        if hasattr(self, 'window'):
-            tools.append(self.window)
-        return tools
+    def _get_all_tools(self) -> list[tuple[str, Any]]:
+        """Get all tool submodules paired with the ATTRIBUTE NAME they're
+        actually reachable under (computer.<name>), not their class name.
+
+        This distinction matters: get_tool_catalog() used to derive the
+        dispatchable name from `tool.__class__.__name__.lower()`. For most
+        tools that coincidentally matches (Mouse -> "mouse"), but
+        `self.anti_sleep = anti_sleep` is an AntiSleepManager instance, so the
+        catalog advertised `computer.antisleepmanager.start(...)` — a name
+        dispatch.py's `getattr(computer, "antisleepmanager")` can never
+        resolve, since no such attribute exists. The whole feature (the
+        background mouse-mover that keeps the machine from sleeping mid-run)
+        was consequently unreachable from any LLM-emitted call. Returning the
+        real attribute name here, and using it directly in get_tool_catalog(),
+        makes catalog names and dispatch resolution structurally unable to
+        diverge again for any future tool.
+        """
+        names = ["mouse", "keyboard", "display", "clipboard", "browser",
+                 "files", "terminal", "vault", "kaggle", "research", "anti_sleep"]
+        if hasattr(self, "window"):
+            names.append("window")
+        return [(name, getattr(self, name)) for name in names]
 
     def get_tool_catalog(self) -> str:
         """
@@ -120,8 +124,7 @@ class Computer:
         lines.append("These tools control the physical computer — use for OS-level tasks outside the browser.")
         lines.append("")
 
-        for tool in self._get_all_tools():
-            tool_name = tool.__class__.__name__.lower()
+        for tool_name, tool in self._get_all_tools():
             tool_methods = self._extract_methods(tool, tool_name)
             for method_info in tool_methods:
                 lines.append(
