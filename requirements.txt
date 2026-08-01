@@ -34,7 +34,11 @@ cryptography>=41.0.0        # Fernet encryption for ~/.autobot/vault.json
 kaggle>=1.6.0
 
 # ── Windows UI automation (Windows only, skipped on Linux/macOS) ─
-# uiautomation>=2.0.29  # Uncomment on Windows only
+# Required for controlling NATIVE desktop apps (Artemis, VESTA, Excel, DICOM
+# viewers). Without it Autobot still drives the browser and raw mouse/keyboard,
+# but is blind to native window contents. The environment marker installs it
+# only on Windows, so this line is safe on Linux/macOS too.
+uiautomation>=2.0.29; sys_platform == "win32"
 
 # ── Numeric / ML ─────────────────────────────────────────────────
 numpy>=1.24.0,<2.0.0        # numpy 2.x has breaking changes with some deps

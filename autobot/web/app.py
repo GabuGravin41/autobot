@@ -110,6 +110,11 @@ class AgentOverrideRequest(BaseModel):
     instruction: str
 
 
+class ApprovalResponse(BaseModel):
+    key: str
+    response: str  # "allow" | "block"
+
+
 class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
@@ -415,8 +420,39 @@ def stub_workflows(): return {"workflows": []}
 @app.get("/api/adapters")
 def stub_adapters(): return {"adapters": []}
 
+
 @app.get("/api/human_input")
-def stub_human_input(): return {"pending": False}
+def get_human_input():
+    """
+    Poll for a pending approval request (ApprovalGuard IRREVERSIBLE/DANGER
+    actions, or an explicit request_human_input action). The dashboard —
+    including from a phone — polls this to know when the agent is paused
+    waiting on you.
+
+    Previously hardcoded to always return {"pending": False}, which meant
+    an IRREVERSIBLE-tier action would register a real approval request via
+    human_gate.wait_for_approval() but the frontend could never see it —
+    it would just silently time out and auto-block after 5 minutes with no
+    way to actually click Allow.
+    """
+    from ..agent.human_gate import get_pending
+    pending = get_pending()
+    if not pending:
+        return {"pending": False}
+    return {"pending": True, "key": pending["key"], "message": pending["message"]}
+
+
+@app.post("/api/human_input/respond")
+def respond_human_input(req: ApprovalResponse):
+    """Allow or block a pending approval request (see get_human_input above)."""
+    from ..agent.human_gate import respond
+    if req.response not in ("allow", "block"):
+        raise HTTPException(status_code=400, detail="response must be 'allow' or 'block'")
+    ok = respond(req.key, req.response)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No pending approval with key '{req.key}'")
+    _log(f"{'✅ Allowed' if req.response == 'allow' else '🚫 Blocked'} pending action ({req.key})")
+    return {"status": "ok", "key": req.key, "response": req.response}
 
 @app.get("/api/logs")
 def get_logs(limit: int = 500):

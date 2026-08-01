@@ -83,6 +83,7 @@ class StepPromptBuilder:
         agent_history: str | None = None,
         environment_summary: str | None = None,
         learned_skill_context: str | None = None,
+        native_window_context: str | None = None,
     ):
         self.browser_state = browser_state
         self.task = task
@@ -91,6 +92,7 @@ class StepPromptBuilder:
         self.agent_history = agent_history
         self.environment_summary = environment_summary
         self.learned_skill_context = learned_skill_context
+        self.native_window_context = native_window_context
 
     def build_text(self) -> str:
         """
@@ -122,6 +124,15 @@ class StepPromptBuilder:
         # 4. Browser state
         browser_state_text = self._build_browser_state()
         parts.append(f"<browser_state>\n{browser_state_text}\n</browser_state>")
+
+        # 5. Native window state — present only when a desktop app (not the
+        # browser) has focus. Placed last so it's the most recent thing the
+        # model reads before deciding, since when it IS present it describes
+        # what's actually on screen and the browser state above does not.
+        if self.native_window_context:
+            parts.append(
+                f"<native_window_state>\n{self.native_window_context}\n</native_window_state>"
+            )
 
         return "\n\n".join(parts)
 

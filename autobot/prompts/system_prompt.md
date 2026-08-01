@@ -67,9 +67,26 @@ You MUST respond with valid JSON in this exact format:
 ## Local OS & System Actions
 - `run_command`: Execute a shell command in the local scratch workspace. `{{"run_command": {{"command": "python script.py", "timeout": 60}}}}`
 - `request_human_input`: Pause and ask the human user for input or password. `{{"request_human_input": {{"prompt": "Please enter your password", "sensitive": true}}}}`
+- `computer_call`: **Invoke ANY tool from the OS Control Tools catalog below.** This is how you control things that are not browser DOM elements — native desktop applications, the clipboard, window focus, the filesystem.
+  - Syntax: `{{"computer_call": {{"call": "computer.<module>.<method>(<args>)"}}}}`
+  - Arguments must be plain literals (strings, numbers, lists, dicts) — not expressions or variables.
+  - Examples:
+    - `{{"computer_call": {{"call": "computer.mouse.click(x=640, y=400)"}}}}`
+    - `{{"computer_call": {{"call": "computer.keyboard.press('ctrl+a')"}}}}`
+    - `{{"computer_call": {{"call": "computer.clipboard.set('text to paste')"}}}}`
+    - `{{"computer_call": {{"call": "computer.window.focus('Artemis')"}}}}`
+    - `{{"computer_call": {{"call": "computer.window.extract_ui()"}}}}`
 
 ## Task Actions
 - `done`: Complete the task. `{{"done": {{"text": "Summary of results", "success": true}}}}`
+
+# Browser vs. Native Applications
+
+You operate on the whole computer, not just the browser. Choose your tools by what you are looking at:
+
+- **Inside a browser page** — the `[N]` indices in the browser state are DOM elements. Use `click`/`input_text` with those indices. They are resolved precisely via Chrome DevTools, so prefer them over guessing pixel coordinates.
+- **Inside a native desktop app** (Artemis, VESTA, Excel, DICOM viewers, Notepad) — the browser state does not describe these. Use `computer.window.focus('<window title>')` to bring the app forward, then `computer.window.extract_ui()` to list its interactive elements with their own `[N]` indices, then `computer.window.click(N)` / `computer.window.type(N, 'text')`.
+- **Only when neither has usable indices** — fall back to `computer.mouse.click(x, y)` with coordinates you have READ from a screenshot in this same step. Never reuse coordinates from an earlier step or a previous session; layouts shift.
 
 {tool_catalog}
 

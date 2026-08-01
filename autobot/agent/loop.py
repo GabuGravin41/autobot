@@ -24,12 +24,14 @@ import logging
 import time
 from typing import Any
 
+from autobot.agent.approval import ApprovalGuard, RiskTier
 from autobot.agent.models import (
     ActionModel,
     ActionResult,
     AgentOutput,
     AgentStepInfo,
     ClickAction,
+    ComputerCallAction,
     DoneAction,
     InputTextAction,
     NavigateAction,
@@ -92,11 +94,14 @@ class AgentLoop:
         self.step_number = 0
         self.history: list[StepHistoryEntry] = []
         self.previous_dom_state: DOMSerializedState | None = None
+        # Whether the agent's done() reported success — gates skill distillation.
+        self._last_done_success = False
 
         # Computer API for OS-level tools
         self.computer = Computer()
         self.env_memory = EnvironmentMemory()
         self.skill_distiller = SkillDistiller()
+        self.approval_guard = ApprovalGuard()
 
         # Build system prompt
         tool_catalog = self.computer.get_tool_catalog()
@@ -129,6 +134,7 @@ class AgentLoop:
                 if result is not None:
                     # Agent called "done" — task is complete
                     logger.info(f"✅ Agent finished at step {self.step_number + 1}: {result}")
+                    self._distill_skill_if_successful(result)
                     return result
 
                 self.step_number += 1
@@ -141,6 +147,34 @@ class AgentLoop:
         # Hit max steps without completing
         logger.warning(f"⚠️ Agent hit max steps ({self.max_steps}) without completing")
         return self._summarize_history()
+
+    def _distill_skill_if_successful(self, result: str) -> None:
+        """
+        Save this run's working path as a reusable skill.
+
+        This closes the loop that makes repeated work cheap: without it,
+        get_skill_prompt_context() reads from a skills directory that nothing
+        ever writes to, so every run re-derives from scratch at full token
+        cost. Only genuine successes are recorded — an agent that gave up via
+        done(success=False) has nothing worth teaching the next run.
+
+        Never raises: failing to learn from a successful run must not turn it
+        into a failed one.
+        """
+        if not self._last_done_success:
+            logger.debug("Skipping skill distillation — run did not report success.")
+            return
+        try:
+            skill = self.skill_distiller.distill_from_run(
+                goal=self.goal, history=self.history, result=result
+            )
+            if skill:
+                logger.info(
+                    f"🎓 Distilled skill '{skill.name}' "
+                    f"({len(skill.proven_steps)} proven steps, seen {skill.success_count}x)"
+                )
+        except Exception as e:
+            logger.warning(f"Skill distillation failed (run still succeeded): {e}")
 
     async def _execute_step(self) -> str | None:
         """
@@ -172,9 +206,14 @@ class AgentLoop:
             selector_map=browser_state.selector_map,
         )
 
+        # If the user's foreground window is a native app rather than the
+        # browser, the DOM snapshot above describes something the agent isn't
+        # actually looking at. Capture the native window's UI tree too.
+        native_context = await self._get_native_context()
+
         # ─── 2. THINK ───
         logger.debug(f"Step {self.step_number + 1}: Thinking...")
-        agent_output = await self._call_llm(browser_state)
+        agent_output = await self._call_llm(browser_state, native_context=native_context)
 
         if agent_output is None:
             logger.error("LLM returned no output")
@@ -210,11 +249,56 @@ class AgentLoop:
         # Check if agent called "done"
         for action in agent_output.action:
             if action.done is not None:
+                self._last_done_success = action.done.success
                 return action.done.text
 
         return None
 
-    async def _call_llm(self, browser_state: BrowserState) -> AgentOutput | None:
+    # Window-title fragments that mean "this is the browser" — for these the
+    # DOM snapshot is the better description, so we skip native extraction
+    # (which is slow, and would give the LLM a second competing index space).
+    _BROWSER_TITLE_HINTS = ("chrome", "chromium", "edge", "firefox", "brave", "opera")
+
+    async def _get_native_context(self) -> str:
+        """
+        Extract the focused native window's UI tree, if the focus is on a
+        desktop app rather than the browser.
+
+        Returns "" when native UI control is unavailable (non-Windows, or the
+        optional `uiautomation` package isn't installed) or when the browser
+        is focused. Never raises — perception failing must not kill the run.
+        """
+        window = getattr(self.computer, "window", None)
+        if window is None:
+            return ""
+
+        try:
+            title = await asyncio.to_thread(window.active_title)
+            if not title:
+                return ""
+            if any(hint in title.lower() for hint in self._BROWSER_TITLE_HINTS):
+                return ""
+
+            tree = await asyncio.to_thread(window.extract_ui)
+            if not tree:
+                return ""
+
+            logger.info(f"🖥️  Native window in focus: '{title}' — extracted UI tree")
+            return (
+                f"FOCUSED NATIVE WINDOW: {title}\n"
+                "The browser state below does NOT describe this window. To act here use\n"
+                "  computer.window.click(N) / computer.window.type(N, 'text')\n"
+                "with the [N] indices from this tree (they are a SEPARATE index space\n"
+                "from the browser's DOM indices — do not mix them up):\n"
+                f"{tree}"
+            )
+        except Exception as e:
+            logger.debug(f"Native window extraction skipped: {e}")
+            return ""
+
+    async def _call_llm(
+        self, browser_state: BrowserState, native_context: str = ""
+    ) -> AgentOutput | None:
         """
         Call the LLM with the current state and parse the structured output.
         """
@@ -239,6 +323,7 @@ class AgentLoop:
             agent_history=history_text,
             environment_summary=env_summary,
             learned_skill_context=skill_context,
+            native_window_context=native_context,
         )
 
         user_messages = step_builder.build_messages(use_vision=self.use_vision)
@@ -318,6 +403,25 @@ class AgentLoop:
                 ))
                 break
 
+            # Risk-gate before executing. SAFE actions (the vast majority —
+            # click/navigate/scroll/etc.) return instantly with no overhead.
+            # IRREVERSIBLE-tier actions always pause for a live human Allow,
+            # in every approval mode including trusted — see approval.py.
+            element_context = self._element_context_for_action(action, browser_state)
+            tier = self.approval_guard.classify(action, element_context=element_context)
+            if tier != RiskTier.SAFE:
+                allowed = await self.approval_guard.gate(
+                    action, tier, goal=self.goal, element_context=element_context,
+                )
+                if not allowed:
+                    results.append(ActionResult(
+                        action_name=action.action_name,
+                        success=False,
+                        error=f"Blocked by approval guard ({tier.value})",
+                    ))
+                    logger.warning(f"Action {i + 1} ({action.action_name}) blocked by approval guard — stopping this step")
+                    break
+
             # Execute the action
             url_before = self.page.url
             result = await self._execute_single_action(action, browser_state)
@@ -339,6 +443,44 @@ class AgentLoop:
             await asyncio.sleep(0.3)
 
         return results
+
+    async def _execute_computer_call(self, call_action: ComputerCallAction) -> ActionResult:
+        """
+        Execute an OS-level tool call from the injected tool catalog.
+
+        This is the action that makes Autobot a computer-use agent rather than
+        a browser-only agent: native window focus, mouse/keyboard on desktop
+        apps, clipboard, filesystem, terminal. Parsing is structural and never
+        eval()'d — see computer/dispatch.py. Risk gating already happened in
+        _execute_actions before we got here.
+        """
+        from autobot.computer.dispatch import dispatch_computer_call
+
+        call_str = call_action.call
+        logger.info(f"🛠️  computer_call: {call_str}")
+        success, result_text = await dispatch_computer_call(self.computer, call_str)
+
+        return ActionResult(
+            action_name="computer_call",
+            success=success,
+            extracted_content=result_text if success else None,
+            error=None if success else result_text,
+        )
+
+    def _element_context_for_action(self, action: ActionModel, browser_state: BrowserState) -> str:
+        """
+        Build a string of the TARGET element's attributes for input_text actions,
+        so ApprovalGuard can detect credential fields (type="password", a
+        card-number label, etc.) from what's being filled in, not from the
+        arbitrary text being typed into it.
+        """
+        if action.input_text is None:
+            return ""
+        element = browser_state.selector_map.get(action.input_text.index)
+        if element is None:
+            return ""
+        attr_str = " ".join(f'{k}="{v}"' for k, v in element.attributes.items())
+        return f"<{element.tag_name} {attr_str}> {element.text}".strip()
 
     async def _execute_single_action(
         self,
@@ -429,12 +571,26 @@ class AgentLoop:
                     extracted_content=f"Human input requested: {action.request_human_input.prompt}",
                 )
 
+            elif action.computer_call is not None:
+                return await self._execute_computer_call(action.computer_call)
+
             else:
-                return ActionResult(
-                    action_name="unknown",
-                    success=False,
-                    error=f"Unknown action: {action_name}",
-                )
+                # Tell the LLM exactly what it got wrong. Previously an
+                # unrecognized action name produced a bare "Unknown action:
+                # unknown", giving the model nothing to correct against — so
+                # it would often emit the same bad action again next step.
+                bad_keys = action.unrecognized_keys
+                if bad_keys:
+                    valid = ", ".join(n for n in action.model_fields)
+                    error = (
+                        f"Unrecognized action key(s): {', '.join(bad_keys)}. "
+                        f"Valid actions are: {valid}. "
+                        "To use an OS-level tool from the tool catalog, use "
+                        '{"computer_call": {"call": "computer.<module>.<method>(...)"}}'
+                    )
+                else:
+                    error = "Empty action — no action field was set."
+                return ActionResult(action_name="unknown", success=False, error=error)
 
         except Exception as e:
             logger.error(f"Action {action_name} failed: {e}")
