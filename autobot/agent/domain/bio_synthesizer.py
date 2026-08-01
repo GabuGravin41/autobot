@@ -18,6 +18,18 @@ class BioInformaticsSynthesizer:
         Generates a standalone Python script to execute an NCBI BLAST query via BioPython
         and export alignments to CSV.
         """
+        # repr(), not raw f-string interpolation into a quoted literal. The
+        # previous version did `sequence = """{sequence_or_fasta}"""` — any
+        # input containing `"""` (or, for program/database/output_csv,
+        # a bare `"`) breaks out of the string literal in the GENERATED
+        # script, turning arbitrary text into arbitrary Python that then
+        # gets written to disk and potentially executed via run_command.
+        # repr() produces a properly quote-and-backslash-escaped literal no
+        # matter what the input contains.
+        sequence_lit = repr(sequence_or_fasta)
+        program_lit = repr(program)
+        database_lit = repr(database)
+        output_csv_lit = repr(output_csv)
         return f'''# Auto-generated BioInformatics BLAST Script
 import sys
 import csv
@@ -28,10 +40,10 @@ except ImportError:
     print("⚠️ BioPython not found. Install with 'pip install biopython'.")
     sys.exit(1)
 
-sequence = """{sequence_or_fasta}"""
-program = "{program}"
-database = "{database}"
-output_csv = "{output_csv}"
+sequence = {sequence_lit}
+program = {program_lit}
+database = {database_lit}
+output_csv = {output_csv_lit}
 
 print(f"🧬 Running NCBI BLAST ({{program}} on {{database}})...")
 result_handle = NCBIWWW.qblast(program, database, sequence)

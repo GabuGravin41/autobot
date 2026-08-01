@@ -17,6 +17,17 @@ class DICOMVolumeSynthesizer:
         """
         Generates a standalone Python script to compute 3D volume from a folder of DICOM files.
         """
+        # repr() for strings, int() for the threshold — not raw interpolation
+        # into a literal. The previous version used `r"{dicom_dir}"`, and a
+        # raw string still terminates on an unescaped quote character, so a
+        # dicom_dir/output_json containing `"` broke out of the literal in
+        # the GENERATED script. hu_min_threshold is typed as int but nothing
+        # enforced that at runtime; int() here does, so a non-numeric value
+        # fails loudly at generation time instead of injecting arbitrary text
+        # into the script as a bare (unquoted) expression.
+        dicom_dir_lit = repr(dicom_dir)
+        output_json_lit = repr(output_json)
+        hu_threshold_val = int(hu_min_threshold)
         return f'''# Auto-generated DICOM 3D Volume Calculation Script
 import os
 import sys
@@ -30,9 +41,9 @@ except ImportError:
     print("⚠️ pydicom or numpy not found. Install with 'pip install pydicom numpy'.")
     sys.exit(1)
 
-dicom_dir = r"{dicom_dir}"
-hu_threshold = {hu_min_threshold}
-output_json = "{output_json}"
+dicom_dir = {dicom_dir_lit}
+hu_threshold = {hu_threshold_val}
+output_json = {output_json_lit}
 
 print(f"🏥 Scanning DICOM slices in {{dicom_dir}} (HU Threshold >= {{hu_threshold}})...")
 
