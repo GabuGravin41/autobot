@@ -127,6 +127,7 @@ class ApprovalResponse(BaseModel):
 class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
     llm_model: str | None = None
+    anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
     openai_api_key: str | None = None
     browser_mode: str | None = None
@@ -267,9 +268,10 @@ def _save_run_history(run_id: str, goal: str, success: bool, result: str):
 @app.get("/api/settings")
 def get_settings():
     return {
-        "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter"),
+        "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "auto"),
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", ""),
         "browser_mode": "cdp",  # Enforced now
+        "has_anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
         "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
         "llm_enabled": True,
@@ -284,6 +286,10 @@ def update_settings(req: SettingsUpdate):
         updates["AUTOBOT_LLM_PROVIDER"] = req.llm_provider
     if req.llm_model is not None:
         updates["AUTOBOT_LLM_MODEL"] = req.llm_model
+    if req.anthropic_api_key:
+        updates["ANTHROPIC_API_KEY"] = req.anthropic_api_key
+        if not req.llm_provider:
+            updates["AUTOBOT_LLM_PROVIDER"] = "anthropic"
     if req.openrouter_api_key:
         updates["OPENROUTER_API_KEY"] = req.openrouter_api_key
         if not req.llm_provider:

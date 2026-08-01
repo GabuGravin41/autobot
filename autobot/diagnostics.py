@@ -180,11 +180,11 @@ def check_llm_config() -> list[Check]:
     into logs on failure).
     """
     providers = {
+        "ANTHROPIC_API_KEY": "anthropic",
         "OPENROUTER_API_KEY": "openrouter",
         "OPENAI_API_KEY": "openai",
         "GEMINI_API_KEY": "gemini",
         "GOOGLE_API_KEY": "gemini",
-        "ANTHROPIC_API_KEY": "anthropic (not yet supported natively)",
     }
     present = [(k, v) for k, v in providers.items() if os.getenv(k)]
     checks: list[Check] = []
@@ -192,20 +192,11 @@ def check_llm_config() -> list[Check]:
     if not present:
         checks.append(Check(
             "LLM API key", FAIL, "no provider key found in environment or .env",
-            "Set OPENROUTER_API_KEY (or OPENAI_API_KEY) in .env. "
-            "For Claude models, route via OpenRouter - Autobot has no native "
-            "Anthropic client yet.",
+            "Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in .env.",
         ))
     else:
         names = ", ".join(k for k, _ in present)
         checks.append(Check("LLM API key", OK, f"set: {names}"))
-
-    if os.getenv("ANTHROPIC_API_KEY") and len(present) == 1:
-        checks.append(Check(
-            "Anthropic key usable?", WARN,
-            "ANTHROPIC_API_KEY is set but Autobot's client is OpenAI-compatible only",
-            "Use OpenRouter with AUTOBOT_LLM_MODEL=anthropic/claude-... instead.",
-        ))
 
     configured = os.getenv("AUTOBOT_LLM_PROVIDER", "(auto-detect)")
     model = os.getenv("AUTOBOT_LLM_MODEL", "(provider default)")
