@@ -127,7 +127,10 @@ class AgentRunner:
                 self.llm_client = _create_llm_client()
                 if self.llm_client is None:
                     raise RuntimeError(
-                        "No LLM API key configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env"
+                        "No usable LLM client. Either no API key is set (ANTHROPIC_API_KEY, "
+                        "OPENROUTER_API_KEY, or OPENAI_API_KEY in .env), or ANTHROPIC_API_KEY "
+                        "is set but the 'anthropic' package isn't installed (pip install anthropic). "
+                        "Run 'autobot --doctor' to see which."
                     )
 
             # 3. Route by complexity. A goal like "open Chrome, hold a 6-turn
