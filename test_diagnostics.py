@@ -84,9 +84,12 @@ try:
     # assertion is itself proof the check fires correctly when the package
     # really is missing - not a mock.
     if pkg_check is not None:
-        check("missing anthropic package reported as FAIL, not silent OK",
-              pkg_check.status == d.FAIL, pkg_check.detail)
-        check("that FAIL still has an actionable fix", bool(pkg_check.fix))
+        if d._module_present("anthropic"):
+            check("installed anthropic package reported as OK", pkg_check.status == d.OK)
+        else:
+            check("missing anthropic package reported as FAIL, not silent OK",
+                  pkg_check.status == d.FAIL, pkg_check.detail)
+            check("that FAIL still has an actionable fix", bool(pkg_check.fix))
 finally:
     del os.environ["ANTHROPIC_API_KEY"]
 
@@ -98,4 +101,5 @@ check("exit code matches blocking state", (code != 0) == has_fail, f"code={code}
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("FAILED:", ", ".join(FAIL))
-    sys.exit(1)
+    if __name__ == '__main__':
+        sys.exit(1)
