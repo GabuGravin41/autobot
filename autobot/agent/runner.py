@@ -331,52 +331,60 @@ def _create_llm_client() -> Any | None:
 
     provider = os.getenv("AUTOBOT_LLM_PROVIDER", "auto").lower()
 
+    def clean_key(name: str) -> str | None:
+        val = os.getenv(name)
+        if not val:
+            return None
+        val = val.strip()
+        if not val or val.lower() in ("none", "null", "undefined"):
+            return None
+        return val
+
+    anth_key = clean_key("ANTHROPIC_API_KEY")
+    or_key = clean_key("OPENROUTER_API_KEY")
+    oa_key = clean_key("OPENAI_API_KEY")
+    gem_key = clean_key("GEMINI_API_KEY") or clean_key("GOOGLE_API_KEY")
+
     if provider == "anthropic":
-        return get_anthropic_llm_client()
+        if not anth_key:
+            return None
+        return get_anthropic_llm_client(api_key=anth_key)
 
     elif provider == "openrouter":
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
+        if not or_key:
             return None
         return OpenAI(
             base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
+            api_key=or_key,
         )
 
     elif provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
+        if not oa_key:
             return None
-        return OpenAI(api_key=api_key)
+        return OpenAI(api_key=oa_key)
 
     elif provider == "gemini":
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
+        if not gem_key:
             return None
         return OpenAI(
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            api_key=api_key,
+            api_key=gem_key,
         )
 
     else:
-        # Fallback priority: Anthropic -> OpenRouter -> Gemini (Google AI Studio) -> OpenAI
-        anth_client = get_anthropic_llm_client()
-        if anth_client:
-            return anth_client
-
-        api_key = os.getenv("OPENROUTER_API_KEY")
-        if api_key:
+        # Fallback priority: OpenRouter -> Anthropic -> Gemini (Google AI Studio) -> OpenAI
+        if or_key:
             return OpenAI(
                 base_url="https://openrouter.ai/api/v1",
-                api_key=api_key,
+                api_key=or_key,
             )
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if api_key:
+        if anth_key:
+            return get_anthropic_llm_client(api_key=anth_key)
+        if gem_key:
             return OpenAI(
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=api_key,
+                api_key=gem_key,
             )
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            return OpenAI(api_key=api_key)
+        if oa_key:
+            return OpenAI(api_key=oa_key)
         return None

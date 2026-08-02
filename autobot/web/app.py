@@ -801,7 +801,18 @@ async def ws_events_alias(websocket: WebSocket):
     await ws_logs(websocket)
 
 
+from fastapi.responses import HTMLResponse, FileResponse
+
 _frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
 if _frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="static")
+    # Mount StaticFiles only for assets folder so it never intercepts root level /ws/ or /api/ requests
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="assets")
+
+    @app.get("/{catchall:path}")
+    def serve_react_app(catchall: str):
+        """Serve React SPA index.html for all non-api and non-websocket routes to support refresh."""
+        index_file = _frontend_dist / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return HTMLResponse("React frontend build index.html missing. Run npm run build.")
