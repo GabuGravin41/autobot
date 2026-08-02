@@ -324,6 +324,8 @@ def _create_llm_client() -> Any | None:
     - OpenAI (OPENAI_API_KEY)
     - Gemini (GEMINI_API_KEY or GOOGLE_API_KEY)
     """
+    from dotenv import load_dotenv
+    load_dotenv()
     from openai import OpenAI
     from autobot.agent.anthropic_adapter import get_anthropic_llm_client
 
