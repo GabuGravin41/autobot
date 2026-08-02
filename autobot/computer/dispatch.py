@@ -5,12 +5,15 @@ Computer Call Dispatch — the single, AST-safe way to turn an LLM-emitted
 Why this module exists
 ----------------------
 `Computer.get_tool_catalog()` advertises every `computer.*` method to the LLM
-in the system prompt, and `prompts/system_prompt_full.md` documents the
-`{"computer_call": {"call": "..."}}` action across hundreds of lines. But
-`ActionModel` had no `computer_call` field, so those calls were silently
-dropped by pydantic and executed as "unknown action" — the agent could see
-the tools but never invoke them. This module plus the `computer_call` action
-in agent/models.py closes that gap.
+in the system prompt. A now-deleted `prompts/system_prompt_full.md`
+documented the `{"computer_call": {"call": "..."}}` action across hundreds
+of lines (it also described a stale vision-first architecture superseded by
+this project's actual CDP/DOM-index-first design, which is why it was
+removed rather than merged back in). But `ActionModel` had no
+`computer_call` field, so those calls were silently dropped by pydantic and
+executed as "unknown action" — the agent could see the tools but never
+invoke them. This module plus the `computer_call` action in agent/models.py
+closes that gap.
 
 `agent/background_runner.py` had its own private copy of this logic whose
 docstring claimed it "uses the same AST-safe dispatch pattern as AgentLoop"

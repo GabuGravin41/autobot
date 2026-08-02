@@ -105,6 +105,15 @@ class AgentLoop:
         self.previous_dom_state: DOMSerializedState | None = None
         # Whether the agent's done() reported success — gates skill distillation.
         self._last_done_success = False
+        # Set here, not at the top of run(): AgentRunner.cancel() can reach
+        # this instance and set is_cancelled=True in the window between
+        # construction and the `await agent.run()` call actually starting
+        # (real in _run_single_loop/_run_mission, which build the AgentLoop
+        # first and await it a few lines later). If run() re-initialized this
+        # to False on entry, a cancel() that landed in that window would be
+        # silently discarded — the exact bug this flag exists to prevent,
+        # just moved earlier.
+        self.is_cancelled = False
         # If the LLM is unreachable (bad key, no credit, network down), every
         # step fails identically. Without a circuit breaker the agent silently
         # burns its ENTIRE step budget re-issuing a doomed request and then
@@ -178,7 +187,9 @@ class AgentLoop:
         Returns:
             The final result text from the done action, or a summary.
         """
-        self.is_cancelled = False
+        # Deliberately NOT reset here — see the comment on self.is_cancelled
+        # in __init__ for why resetting on entry silently drops a cancel()
+        # that arrives before run() starts.
         logger.info(f"🤖 Agent starting: '{self.goal}' (max {self.max_steps} steps)")
 
         while self.step_number < self.max_steps:

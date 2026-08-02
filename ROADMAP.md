@@ -93,15 +93,22 @@ Three separable capabilities, not one monolith:
   distill → save → find → inject loop.
 
 ### Built, but still not wired to a real run
-- **Domain helpers.** `agent/domain/bio_synthesizer.py`,
-  `dicom_synthesizer.py`, `materials_synthesizer.py`, `overleaf_helper.py`
-  — stubs for exactly the genomics/DICOM/materials workflows that
-  motivated this project. Need to be checked against what they actually
-  do today versus what they're named for.
-- **`system_prompt_full.md`** (600+ lines, far richer than the active
-  `system_prompt.md`) is not loaded by `SystemPromptBuilder`. Worth
-  deciding deliberately: merge the good parts in, or delete it so it
-  stops looking authoritative.
+- **Domain helpers** — audited. `bio_synthesizer.py`/`dicom_synthesizer.py`/
+  `materials_synthesizer.py` had a real code-injection vulnerability, now
+  fixed and tested (44 tests). `overleaf_helper.py`'s `OverleafHelper` is a
+  complete, already-built solution to the CodeMirror paste-reliability risk
+  — resilient multi-selector clicking, clipboard-based LaTeX injection with
+  a keyboard fallback, recompile handling. Still zero callers anywhere.
+  Deliberately not wired in yet — real failure data from a live run beats
+  speculative wiring for a risk that hasn't been confirmed to occur.
+- ~~`system_prompt_full.md`~~ — resolved. It documented a stale vision-
+  first, coordinate-guessing-primary architecture that this project's
+  actual CDP/DOM-index-first design has superseded; merging it in would
+  have reintroduced the exact blind-action anti-pattern already fixed
+  twice. Deleted. Pulled the one genuinely good idea (a situational-
+  awareness checklist: where am I / is this relevant / are there obstacles)
+  into the active `system_prompt.md`, correctly reframed for DOM-index
+  clicking as primary rather than vision+coordinates.
 
 ## Sequencing
 
