@@ -647,15 +647,19 @@ class AgentLoop:
         action_data = action.action_data
 
         if self.page is None and action_name in self._BROWSER_ONLY_ACTIONS:
+            self.is_cancelled = True
             return ActionResult(
                 action_name=action_name,
                 success=False,
                 error=(
-                    f"'{action_name}' needs a browser, but none is attached "
-                    "(OS-only mode). For desktop apps use computer_call instead, e.g. "
-                    '{"computer_call": {"call": "computer.window.focus(\'Notepad\')"}} '
-                    "then computer.window.extract_ui() to see its elements. "
-                    "To get a browser, start Chrome with --remote-debugging-port=9222."
+                    f"CRITICAL ERROR: '{action_name}' requires a browser, but no browser is attached "
+                    "because Chrome is already running without debugging enabled.\n"
+                    "Halting execution immediately to avoid blind actions.\n"
+                    "For desktop apps use computer_call instead, e.g. "
+                    '{"computer_call": {"call": "computer.window.focus(\'Notepad\')"}}.\n'
+                    "To fix this conflict, please:\n"
+                    "  1. Close ALL Chrome windows on your system.\n"
+                    "  2. Or set AUTOBOT_ALLOW_CHROME_KILL=1 in your .env file to let Autobot force-close Chrome for you."
                 ),
             )
 

@@ -136,35 +136,30 @@ class AsyncBrowserLauncher:
         # waited only 1s, which isn't long enough for Chrome to release its
         # SingletonLock anyway. Destroying the user's browsing session is not
         # an acceptable default, so it is now opt-in.
+        fallback_to_isolated = False
         if os.name == "nt" and self._chrome_is_running():
             if os.getenv("AUTOBOT_ALLOW_CHROME_KILL", "").lower() in ("1", "true", "yes"):
                 logger.warning("AUTOBOT_ALLOW_CHROME_KILL set — force-closing your Chrome windows.")
                 subprocess.run("taskkill /F /IM chrome.exe", shell=True, capture_output=True)
-                # Wait for the processes to actually exit and release the
-                # profile lock, rather than assuming 1s was enough.
                 for _ in range(10):
                     await _async_sleep(0.5)
                     if not self._chrome_is_running():
                         break
                 await _async_sleep(1.0)  # let SingletonLock clear
             else:
-                raise RuntimeError(
-                    f"Chrome is already running without the DevTools port open, so Autobot "
-                    f"cannot attach to it (starting another Chrome would just hand off to the "
-                    f"existing one).\n\n"
-                    f"Pick either:\n"
-                    f"  1. Close Chrome yourself, then re-run. Autobot will start it correctly.\n"
-                    f"  2. Leave your tabs open and start a CDP-enabled Chrome yourself:\n"
-                    f'       & "{self.chrome_path}" --remote-debugging-port={self.debug_port} '
-                    f'--profile-directory="{self.profile_dir}"\n\n'
-                    f"Autobot will NOT force-close your Chrome for you — you'd lose open tabs "
-                    f"and unsaved work. To allow that anyway, set AUTOBOT_ALLOW_CHROME_KILL=1."
+                logger.warning(
+                    "Chrome is already running. Falling back to an isolated Chrome "
+                    "automation profile to avoid profile locking conflicts."
                 )
+                fallback_to_isolated = True
 
-        # Target the real user profile directory strictly
-        target_dir = self.user_data_dir or _real_chrome_user_data_dir()
-        if not target_dir:
+        # Target the profile directory
+        if fallback_to_isolated:
             target_dir = _default_user_data_dir()
+        else:
+            target_dir = self.user_data_dir or _real_chrome_user_data_dir()
+            if not target_dir:
+                target_dir = _default_user_data_dir()
 
         args = [
             self.chrome_path,

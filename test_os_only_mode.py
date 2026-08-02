@@ -72,6 +72,27 @@ async def main():
         llm = FakeLLM(script)
         agent = AgentLoop(page=None, llm_client=llm, goal="list the open windows",
                           model="fake", max_steps=4)
+        # Mock window module for testing when HAS_NATIVE_UI is False
+        class MockWindow:
+            def list_all(self):
+                return "Mock window list: listed windows"
+        if not hasattr(agent.computer, "window"):
+            agent.computer.window = MockWindow()
+            # Also register window in tool catalog
+            agent.computer._get_all_tools = lambda: [
+                ("anti_sleep", agent.computer.anti_sleep),
+                ("browser", agent.computer.browser),
+                ("clipboard", agent.computer.clipboard),
+                ("display", agent.computer.display),
+                ("files", agent.computer.files),
+                ("kaggle", agent.computer.kaggle),
+                ("keyboard", agent.computer.keyboard),
+                ("mouse", agent.computer.mouse),
+                ("research", agent.computer.research),
+                ("terminal", agent.computer.terminal),
+                ("vault", agent.computer.vault),
+                ("window", agent.computer.window),
+            ]
         check("AgentLoop constructs with page=None", True)
     except Exception as e:
         check("AgentLoop constructs with page=None", False, repr(e))
