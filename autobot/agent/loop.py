@@ -523,7 +523,16 @@ class AgentLoop:
                 lines = text.split("\n")
                 text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
 
-            data = json.loads(text)
+            # `response_format={"type": "json_object"}` is only a soft prompt
+            # nudge, not an enforced schema (the Anthropic adapter has no
+            # real structured-output path), so the model is free to write a
+            # preamble sentence before the JSON block ("I'll navigate to...
+            # {...}"). raw_decode from the first '{' finds and parses the
+            # JSON object wherever it starts, instead of assuming char 0.
+            start = text.find("{")
+            if start == -1:
+                raise json.JSONDecodeError("No JSON object found in output", text, 0)
+            data, _ = json.JSONDecoder().raw_decode(text, start)
             return AgentOutput(**data)
         except (json.JSONDecodeError, Exception) as e:
             logger.error(f"Failed to parse LLM output: {e}\nRaw: {raw[:500]}")

@@ -31,6 +31,63 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists, cross-platform.
+
+    Any failure to verify is treated as "alive" — the caller only ever uses
+    this to decide whether a SingletonLock is safe to delete, and assuming
+    alive is the safe direction: worst case we skip clearing a genuinely
+    stale lock and retry against the fallback profile instead of risking a
+    second Chrome process attaching to a profile a real one still owns.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return True
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except Exception:
+            return True
+
+
+def _is_lock_stale(lock_file: Path) -> bool:
+    """True only if a Chrome SingletonLock's owning process is confirmed dead.
+
+    SingletonLock is a symlink to "<hostname>-<pid>". Previously this file
+    was unlinked unconditionally before every launch attempt, regardless of
+    whether the process that created it was still alive. On a machine where
+    the user's real, already-running Chrome held this lock, that let a
+    second independent Chrome process attach to the SAME profile directory
+    Chrome's own single-instance design exists to prevent — corrupting
+    shared profile state, and in one observed case crashing the user's
+    entire browser (every window, every tab) once the two co-mingled
+    processes were later cleaned up. Only delete the lock when the PID it
+    names is verifiably gone.
+    """
+    try:
+        target = os.readlink(str(lock_file))
+    except OSError:
+        # Not a symlink we can interpret — err toward NOT deleting.
+        return False
+    pid_str = target.rsplit("-", 1)[-1]
+    try:
+        pid = int(pid_str)
+    except ValueError:
+        return False
+    return not _is_pid_alive(pid)
+
+
 class AsyncBrowserLauncher:
     """
     Launches Chrome with CDP debugging and connects Playwright for DOM access.
@@ -155,9 +212,12 @@ class AsyncBrowserLauncher:
             if not target_dir:
                 target_dir = _default_user_data_dir()
 
-        # Remove leftover SingletonLock file before launch to prevent profile lock stalls
+        # Remove SingletonLock before launch, but ONLY if it's confirmed stale
+        # (owning process is dead) — see _is_lock_stale for why unconditional
+        # deletion is unsafe when target_dir is the user's real, possibly
+        # still-running profile.
         lock_file = Path(target_dir) / "SingletonLock"
-        if lock_file.exists():
+        if lock_file.exists() and _is_lock_stale(lock_file):
             try:
                 lock_file.unlink(missing_ok=True)
             except Exception:
@@ -204,7 +264,7 @@ class AsyncBrowserLauncher:
             iso_dir = _default_user_data_dir()
             logger.warning(f"Real profile locked. Falling back to isolated profile: '{iso_dir}'...")
             iso_lock = Path(iso_dir) / "SingletonLock"
-            if iso_lock.exists():
+            if iso_lock.exists() and _is_lock_stale(iso_lock):
                 try: iso_lock.unlink(missing_ok=True)
                 except Exception: pass
             
