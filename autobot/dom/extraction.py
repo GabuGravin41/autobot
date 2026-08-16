@@ -188,8 +188,8 @@ class DOMExtractionService:
         if not self.capture_screenshot:
             return None
         try:
-            png_bytes = await self.page.screenshot(type="jpeg", quality=60)
-            return base64.b64encode(png_bytes).decode("ascii")
+            jpeg_bytes = await self.page.screenshot(type="jpeg", quality=60)
+            return base64.b64encode(jpeg_bytes).decode("ascii")
         except Exception as e:
             logger.debug(f"Screenshot failed: {e}")
             return None

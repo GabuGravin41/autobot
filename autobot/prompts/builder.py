@@ -216,7 +216,7 @@ class StepPromptBuilder:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/png;base64,{self.browser_state.screenshot_b64}",
+                        "url": f"data:image/jpeg;base64,{self.browser_state.screenshot_b64}",
                         "detail": "auto",
                     },
                 },

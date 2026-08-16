@@ -28,7 +28,7 @@ class StructChoice:
 
 
 class StructCompletionResponse:
-    def __init__(self, content: str, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, content: str, model: str = "claude-sonnet-5"):
         self.choices = [StructChoice(content)]
         self.id = "msg_anthropic_adapter"
         self.model = model
@@ -40,7 +40,7 @@ class AnthropicChatCompletions:
 
     def create(
         self,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-sonnet-5",
         messages: List[Dict[str, Any]] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
@@ -51,7 +51,7 @@ class AnthropicChatCompletions:
 
         # If model is an OpenRouter or OpenAI model name, map to default Claude model
         if not model or "claude" not in model.lower():
-            model = "claude-3-5-sonnet-20241022"
+            model = "claude-sonnet-5"
 
         # Separate system messages from user/assistant conversation
         system_content = ""
@@ -118,8 +118,11 @@ class AnthropicChatCompletions:
         }
         if system_content:
             kwargs_call["system"] = system_content
-        if temperature is not None:
-            kwargs_call["temperature"] = temperature
+        # Claude Sonnet 5 (and the Opus 4.6+/Fable 5 family) reject any
+        # non-default temperature/top_p/top_k with a 400. This adapter has
+        # no reliable way to know whether a caller-supplied `temperature`
+        # differs from the model's own default, so it's never forwarded —
+        # steer behavior through prompting instead.
 
         resp = self.client.messages.create(**kwargs_call)
 
