@@ -74,9 +74,9 @@ class Research:
             if runner and hasattr(runner, "llm_client"):
                 client = runner.llm_client
                 model = runner.model
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[
+                call_kwargs = {
+                    "model": model,
+                    "messages": [
                         {"role": "system", "content": "You are a research planning assistant. Be concise and actionable."},
                         {"role": "user", "content": (
                             f"Create a structured research brief for: {topic}\n\n"
@@ -88,8 +88,14 @@ class Research:
                             "Keep each section short and actionable."
                         )},
                     ],
-                    max_tokens=600,
-                )
+                    "max_tokens": 600,
+                }
+                try:
+                    # async client
+                    response = await client.chat.completions.create(**call_kwargs)
+                except TypeError:
+                    # sync client (e.g. the Anthropic adapter) — run off-thread
+                    response = await asyncio.to_thread(client.chat.completions.create, **call_kwargs)
                 return response.choices[0].message.content or self._fallback_plan(topic)
         except Exception:
             pass

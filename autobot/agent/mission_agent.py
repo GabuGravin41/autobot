@@ -13,6 +13,7 @@ This enables Autobot to handle ambitious, long-running tasks like:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import json
 import os
@@ -214,12 +215,18 @@ class MissionAgent:
 
         analysis = ""
         try:
-            resp1 = await self.llm_client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": f"SYSTEM: You are a task analyzer.\n\n{analysis_prompt}"}],
-                temperature=0.1,
-                max_tokens=300,
-            )
+            call_kwargs = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": f"SYSTEM: You are a task analyzer.\n\n{analysis_prompt}"}],
+                "temperature": 0.1,
+                "max_tokens": 300,
+            }
+            try:
+                # async client
+                resp1 = await self.llm_client.chat.completions.create(**call_kwargs)
+            except TypeError:
+                # sync client (e.g. the Anthropic adapter) — run off-thread
+                resp1 = await asyncio.to_thread(self.llm_client.chat.completions.create, **call_kwargs)
             analysis = (resp1.choices[0].message.content or "").strip()
             logger.info(f"📋 Mission analysis: {analysis}")
         except Exception as e:
@@ -250,12 +257,18 @@ class MissionAgent:
         )
 
         try:
-            resp2 = await self.llm_client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": f"SYSTEM: You are a Mission Strategist.\n\n{plan_prompt}"}],
-                temperature=0.2,
-                max_tokens=1024,
-            )
+            call_kwargs = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": f"SYSTEM: You are a Mission Strategist.\n\n{plan_prompt}"}],
+                "temperature": 0.2,
+                "max_tokens": 1024,
+            }
+            try:
+                # async client
+                resp2 = await self.llm_client.chat.completions.create(**call_kwargs)
+            except TypeError:
+                # sync client (e.g. the Anthropic adapter) — run off-thread
+                resp2 = await asyncio.to_thread(self.llm_client.chat.completions.create, **call_kwargs)
             raw = (resp2.choices[0].message.content or "").strip()
 
             # Parse JSON (handle markdown code blocks)
