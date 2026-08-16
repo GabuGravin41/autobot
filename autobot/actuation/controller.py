@@ -72,6 +72,43 @@ class ActuationController:
                 output = (res.stdout or res.stderr or "").strip()
                 return f"Executed CLI command: '{cmd}'. Output: {output[:300]}"
 
+            elif action_name == "window_focus":
+                title_query = args.get("title", "").lower()
+                if not title_query:
+                    return "window_focus failed: missing title argument"
+                
+                if os.name == "nt":
+                    try:
+                        import ctypes
+                        user32 = ctypes.windll.user32
+                        
+                        # Find window matching title substring
+                        found_hwnd = None
+                        def enum_windows_callback(hwnd, extra):
+                            nonlocal found_hwnd
+                            length = user32.GetWindowTextLengthW(hwnd)
+                            if length > 0:
+                                buf = ctypes.create_unicode_buffer(length + 1)
+                                user32.GetWindowTextW(hwnd, buf, length + 1)
+                                if title_query in buf.value.lower():
+                                    found_hwnd = hwnd
+                                    return False
+                            return True
+
+                        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+                        user32.EnumWindows(WNDENUMPROC(enum_windows_callback), 0)
+
+                        if found_hwnd:
+                            user32.ShowWindow(found_hwnd, 9)  # SW_RESTORE
+                            user32.SetForegroundWindow(found_hwnd)
+                            return f"Focused OS window matching '{title_query}'"
+                        else:
+                            return f"No open window found matching '{title_query}'"
+                    except Exception as ex:
+                        logger.warning(f"Native Win32 focus error: {ex}")
+
+                return f"Window focus attempted for '{title_query}'"
+
             elif action_name == "wait":
                 seconds = float(args.get("seconds", 2.0))
                 await asyncio.sleep(seconds)
