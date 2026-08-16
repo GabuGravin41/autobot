@@ -105,10 +105,22 @@ class AnthropicChatCompletions:
                 if anth_parts:
                     anthropic_messages.append({"role": anth_role, "content": anth_parts})
 
-        # Ensure system prompt requests JSON if response_format is json_object
+        # Reinforce strict-JSON output every call. Previously this only fired
+        # when "json" was absent from system_content — but the caller's own
+        # system prompt documents the JSON schema, so it always contains the
+        # word "json" and this reinforcement never actually ran. Observed
+        # live failures without it: prose before the JSON block, and
+        # markdown-bold section headers ("**thinking:** ...") replacing JSON
+        # entirely with only a stray partial object embedded inside.
         if response_format and isinstance(response_format, dict):
-            if response_format.get("type") == "json_object" and "json" not in system_content.lower():
-                system_content += "\n\nIMPORTANT: Respond ONLY with a valid JSON object matching the requested schema."
+            if response_format.get("type") == "json_object":
+                system_content += (
+                    "\n\nIMPORTANT: Your ENTIRE reply must be exactly one valid JSON "
+                    "object — nothing before it, nothing after it. No prose lead-in, "
+                    "no markdown code fences, no bold-header formatting standing in "
+                    "for JSON. Every field the schema requires must be present; "
+                    "omitting a required field is not acceptable."
+                )
 
         # Call Anthropic API
         kwargs_call = {
