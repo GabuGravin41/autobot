@@ -5,7 +5,6 @@ import logging
 import threading
 import time
 import random
-import pyautogui
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +54,7 @@ class AntiSleepManager:
     def move_mouse(self):
         """Perform a subtle mouse movement."""
         try:
+            import pyautogui
             x, y = pyautogui.position()
             # Move 1-2 pixels in a random direction and back
             dx = random.choice([-1, 1])

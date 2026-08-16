@@ -2,7 +2,6 @@ import os
 import sys
 import time
 import subprocess
-import pyautogui
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -10,6 +9,7 @@ if hasattr(sys.stdout, "reconfigure"):
 CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 def main():
+    import pyautogui
     print("🚀 Launching Chrome natively with --profile-directory='Profile 1' to grok.com...")
     cmd = f'start "" "{CHROME_EXE}" --profile-directory="Profile 1" "https://grok.com"'
     os.system(cmd)

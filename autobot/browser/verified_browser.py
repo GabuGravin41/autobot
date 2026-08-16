@@ -6,7 +6,6 @@ import os
 import sys
 import time
 import subprocess
-import pyautogui
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -60,6 +59,7 @@ def focus_and_maximize_chrome():
     ps_cmd = "$wshell = New-Object -ComObject WScript.Shell; $wshell.AppActivate('Chrome')"
     subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
     time.sleep(1.0)
+    import pyautogui
     pyautogui.hotkey("win", "up")
     time.sleep(1.0)
     return True
@@ -78,6 +78,7 @@ def verified_launch(profile_dir="Default", url="https://grok.com"):
 
     os.makedirs("tmp", exist_ok=True)
     shot_path = "tmp/verified_launch_state.png"
+    import pyautogui
     pyautogui.screenshot().save(shot_path)
     print(f"📸 Visual State Captured: {shot_path}")
     return shot_path

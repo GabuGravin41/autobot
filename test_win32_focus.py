@@ -1,15 +1,15 @@
 import os
 import sys
 import time
-import pyautogui
-import win32gui
-import win32con
-import win32com.client
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 def force_chrome_foreground():
+    import win32gui
+    import win32con
+    import win32com.client
+
     print("🔎 Searching for Chrome window...")
     found_hwnd = None
 
@@ -39,6 +39,7 @@ def force_chrome_foreground():
 
 def main():
     if force_chrome_foreground():
+        import pyautogui
         os.makedirs("tmp", exist_ok=True)
         out_path = "tmp/chrome_win32_focused.png"
         pyautogui.screenshot().save(out_path)
