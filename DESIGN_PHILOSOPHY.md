@@ -40,7 +40,7 @@ Autobot is a **Sovereign Autonomous Digital Agent**. Its goal is to execute comp
 
 ### Rule #1: "Look and Act Like a Human" (No Over-Engineered Hacks)
 * **Never manipulate locked user databases**: Do NOT attempt to copy SQLite cookie databases (`Network/Cookies`) or leveldb files behind Windows DPAPI encryption while Chrome is active. This corrupts files and causes crashes.
-* **Never guess mysterious profile names**: Do NOT guess directory names (`Profile 1` vs `Profile 2`). Look at the screen! If Chrome opens a profile picker ("Who's using Chrome?"), take a screenshot, visually locate the user's profile tile (e.g. Dalton's brown paper + pencil avatar with $e^{i\pi}+1=0$), scroll down if needed, and click it with the mouse.
+* **Never guess mysterious profile names**: Do NOT guess directory names (`Profile 1` vs `Profile 2`). Look at the screen! If Chrome opens a profile picker ("Who's using Chrome?"), take a screenshot, visually locate the user's profile tile (a distinctive avatar), scroll down if needed, and click it with the mouse.
 * **Ride Along on Existing Sessions**: If Chrome is already open on the desktop with logged-in accounts (Grok, Overleaf), interact with that window directly rather than spawning duplicate browser instances.
 
 ### Rule #2: "Zero Blind Actions" (Focus & Verify First)
@@ -66,13 +66,10 @@ Autobot does not rely on a single input mechanism. It categorizes and combines t
 
 ## 📁 4. Chrome Profile Mapping Reference
 
-For this machine, the Chrome profile mappings are:
-
-| Profile Directory | Account Email | Visual Avatar / Identifier | Key Logged-In Services |
-| :--- | :--- | :--- | :--- |
-| **`Default`** (PRIMARY) | `daltonomondi588@gmail.com` | "Person 1" — Brown paper & pencil with $e^{i\pi}+1=0$ | Overleaf, Grok, Google AI Studio, OpenAI, Google Services |
-| **`Profile 1`** | `daltonomondi04@gmail.com` | "Person 2" — Geometric polar bear | Grok, X.ai OAuth |
-| **`Profile 2`** | `6153.2023@students.ku.ac.ke` | KU Crest / Logo | University Services |
+Chrome profile mappings are machine-specific and **not tracked in this repo** —
+each install should keep its own mapping (profile directory → account →
+avatar → logged-in services) in a local, gitignored file (e.g. `.env` or a
+`profiles.local.json`) rather than hardcoded here, since this file is public.
 
 *Default Command for Primary Account Launch*:
 ```cmd

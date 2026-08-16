@@ -10,7 +10,7 @@ CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
 def test_direct_launch_default():
     import pyautogui
-    print("🚀 1. Launching Chrome natively with --profile-directory='Default' (daltonomondi588@gmail.com)...")
+    print("🚀 1. Launching Chrome natively with --profile-directory='Default'...")
     cmd = f'start "" "{CHROME_EXE}" --profile-directory="Default" "https://grok.com"'
     os.system(cmd)
     time.sleep(5.0)

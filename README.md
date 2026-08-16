@@ -14,7 +14,14 @@ Autobot is built on 4 core pillars:
    - 🚀 `level_2_full`: Full autonomous execution.
 4. **Unified Agent Loop (`autobot/agent/`)**: Connects Perception → Governance → Planning → Actuation → Reflection in a non-blocking execution loop.
 
-**Product direction and long-term vision:** see **[VISION.md](VISION.md)** in the project root.
+**Product direction and long-term vision:** see **[AUTOBOT_MISSION.md](AUTOBOT_MISSION.md)** in the project root.
+
+**Other docs in this repo:**
+- **[AUTOBOT_MISSION.md](AUTOBOT_MISSION.md)** — mission, architecture, and the autonomous-computing manifesto.
+- **[DESIGN_PHILOSOPHY.md](DESIGN_PHILOSOPHY.md)** — the "no blind actions" rule and other execution guidelines the code is expected to follow.
+- **[ROADMAP.md](ROADMAP.md)** — ground-truth log of what's actually wired up and verified working vs. what's built but not yet reachable from a real run. Read this if `--doctor` is green but a feature still doesn't do anything — the code may exist but not be called from anywhere yet.
+- **[USE_CASES.md](USE_CASES.md)** — target end-to-end flows (portfolio builder, LeetCode grinding, Kaggle competitions) the system is being built toward. Aspirational, not all implemented yet.
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** — future packaging/deployment plan (hosted frontend + downloadable local agent). Not built yet.
 
 ## Current capabilities
 
@@ -74,17 +81,34 @@ If you just want to run Autobot as a finished product:
    ```bash
    git clone https://github.com/GabuGravin41/autobot.git
    cd autobot
+   python -m venv venv
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   pip install -r requirements.txt
    pip install -e .
    autobot --setup
    ```
 
-2. **Run the Dashboard:**
+2. **Build the dashboard UI (one-time, or after pulling frontend changes):**
+   ```bash
+   cd frontend && npm install && npm run build && cd ..
+   ```
+   Skip this and `autobot --server` still runs, but `/` serves a bare fallback page instead of the real dashboard.
+
+3. **Verify the install:**
+   ```bash
+   autobot --doctor
+   ```
+   Pure stdlib, no LLM calls, costs nothing. Checks Python version, dependencies,
+   Chrome, your LLM API key, and more — fix every `[FAIL]` it reports before
+   going further. `[WARN]` items reduce capability but won't block a run.
+
+4. **Run the Dashboard:**
    ```bash
    autobot --server
    ```
-   *Access the command center at http://127.0.0.1:8000. No separate frontend process needed.*
+   *Access the command center at http://127.0.0.1:8000.*
 
-3. **Try a Goal:**
+5. **Try a Goal:**
    Enter a goal in the dashboard or extension: *"Go to Kaggle, list the top 5 active competitions, and save them to a file."*
 
 ## 🛠️ Installation & Setup (Dev Mode)
@@ -102,11 +126,12 @@ For developers who want to modify the code:
 2. **Setup Tools:**
    ```bash
    autobot --setup
+   autobot --doctor   # verify the install before running anything
    ```
 
 3. **Run Dev Servers:**
    - **Backend:** `python -m autobot.main` (Port 8000)
-   - **Frontend:** `cd frontend && npm install && npm run dev` (Port 5173)
+   - **Frontend:** `cd frontend && npm install && npm run dev` (Port 3000)
 
 ## Environment variables
 
@@ -126,6 +151,17 @@ For developers who want to modify the code:
 - `AUTOBOT_LLM_MODEL` (optional; default: `gemini-1.5-flash` for Gemini; for Grok use e.g. `grok-2` or the model name from your X.AI account)
 
 **Using Grok as the LLM (AI Planner):** Set `AUTOBOT_LLM_PROVIDER=openai_compat`, `XAI_API_KEY=<your key>`, and `AUTOBOT_LLM_MODEL=grok-2` or `grok-4-1-fast-reasoning` (see [x.ai docs](https://docs.x.ai/docs/guides/chat-completions)). If you get HTTP 403, the model name may be invalid—try `grok-2`. Get your API key from [x.ai Console](https://console.x.ai/team/default/api-keys).
+
+### Controlling token spend
+
+| Variable | Values | Effect |
+| :--- | :--- | :--- |
+| `AUTOBOT_VISION_MODE` | `always` / `auto` / `never` | `auto` (default) sends a screenshot only on the first step, when the DOM is too sparse to act on, or after a failed action. `always` costs roughly 1-2k extra tokens *per step*. `never` is text-only and cheapest, but blind to canvas/image-only UIs. |
+| `AUTOBOT_APPROVAL_MODE` | `strict` / `balanced` / `trusted` | How often the agent pauses for permission. IRREVERSIBLE actions (deletion, payments, credentials, sending under your identity) always pause, in every mode. |
+| `AUTOBOT_STEPS_PER_OBJECTIVE` | integer | Step budget per mission objective. |
+| `AUTOBOT_SKIP_JUDGE` | `1` to enable | Skips the Judge Agent's separate LLM call at the end of every run (roughly doubles token spend on top of the task itself). Falls back to the run's own `done(success=...)` signal — a real cost/rigor tradeoff, not free: the Judge exists specifically to catch a run that believed it succeeded when it didn't. |
+
+The largest saving isn't a setting: repeated tasks get distilled into **learned skills** (`autobot/knowledge/skills/`) and replayed instead of re-reasoned. `autobot --doctor` reports how many you've accumulated.
 
 ## Run folder layout
 

@@ -288,7 +288,7 @@ that compiled perfectly and had simply never been run.
 
 **Still unverified by a live run:** anything requiring a real browser, a
 real LLM key, or a real native app. Those need a machine with the deps
-installed and Chrome open — see the run instructions in DOCUMENTATION.md.
+installed and Chrome open — see the setup instructions in README.md.
 
 ## Self-correction (a real gap worth naming, not just "reasoning better")
 
