@@ -26,6 +26,7 @@ class Mouse:
             clicks: Number of clicks (2 for double-click).
         """
         import pyautogui
+        pyautogui.FAILSAFE = False
         pyautogui.click(x=x, y=y, button=button, clicks=clicks)
         logger.debug(f"Mouse click at ({x}, {y}) button={button} clicks={clicks}")
 

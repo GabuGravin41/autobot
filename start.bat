@@ -4,6 +4,19 @@ echo  Autobot Local Agent Launcher (Windows)
 echo ============================================================
 echo.
 
+:: Bootstrap .env from .env.example if missing (same as start.sh)
+if not exist ".env" (
+    if exist ".env.example" (
+        echo [!] .env not found — copying .env.example to .env
+        copy ".env.example" ".env" >nul
+        echo     IMPORTANT: Open .env and fill in your API key before continuing.
+        echo     Press any key once you have set your OPENROUTER_API_KEY or ANTHROPIC_API_KEY.
+        pause
+    ) else (
+        echo [!] WARNING: No .env file found. Some features may fail.
+    )
+)
+
 :: 1. Setup Python Virtual Environment
 SET PYTHON_CMD=python
 py -0 >nul 2>&1
@@ -43,12 +56,11 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-:: Install Playwright browsers (first run only)
-echo [3/4] Checking Playwright browsers...
-python -m playwright install chromium 2>nul
-if %ERRORLEVEL% neq 0 (
-    echo WARNING: Playwright browser install failed (may already be installed).
-)
+:: NOTE: Autobot drives your REAL Chrome via CDP, not Playwright's bundled
+:: Chromium. Do NOT run playwright install chromium — it wastes 150MB and
+:: is never used. Playwright is only used for its CDP/Page API here.
+echo [3/4] Playwright check (CDP mode only, no browser download needed)...
+python -c "import playwright; print('   Playwright OK')" 2>nul || echo    WARNING: Playwright not installed. Run: pip install playwright
 
 :: Setup Node environment & Start
 echo [4/4] Launching Autobot...

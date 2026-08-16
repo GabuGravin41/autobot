@@ -25,6 +25,7 @@ import os
 import time
 from typing import Any
 
+from autobot.actuation.controller import ActuationController
 from autobot.agent.approval import ApprovalGuard, RiskTier
 from autobot.agent.models import (
     ActionModel,
@@ -45,8 +46,10 @@ from autobot.agent.models import (
 from autobot.computer.computer import Computer
 from autobot.dom.extraction import DOMExtractionService
 from autobot.dom.models import BrowserState, DOMSerializedState
+from autobot.governance.permissions import PermissionLevel, PermissionManager
 from autobot.knowledge.environment_memory import EnvironmentMemory
 from autobot.knowledge.skill_distiller import SkillDistiller
+from autobot.perception.manager import PerceptionManager
 from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 
 logger = logging.getLogger(__name__)
@@ -148,6 +151,11 @@ class AgentLoop:
         self.env_memory = EnvironmentMemory()
         self.skill_distiller = SkillDistiller()
         self.approval_guard = ApprovalGuard()
+
+        # ── Autonomous Co-Pilot 4 Pillars ─────────────────────────────────
+        self.perception_manager = PerceptionManager()
+        self.permission_manager = PermissionManager()
+        self.actuation_controller = ActuationController(page=self.page)
 
         # Build system prompt
         tool_catalog = self.computer.get_tool_catalog()
@@ -335,11 +343,20 @@ class AgentLoop:
         step_time = time.time() - step_start
         logger.debug(f"Step {self.step_number + 1} completed in {step_time:.1f}s")
 
-        # Check if agent called "done"
-        for action in agent_output.action:
-            if action.done is not None:
-                self._last_done_success = action.done.success
-                return action.done.text
+        # Check if agent ACTUALLY executed "done" — scan action_results (what
+        # ran), NOT agent_output.action (the plan). If a page-change action
+        # fired before "done" in the same step, _execute_actions broke early
+        # and "done" was skipped; checking the plan would falsely report success.
+        done_result = next(
+            (r for r in action_results if r.action_name == "done"), None
+        )
+        if done_result is not None:
+            # Find the original done action to get the success flag
+            for action in agent_output.action:
+                if action.done is not None:
+                    self._last_done_success = action.done.success
+                    break
+            return done_result.extracted_content or ""
 
         return None
 
@@ -474,27 +491,27 @@ class AgentLoop:
             return None
 
     async def _make_llm_call(self, messages: list[dict]) -> str:
-        """Make the actual LLM API call. Supports both sync and async clients."""
-        try:
-            # Try async first
-            response = await self.llm_client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            return response.choices[0].message.content
-        except TypeError:
-            # Fall back to sync client
-            import asyncio
-            response = await asyncio.to_thread(
-                self.llm_client.chat.completions.create,
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            return response.choices[0].message.content
+        """Make the actual LLM API call. Supports both sync and async clients with timeout."""
+        async def _do_call():
+            try:
+                response = await self.llm_client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                return response.choices[0].message.content
+            except TypeError:
+                response = await asyncio.to_thread(
+                    self.llm_client.chat.completions.create,
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                return response.choices[0].message.content
+
+        return await asyncio.wait_for(_do_call(), timeout=60.0)
 
     def _parse_agent_output(self, raw: str) -> AgentOutput | None:
         """Parse the LLM's JSON response into an AgentOutput model."""
@@ -571,7 +588,6 @@ class AgentLoop:
                 break
 
             # Small delay between actions to mimic human behavior
-            import asyncio
             await asyncio.sleep(0.3)
 
         return results
@@ -623,7 +639,7 @@ class AgentLoop:
         if self.page is None:
             return ""
         try:
-            return self._page_url()
+            return self.page.url  # was self._page_url() — infinite recursion
         except Exception:
             return ""
 
@@ -647,25 +663,39 @@ class AgentLoop:
         action_data = action.action_data
 
         if self.page is None and action_name in self._BROWSER_ONLY_ACTIONS:
-            self.is_cancelled = True
+            # Return a failure result — do NOT set is_cancelled here.
+            # Cancellation is for the user or scheduler to request; "no browser
+            # attached" is an action-level failure the LLM can adapt to (e.g.,
+            # by switching to a computer_call for desktop interaction instead).
+            # Setting is_cancelled here caused the loop to return
+            # "Task cancelled by user." instead of reaching max_steps, which
+            # broke the judge's structural failure-detection heuristic.
             return ActionResult(
                 action_name=action_name,
                 success=False,
                 error=(
-                    f"CRITICAL ERROR: '{action_name}' requires a browser, but no browser is attached "
-                    "because Chrome is already running without debugging enabled.\n"
-                    "Halting execution immediately to avoid blind actions.\n"
-                    "For desktop apps use computer_call instead, e.g. "
-                    '{"computer_call": {"call": "computer.window.focus(\'Notepad\')"}}.\n'
-                    "To fix this conflict, please:\n"
-                    "  1. Close ALL Chrome windows on your system.\n"
-                    "  2. Or set AUTOBOT_ALLOW_CHROME_KILL=1 in your .env file to let Autobot force-close Chrome for you."
+                    f"Action '{action_name}' requires a browser, but no browser is attached. "
+                    "For desktop apps use computer_call, e.g.: "
+                    '{"computer_call": {"call": "computer.window.focus(\'Notepad\')"}}'
                 ),
             )
+
+        if self.page and self.page.is_closed():
+            logger.warning("Browser page was closed; recovering with an active tab...")
+            try:
+                if self.page.context and self.page.context.pages:
+                    open_pages = [p for p in self.page.context.pages if not p.is_closed()]
+                    if open_pages:
+                        self.page = open_pages[-1]
+                    else:
+                        self.page = await self.page.context.new_page()
+            except Exception as e:
+                logger.error(f"Failed to recover closed page: {e}")
 
         try:
             if action.navigate is not None:
                 await self.page.goto(action.navigate.url, wait_until="domcontentloaded")
+                await asyncio.sleep(0.5)
                 return ActionResult(action_name="navigate", success=True, page_changed=True)
 
             elif action.click is not None:
@@ -721,7 +751,6 @@ class AgentLoop:
                 return ActionResult(action_name="close_tab", success=True, page_changed=True)
 
             elif action.wait is not None:
-                import asyncio
                 await asyncio.sleep(action.wait.seconds)
                 return ActionResult(action_name="wait", success=True)
 
@@ -941,9 +970,16 @@ class AgentLoop:
         return "\n".join(lines)
 
     def _summarize_history(self) -> str:
-        """Generate a summary when the agent hits max steps."""
+        """Generate a summary when the agent hits max steps without calling done."""
         if not self.history:
-            return "No steps were executed."
+            # Even with zero recorded steps (e.g. every step's LLM call failed),
+            # the structural marker must be present so judge.py's heuristic can
+            # detect this as a failure via 'without calling \'done\''.
+            return (
+                f"Agent ran {self.step_number} steps without calling 'done'.\n"
+                "(No steps were recorded — LLM may have been unavailable or action "
+                "execution failed before history could be appended.)"
+            )
 
         steps_text = [entry.to_history_text() for entry in self.history[-3:]]
         return (
@@ -953,7 +989,6 @@ class AgentLoop:
 
     async def _execute_run_command(self, cmd_action: RunCommandAction) -> ActionResult:
         """Execute a local shell command safely."""
-        import asyncio
         from pathlib import Path
 
         cmd = cmd_action.command

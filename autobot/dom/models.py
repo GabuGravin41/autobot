@@ -179,6 +179,7 @@ class BrowserState:
     num_interactive: int = 0
     num_iframes: int = 0
     total_elements: int = 0
+    page_text: str = ""
 
 
 @dataclass

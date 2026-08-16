@@ -300,7 +300,23 @@ class AgentRunner:
             self.log(f"⚡ Mid-flight pivot pushed: {new_instruction}")
 
     def get_status(self) -> dict[str, Any]:
-        """Get current runner status for the dashboard API."""
+        """Get current runner status for the dashboard API and task scheduler.
+
+        The scheduler polls eval_signal, metrics, and stop_progress to drive
+        its ComplexityEstimator stop conditions. Without these keys the entire
+        metric-tracking subsystem silently does nothing.
+        """
+        loop = self._agent_loop
+        last_success = getattr(loop, "_last_done_success", None) if loop else None
+
+        # Derive eval_signal from the loop's last step outcome
+        if self.status in ("done", "completed"):
+            eval_signal = "success" if last_success else "failure"
+        elif self.status == "failed":
+            eval_signal = "failure"
+        else:
+            eval_signal = "continue"
+
         return {
             "status": self.status,
             "goal": self.current_goal,
@@ -309,8 +325,12 @@ class AgentRunner:
             "result": self.result[:500] if self.result else "",
             "history": [
                 entry.to_history_text()
-                for entry in (self._agent_loop.history if self._agent_loop else [])
+                for entry in (loop.history if loop else [])
             ][-5:],  # Last 5 steps
+            # Scheduler metrics — previously missing, causing dead stop conditions
+            "eval_signal": eval_signal,
+            "metrics": getattr(loop, "_step_metrics", {}),
+            "stop_progress": f"Step {self.current_step}/{self.max_steps}" if self.max_steps else "",
         }
 
 

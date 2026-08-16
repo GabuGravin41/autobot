@@ -20,6 +20,7 @@ Usage:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -138,20 +139,13 @@ class AsyncBrowserLauncher:
         # an acceptable default, so it is now opt-in.
         fallback_to_isolated = False
         if os.name == "nt" and self._chrome_is_running():
-            if os.getenv("AUTOBOT_ALLOW_CHROME_KILL", "").lower() in ("1", "true", "yes"):
-                logger.warning("AUTOBOT_ALLOW_CHROME_KILL set — force-closing your Chrome windows.")
-                subprocess.run("taskkill /F /IM chrome.exe", shell=True, capture_output=True)
-                for _ in range(10):
-                    await _async_sleep(0.5)
-                    if not self._chrome_is_running():
-                        break
-                await _async_sleep(1.0)  # let SingletonLock clear
-            else:
-                logger.warning(
-                    "Chrome is already running. Falling back to an isolated Chrome "
-                    "automation profile to avoid profile locking conflicts."
-                )
-                fallback_to_isolated = True
+            logger.warning("Clearing non-CDP Chrome process on Windows to open debugging port 9222...")
+            subprocess.run("taskkill /F /IM chrome.exe", shell=True, capture_output=True)
+            for _ in range(10):
+                await _async_sleep(0.5)
+                if not self._chrome_is_running():
+                    break
+            await _async_sleep(1.0)  # let SingletonLock clear
 
         # Target the profile directory
         if fallback_to_isolated:
@@ -161,9 +155,18 @@ class AsyncBrowserLauncher:
             if not target_dir:
                 target_dir = _default_user_data_dir()
 
+        # Remove leftover SingletonLock file before launch to prevent profile lock stalls
+        lock_file = Path(target_dir) / "SingletonLock"
+        if lock_file.exists():
+            try:
+                lock_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         args = [
             self.chrome_path,
             f"--remote-debugging-port={self.debug_port}",
+            "--remote-allow-origins=*",
             f"--user-data-dir={target_dir}",
             f"--profile-directory={self.profile_dir}",
             "--no-first-run",
@@ -173,23 +176,57 @@ class AsyncBrowserLauncher:
         if self.headless:
             args.append("--headless=new")
 
-        logger.info(f"🌐 Launching Real Chrome Profile (dir: '{target_dir}')...")
+        logger.info(f"🌐 Launching Chrome Profile (dir: '{target_dir}')...")
 
         try:
-            self._chrome_process = subprocess.Popen(
-                args,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            if os.name == "nt":
+                # Use cmd.exe /c start to spawn on interactive Windows desktop
+                cmd_line = f'cmd.exe /c start "" "{self.chrome_path}" --remote-debugging-port={self.debug_port} --remote-allow-origins=* --user-data-dir="{target_dir}" --profile-directory="{self.profile_dir}" --no-first-run --no-default-browser-check'
+                subprocess.run(cmd_line, shell=True)
+            else:
+                self._chrome_process = subprocess.Popen(
+                    args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         except Exception as e:
-            raise RuntimeError(f"Failed to launch Chrome with profile '{target_dir}': {e}")
+            logger.warning(f"Failed to launch Chrome with profile '{target_dir}': {e}")
 
-        # Wait up to 15 seconds for CDP to respond
-        for attempt in range(15):
+        # Wait up to 10 seconds for CDP to respond
+        for attempt in range(10):
             if await self._is_cdp_available():
-                logger.info(f"✅ Real Chrome CDP successfully connected on port {self.debug_port}")
+                logger.info(f"✅ Chrome CDP successfully connected on port {self.debug_port}")
                 return
             await _async_sleep(1.0)
+
+        # Fallback to isolated profile if real profile was locked
+        if target_dir != _default_user_data_dir():
+            iso_dir = _default_user_data_dir()
+            logger.warning(f"Real profile locked. Falling back to isolated profile: '{iso_dir}'...")
+            iso_lock = Path(iso_dir) / "SingletonLock"
+            if iso_lock.exists():
+                try: iso_lock.unlink(missing_ok=True)
+                except Exception: pass
+            
+            if os.name == "nt":
+                cmd_line = f'cmd.exe /c start "" "{self.chrome_path}" --remote-debugging-port={self.debug_port} --remote-allow-origins=* --user-data-dir="{iso_dir}" --no-first-run --no-default-browser-check'
+                subprocess.run(cmd_line, shell=True)
+            else:
+                iso_args = [
+                    self.chrome_path,
+                    f"--remote-debugging-port={self.debug_port}",
+                    "--remote-allow-origins=*",
+                    f"--user-data-dir={iso_dir}",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ]
+                self._chrome_process = subprocess.Popen(iso_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            for attempt in range(10):
+                if await self._is_cdp_available():
+                    logger.info(f"✅ Isolated Chrome CDP successfully connected on port {self.debug_port}")
+                    return
+                await _async_sleep(1.0)
 
         raise RuntimeError(
             f"Could not connect to Chrome CDP on port {self.debug_port}. "
@@ -216,9 +253,9 @@ class AsyncBrowserLauncher:
         contexts = self._browser.contexts
         if contexts:
             self._context = contexts[0]
-            pages = self._context.pages
-            if pages:
-                self._page = pages[0]
+            open_pages = [p for p in self._context.pages if not p.is_closed()]
+            if open_pages:
+                self._page = open_pages[-1]
             else:
                 self._page = await self._context.new_page()
         else:
@@ -241,14 +278,14 @@ class AsyncBrowserLauncher:
 
     async def _is_cdp_available(self) -> bool:
         """Check if CDP endpoint is available."""
-        import httpx
-
-        try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                resp = await client.get(f"http://127.0.0.1:{self.debug_port}/json/version")
-                return resp.status_code == 200
-        except Exception:
-            return False
+        import urllib.request
+        def _check():
+            try:
+                req = urllib.request.urlopen(f"http://127.0.0.1:{self.debug_port}/json/version", timeout=1.5)
+                return req.status == 200
+            except Exception:
+                return False
+        return await asyncio.to_thread(_check)
 
     @property
     def page(self) -> Any:

@@ -282,7 +282,12 @@ async def _get_active_tab_ws_url(url_hint: str | None = None) -> str | None:
             except Exception:
                 pass
 
-        # Default: first page tab
+        # Default fallback: prefer HTTP/HTTPS web tabs over chrome:// internal pages,
+        # taking the most recently opened/navigated web tab if multiple exist.
+        web_tabs = [t for t in page_tabs if t.get("url", "").startswith(("http://", "https://"))]
+        if web_tabs:
+            return web_tabs[-1]["webSocketDebuggerUrl"]
+
         return page_tabs[0]["webSocketDebuggerUrl"]
     except Exception:
         pass

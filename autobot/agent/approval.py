@@ -205,6 +205,9 @@ class ApprovalGuard:
             return True
 
         if tier == RiskTier.IRREVERSIBLE:
+            if os.getenv("AUTOBOT_AUTO_APPROVE") == "1":
+                logger.warning(f"[AUTO_APPROVE/IRREVERSIBLE] Proceeding automatically: {text[:100]}")
+                return True
             return await self._request_approval(text, tier_label, goal, timeout)
 
         if self.mode == "trusted":

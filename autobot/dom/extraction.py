@@ -133,6 +133,7 @@ class DOMExtractionService:
             num_interactive=len(children),
             num_iframes=0,
             total_elements=len(children),
+            page_text=snapshot.text or "",
         )
 
     def _build_node(self, raw: dict) -> DOMElementNode | None:

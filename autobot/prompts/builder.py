@@ -189,6 +189,12 @@ class StepPromptBuilder:
         else:
             sections.append("Interactive elements:\nempty page")
 
+        # Visible text summary — headings, paragraphs, and main content
+        if bs.page_text:
+            text_preview = bs.page_text[:1500].strip()
+            if text_preview:
+                sections.append(f"Visible page text:\n{text_preview}")
+
         return "\n".join(sections)
 
     def build_messages(self, use_vision: bool = True) -> list[dict[str, Any]]:

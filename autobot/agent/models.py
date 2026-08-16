@@ -290,7 +290,18 @@ class StepHistoryEntry(BaseModel):
             error_text = f" Error: {result.error}" if result.error else ""
             lines.append(f"  Action {i + 1}: {status} {action_desc}{error_text}")
 
+            # CRITICAL: surface extracted_content (e.g. run_command stdout) so
+            # the LLM can see the result in the next step and decide to call
+            # done() instead of blindly re-running the same command.
+            if result.extracted_content:
+                # Indent and cap at 300 chars to avoid flooding the prompt
+                preview = result.extracted_content[:300]
+                if len(result.extracted_content) > 300:
+                    preview += "... [truncated]"
+                for line in preview.splitlines():
+                    lines.append(f"    > {line}")
+
         if self.url_before != self.url_after:
-            lines.append(f"  URL changed: {self.url_before[:50]} → {self.url_after[:50]}")
+            lines.append(f"  URL changed: {self.url_before[:50]} -> {self.url_after[:50]}")
 
         return "\n".join(lines)

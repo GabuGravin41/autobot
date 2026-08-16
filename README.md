@@ -1,8 +1,20 @@
 # Autobot
 
-Autobot is a local desktop automation controller designed to execute your repetitive workflows through your existing laptop setup.
+Autobot is a local autonomous OS co-pilot and desktop automation controller designed to execute complex workflows directly on your laptop setup.
 
-**Product direction and long-term vision (gene annotation, Kaggle, LeetCode, AI iteration):** see **[VISION.md](VISION.md)** in the project root.
+## 🚀 Autonomous OS Co-Pilot Architecture
+
+Autobot is built on 4 core pillars:
+
+1. **Perception (`autobot/perception/`)**: Captures desktop screen vision, active OS window titles, open application lists, and browser DOM trees into a unified `PerceptionSnapshot`.
+2. **Actuation (`autobot/actuation/`)**: Universal execution controller for Playwright CDP browser actions, native mouse/keyboard desktop actions (`PyAutoGUI`), and terminal CLI commands.
+3. **Governance & Permission Dial (`autobot/governance/`)**: Granular user control with 3 permission tiers:
+   - 🛡️ `level_0_observer`: Read-only, asks confirmation before taking OS actions.
+   - ⚡ `level_1_supervised`: Auto-approves safe actions, prompts before irreversible operations (deleting files, sending external messages).
+   - 🚀 `level_2_full`: Full autonomous execution.
+4. **Unified Agent Loop (`autobot/agent/`)**: Connects Perception → Governance → Planning → Actuation → Reflection in a non-blocking execution loop.
+
+**Product direction and long-term vision:** see **[VISION.md](VISION.md)** in the project root.
 
 ## Current capabilities
 

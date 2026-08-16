@@ -120,6 +120,7 @@ class Keyboard:
             logger.debug(f"xdotool key failed ({e}), falling back to pyautogui")
 
         import pyautogui
+        pyautogui.FAILSAFE = False
         if "+" in key:
             parts = [self._KEY_MAP.get(k.strip(), k.strip().lower()) for k in key.split("+")]
             pyautogui.hotkey(*parts)
@@ -136,6 +137,7 @@ class Keyboard:
                    for copy, hotkey('ctrl', 'shift', 't') for reopen tab.
         """
         import pyautogui
+        pyautogui.FAILSAFE = False
         pyautogui.hotkey(*keys)
         logger.debug(f"Keyboard hotkey: {'+'.join(keys)}")
 

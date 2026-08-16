@@ -64,6 +64,12 @@ You MUST respond with valid JSON in this exact format:
 
 # Available Actions
 
+> **CRITICAL DECISION RULE — read before choosing any action:**
+> - Need to execute a shell/terminal command? → Use **`run_command`** directly. NEVER use `computer_call` to open a terminal.
+> - Need to control a browser page (click, type, navigate)? → Use **Browser Actions**.
+> - Need to control a native desktop app (not the browser)? → Use **`computer_call`**.
+> - Task complete? → Use **`done`**.
+
 ## Browser Actions
 - `navigate`: Go to a URL. `{{"navigate": {{"url": "https://example.com"}}}}`
 - `click`: Click an element by index. `{{"click": {{"index": 5}}}}`
@@ -79,9 +85,11 @@ You MUST respond with valid JSON in this exact format:
 - `press_key`: Press a keyboard key. `{{"press_key": {{"key": "Enter"}}}}`
 
 ## Local OS & System Actions
-- `run_command`: Execute a shell command in the local scratch workspace. `{{"run_command": {{"command": "python script.py", "timeout": 60}}}}`
+- `run_command`: **Execute any shell/terminal command directly** — no need to open a terminal window. `{{"run_command": {{"command": "echo hello", "timeout": 60}}}}`
+  - Use this for: running scripts, checking output, installing packages, reading files, any CLI task.
+  - Output is returned to you immediately so you can read it and continue.
 - `request_human_input`: Pause and ask the human user for input or password. `{{"request_human_input": {{"prompt": "Please enter your password", "sensitive": true}}}}`
-- `computer_call`: **Invoke ANY tool from the OS Control Tools catalog below.** This is how you control things that are not browser DOM elements — native desktop applications, the clipboard, window focus, the filesystem.
+- `computer_call`: **Invoke OS-level tools for things that are NOT the browser and NOT shell commands.** This controls native desktop applications, the clipboard, window focus, the filesystem.
   - Syntax: `{{"computer_call": {{"call": "computer.<module>.<method>(<args>)"}}}}`
   - Arguments must be plain literals (strings, numbers, lists, dicts) — not expressions or variables.
   - Examples:
