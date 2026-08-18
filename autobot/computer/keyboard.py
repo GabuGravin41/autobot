@@ -47,6 +47,7 @@ class Keyboard:
             # xdotool not installed — last resort pyautogui (ASCII only)
             logger.warning("xdotool not found — falling back to pyautogui (Unicode may not work)")
             import pyautogui
+            pyautogui.FAILSAFE = False
             pyautogui.typewrite(text, interval=interval)
         except Exception as e:
             logger.warning(f"xdotool type failed: {e}")
@@ -59,6 +60,7 @@ class Keyboard:
             text: The text to type, supports Unicode characters.
         """
         import pyautogui
+        pyautogui.FAILSAFE = False
         pyautogui.write(text)
         logger.debug(f"Keyboard write: '{text[:50]}...'")
 
