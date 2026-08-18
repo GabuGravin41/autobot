@@ -102,25 +102,29 @@ class AgentRunner:
         self.log(f"📋 Max steps: {steps} | Model: {self.model}")
 
         try:
-            # 1. Attach a browser IF WE CAN — but never let its absence end the
-            # run. Plenty of goals ("open Notepad and type hello", "run this
-            # script", "focus Artemis and read the annotation") involve no
-            # browser at all, and this used to raise and kill the task before
-            # a single agent step executed. Autobot is a computer-use agent,
-            # not a browser-only agent: no Chrome means reduced capability,
-            # not failure.
-            self.log("🌐 Attaching to Chrome via CDP...")
+            # 1. Attach browser ONLY if task requires web automation
+            # Goals like "open Notepad and type hello" or "run this CLI script"
+            # do not need Chrome — starting Chrome unconditionally adds 5-10s
+            # startup delay and forces isolated profile switches unnecessarily.
+            requires_web = any(
+                kw in goal.lower()
+                for kw in ("http://", "https://", "chrome", "browser", "website", "url", "overleaf", "grok", "kaggle", "wikipedia", "web.whatsapp", "site")
+            )
             page = None
-            try:
-                page = await self.browser_launcher.start()
-                self.log(f"✅ Browser connected. Current page: {page.url}")
-            except Exception as browser_error:
-                self.log(
-                    "⚠️  No browser attached - continuing in OS-only mode "
-                    "(native apps, mouse/keyboard, terminal, files still work).\n"
-                    f"    Reason: {str(browser_error).splitlines()[0]}"
-                )
-                logger.warning(f"Browser attach failed, degrading to OS-only: {browser_error}")
+            if requires_web:
+                self.log("🌐 Web goal detected — attaching to Chrome via CDP...")
+                try:
+                    page = await self.browser_launcher.start()
+                    self.log(f"✅ Browser connected. Current page: {page.url}")
+                except Exception as browser_error:
+                    self.log(
+                        "⚠️  No browser attached - continuing in OS-only mode "
+                        "(native apps, mouse/keyboard, terminal, files still work).\n"
+                        f"    Reason: {str(browser_error).splitlines()[0]}"
+                    )
+                    logger.warning(f"Browser attach failed, degrading to OS-only: {browser_error}")
+            else:
+                self.log("⚡ Desktop OS goal detected — starting instantly in native OS mode...")
 
             # 2. Create LLM client if not provided
             if self.llm_client is None:

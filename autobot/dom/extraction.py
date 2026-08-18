@@ -75,6 +75,8 @@ class DOMExtractionService:
         instead of crashing the whole run.
         """
         url_hint = self._safe_page_url()
+        if self.page is None or (hasattr(self.page, "is_closed") and self.page.is_closed()):
+            return self._empty_state(url_hint)
 
         try:
             snapshot = await get_page_snapshot(url_hint=url_hint)
