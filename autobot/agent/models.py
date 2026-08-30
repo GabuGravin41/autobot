@@ -6,10 +6,17 @@ the expected structured output from the LLM at each step.
 
 The LLM must return:
     - thinking: chain-of-thought reasoning
+    - proxy_assessment: structured scene understanding (proxy tasks)
     - evaluation_previous_goal: did the last action work?
     - memory: key facts to remember
     - next_goal: what to do next
     - action: list of actions to execute
+
+Tesla V12 lesson applied: proxy_assessment forces the LLM to "show its
+work" — predicting target element, expected state delta, focus, and risk
+BEFORE emitting the action list.  This prevents shortcut/degenerate
+reasoning where the model outputs the correct action without understanding
+the scene that made the action appropriate.
 """
 from __future__ import annotations
 
@@ -109,6 +116,57 @@ class ComputerCallAction(BaseModel):
     call: str
 
 
+
+# ─────────────────────────────────────────────
+# Proxy Assessment — "show your work" block
+# Tesla V12 lesson: forces scene understanding before the action decision.
+# The model must correctly identify the target, predict the observable
+# state change, and label the risk before its action list is accepted.
+# This prevents degenerate "just click [N]" shortcuts where the correct
+# action is produced for the wrong (or no) reason.
+# ─────────────────────────────────────────────
+
+class ProxyAssessment(BaseModel):
+    """Structured scene-understanding block that the LLM fills BEFORE acting.
+
+    Think of this as Tesla's proxy tasks: the network is forced to predict
+    segmentation, geometry, and tracking targets alongside the control output.
+    Here, we force the LLM to articulate WHY it is taking the next action.
+    """
+    target_element: str = Field(
+        default="",
+        description=(
+            "Describe the specific element you are about to interact with: "
+            "its tag, role, visible text, and [index] if applicable. "
+            "If no element interaction: write 'N/A'."
+        ),
+    )
+    expected_state_delta: str = Field(
+        default="",
+        description=(
+            "What OBSERVABLE change do you predict will happen immediately after "
+            "this action? Be concrete: URL will change to X, element Y will appear, "
+            "text Z will update. This is verified after execution."
+        ),
+    )
+    active_window_focus: str = Field(
+        default="",
+        description=(
+            "Which application/window currently has OS focus? "
+            "Is it the correct one for this action? "
+            "If wrong: describe how you will fix focus first."
+        ),
+    )
+    risk_label: str = Field(
+        default="safe",
+        description=(
+            "One of: 'safe' | 'caution' | 'danger' | 'irreversible'. "
+            "Is this action reversible? What is the worst-case outcome "
+            "if it fires on the wrong element?"
+        ),
+    )
+
+
 # ─────────────────────────────────────────────
 # Action Union — all possible actions the agent can take
 # ─────────────────────────────────────────────
@@ -198,10 +256,23 @@ class AgentOutput(BaseModel):
     The complete structured output from the LLM at each step.
 
     Adapted from Browser Use's structured JSON output requirement.
-    Forces the LLM to think, evaluate, remember, plan, then act.
+    Forces the LLM to think, proxy-assess, evaluate, remember, plan, then act.
+
+    Tesla V12 lesson: proxy_assessment is the "auxiliary head" — it captures
+    scene understanding independently of the action decision, preventing the
+    model from reaching the right action for the wrong reason.
     """
     thinking: str = Field(
         description="Step-by-step reasoning about current state and what to do."
+    )
+    proxy_assessment: ProxyAssessment | None = Field(
+        default=None,
+        description=(
+            "REQUIRED: Structured scene-understanding block. Fill this BEFORE the "
+            "action list. Describe the target element, the observable state change "
+            "you predict, the active window focus, and the risk level. "
+            "Omitting this degrades verification quality."
+        ),
     )
     evaluation_previous_goal: str = Field(
         default="",
@@ -251,12 +322,19 @@ class StepHistoryEntry(BaseModel):
     """
     Record of one step in the agent's history.
     Includes what the agent thought, what it did, and what happened.
+
+    Tesla V12 lesson: verification_result is the external verifier's verdict
+    on whether the agent's predicted state delta (proxy_assessment) actually
+    occurred.  Surfacing it in to_history_text() gives the next step's LLM
+    call a dense, immediate credit signal — analogous to auxiliary proxy
+    losses firing before the action gradient appears.
     """
     step_number: int
     agent_output: AgentOutput
     action_results: list[ActionResult]
     url_before: str
     url_after: str
+    verification_result: str | None = None  # set by StepVerifier after execution
 
     def to_history_text(self) -> str:
         """
@@ -304,4 +382,15 @@ class StepHistoryEntry(BaseModel):
         if self.url_before != self.url_after:
             lines.append(f"  URL changed: {self.url_before[:50]} -> {self.url_after[:50]}")
 
+        # ── Dense verification signal (Tesla V12 proxy task lesson) ───────────
+        # Surface the StepVerifier's verdict immediately so the next LLM call
+        # sees whether its prediction was correct — not just whether the action
+        # succeeded.  A SILENT_FAIL (action returned success=True but predicted
+        # state change never appeared) is the most dangerous case: without this
+        # line the model would assume the step worked and keep building on a
+        # broken foundation.
+        if self.verification_result:
+            lines.append(f"  Verification: {self.verification_result}")
+
         return "\n".join(lines)
+

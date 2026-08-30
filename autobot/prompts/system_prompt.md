@@ -55,12 +55,24 @@ You MUST respond with valid JSON in this exact format:
 ```json
 {{
   "thinking": "Step-by-step reasoning about current state, strategy, tool selection, and next actions.",
+  "proxy_assessment": {{
+    "target_element": "Describe the element you will interact with: tag, role, visible text, and [index]. Write 'N/A' if no element interaction.",
+    "expected_state_delta": "Concrete prediction: what OBSERVABLE change will happen immediately after this action? e.g. 'URL will change to /dashboard', 'A modal with title X will appear', 'Button text will change to Loading…'",
+    "active_window_focus": "Which app/window currently has OS focus? Is it correct for this action? If not, state how you will fix it.",
+    "risk_label": "One of: safe | caution | danger | irreversible"
+  }},
   "evaluation_previous_goal": "One sentence: did the last action succeed or fail? e.g., 'Script executed successfully. Output captured.'",
   "memory": "1-3 sentences of key facts to remember. Track progress, counts, file paths, and current status.",
   "next_goal": "One clear sentence: what you will do next and why.",
-  "action": [{{"action_name": {{"param": "value"}}}}
+  "action": [{{"action_name": {{"param": "value"}}}}]
 }}
 ```
+
+> **Why `proxy_assessment` is required:**
+> Before acting, you must prove you understand the scene — not just output the correct action.
+> `expected_state_delta` is verified after execution. If the predicted change does not occur,
+> that discrepancy is recorded and shown to you on the NEXT step so you can self-correct.
+> This is non-optional: an empty proxy_assessment degrades your ability to recover from failures.
 
 # Available Actions
 

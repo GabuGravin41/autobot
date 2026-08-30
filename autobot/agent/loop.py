@@ -43,12 +43,14 @@ from autobot.agent.models import (
     ScrollAction,
     StepHistoryEntry,
 )
+from autobot.agent.step_verifier import StepVerifier
 from autobot.computer.computer import Computer
 from autobot.dom.extraction import DOMExtractionService
 from autobot.dom.models import BrowserState, DOMSerializedState
 from autobot.governance.permissions import PermissionLevel, PermissionManager
 from autobot.knowledge.environment_memory import EnvironmentMemory
 from autobot.knowledge.skill_distiller import SkillDistiller
+from autobot.learning.trace_logger import TraceLogger
 from autobot.perception.manager import PerceptionManager
 from autobot.prompts.builder import StepPromptBuilder, SystemPromptBuilder
 
@@ -131,7 +133,7 @@ class AgentLoop:
         # 1-2k tokens each, versus a few hundred for the DOM text). Most
         # browser steps don't need one: the DOM snapshot already names every
         # interactive element. So send vision only when it actually adds
-        # information — see _should_use_vision().
+        # information — see _select_execution_mode().
         #   always    — every step (most expensive; use when debugging)
         #   auto      — first step, after a failure, or when the DOM is sparse
         #   never     — text only (cheapest; blind to canvas/image-only UIs)
@@ -151,6 +153,21 @@ class AgentLoop:
         self.env_memory = EnvironmentMemory()
         self.skill_distiller = SkillDistiller()
         self.approval_guard = ApprovalGuard()
+
+        # ── Tesla V12-inspired additions ──────────────────────────────────
+        # StepVerifier: compares the LLM's predicted state delta
+        # (proxy_assessment.expected_state_delta) against what actually
+        # happened after each action batch.  Stateless — safe to share.
+        self.step_verifier = StepVerifier()
+
+        # TraceLogger: records full {perception, prediction, action, verdict}
+        # per step to runs/<timestamp>/traces.jsonl for offline analysis and
+        # future fine-tuning (the "offline teacher dataset" concept).
+        self.trace_logger = TraceLogger()
+
+        # Whether the last step's verification failed — used by
+        # _select_execution_mode() to escalate to diagnostic (full) perception.
+        self._last_verification_failed = False
 
         # ── Autonomous Co-Pilot 4 Pillars ─────────────────────────────────
         self.perception_manager = PerceptionManager()
@@ -203,6 +220,7 @@ class AgentLoop:
         while self.step_number < self.max_steps:
             if self.is_cancelled:
                 logger.warning("⚠️ Agent loop cancelled — halting execution immediately")
+                self.trace_logger.finalize(success=False, result_text="Task cancelled by user.")
                 return "Task cancelled by user."
 
             try:
@@ -211,6 +229,7 @@ class AgentLoop:
                 if result is not None:
                     # Agent called "done" — task is complete
                     logger.info(f"✅ Agent finished at step {self.step_number + 1}: {result}")
+                    self.trace_logger.finalize(success=self._last_done_success, result_text=result)
                     self._distill_skill_if_successful(result)
                     return result
 
@@ -228,7 +247,9 @@ class AgentLoop:
 
         # Hit max steps without completing
         logger.warning(f"⚠️ Agent hit max steps ({self.max_steps}) without completing")
-        return self._summarize_history()
+        summary = self._summarize_history()
+        self.trace_logger.finalize(success=False, result_text=summary)
+        return summary
 
     def _distill_skill_if_successful(self, result: str) -> None:
         """
@@ -329,6 +350,28 @@ class AgentLoop:
             browser_state,
         )
 
+        # ─── 3b. VERIFY (Tesla V12 proxy task lesson) ───────────────────
+        # Compare the LLM's predicted state delta to what actually happened.
+        # This is the "auxiliary head" signal: immediate feedback before the
+        # downstream consequences of a wrong assumption alter the control output.
+        url_after_actions = self._page_url()
+        verification = self.step_verifier.verify(
+            proxy_assessment=agent_output.proxy_assessment,
+            action_results=action_results,
+            url_before=url_before,
+            url_after=url_after_actions,
+        )
+        self._last_verification_failed = not verification.passed
+        if not verification.passed:
+            logger.warning(
+                f"⚠️  Step {self.step_number + 1} verification [{verification.label}]: "
+                f"{verification.reason}"
+            )
+        else:
+            logger.debug(
+                f"✅ Step {self.step_number + 1} verification [{verification.label}]"
+            )
+
         # ─── 4. RECORD ───
         url_after = self._page_url()
         entry = StepHistoryEntry(
@@ -337,8 +380,23 @@ class AgentLoop:
             action_results=action_results,
             url_before=url_before,
             url_after=url_after,
+            verification_result=verification.history_text,
         )
         self.history.append(entry)
+
+        # ─── 4b. TRACE (offline teacher dataset) ────────────────────────
+        # Write the full step record to JSONL for future fine-tuning.
+        # Screenshot is only included if AUTOBOT_TRACE_VISION=1.
+        self.trace_logger.log_step(
+            step_number=self.step_number,
+            goal=self.goal,
+            agent_output=agent_output,
+            action_results=action_results,
+            verification_result=verification,
+            url_before=url_before,
+            url_after=url_after,
+            screenshot_b64=browser_state.screenshot_b64 or "",
+        )
 
         step_time = time.time() - step_start
         logger.debug(f"Step {self.step_number + 1} completed in {step_time:.1f}s")
@@ -402,38 +460,55 @@ class AgentLoop:
             logger.debug(f"Native window extraction skipped: {e}")
             return ""
 
-    def _should_use_vision(self, browser_state: BrowserState) -> bool:
+    def _select_execution_mode(self, browser_state: BrowserState) -> str:
         """
-        Decide whether this step is worth a screenshot.
+        Choose between "fast" and "diagnostic" execution modes.
 
-        Sending an image every step is the single largest recurring cost in a
-        run, and on a well-described DOM page it usually tells the model
-        nothing the element list didn't already. We spend it where it pays:
-        orienting on the first step, recovering after something went wrong,
-        and whenever the text description looks too thin to act on.
+        Tesla V12 lesson — dual-speed execution:
+          The deployed in-car network runs at deterministic, minimal latency.
+          When something goes wrong, the heavy offline teacher pipeline kicks in
+          with past+future frames, multi-view reconstruction, and more compute.
+
+          Here we implement the same principle:
+          - FAST (default): text-only DOM, no screenshot.  Cheap and sufficient
+            for most well-understood steps.
+          - DIAGNOSTIC: full screenshot + native window state.  Activated when
+            the page is sparse/ambiguous, the last step failed, or the step
+            verifier detected a SILENT_FAIL or FAILED verdict last cycle.
+
+        Returns "fast" or "diagnostic".
         """
         if self.vision_mode == "never":
-            return False
+            return "fast"
         if self.vision_mode == "always":
-            return True
+            return "diagnostic"
 
-        # auto:
+        # "auto" mode heuristics:
+
+        # Orient once at the start of the run
         if self.step_number == 0:
-            return True  # orient once at the start
+            return "diagnostic"
 
-        # The DOM didn't describe much — likely a canvas app, an image-only
-        # UI, or a page still rendering. Look at it directly.
+        # DOM too sparse to describe the page → screenshot is worth the cost
         if browser_state.num_interactive < self._sparse_dom_threshold:
-            return True
+            return "diagnostic"
 
-        # Something failed last step: the text state evidently wasn't enough
-        # to choose a working action, so pay for eyes on the retry.
+        # Last step's verifier flagged a problem → escalate to full perception
+        if self._last_verification_failed:
+            logger.info("🔍 Diagnostic mode: last verification failed — capturing full screenshot")
+            return "diagnostic"
+
+        # Action-level failure on last step (existing heuristic)
         if self.history:
             last = self.history[-1]
             if any(not r.success for r in last.action_results):
-                return True
+                return "diagnostic"
 
-        return False
+        return "fast"
+
+    def _should_use_vision(self, browser_state: BrowserState) -> bool:
+        """Backward-compatible alias — returns True when mode is 'diagnostic'."""
+        return self._select_execution_mode(browser_state) == "diagnostic"
 
     async def _call_llm(
         self, browser_state: BrowserState, native_context: str = ""

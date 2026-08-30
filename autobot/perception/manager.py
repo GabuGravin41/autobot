@@ -68,6 +68,49 @@ class PerceptionManager:
 
         return snapshot
 
+    async def capture_diagnostic(self, page: Optional[Any] = None) -> PerceptionSnapshot:
+        """Capture an enriched diagnostic snapshot for the heavy-perception path.
+
+        Tesla V12 lesson — diagnostic path:
+          When the step verifier escalates to DIAGNOSTIC mode (SILENT_FAIL or
+          FAILED verdict), the agent needs more context than the standard DOM
+          snapshot provides.  This method captures the full OS environment:
+          all open windows, active title, screen screenshot, and page details.
+
+          Unlike capture() which runs on every step, capture_diagnostic() is
+          the heavyweight offline-teacher equivalent — it spends more time and
+          gathers more signal.  The result is summarised into the step prompt's
+          native_window_context so the LLM can see the full picture.
+
+        Never raises — perception failures must not kill the run.
+        """
+        try:
+            snapshot = await self.capture(page)
+
+            # Enrich: re-query open windows (may have changed since last step)
+            snapshot.open_windows = self._get_open_windows()
+
+            # Add structured environment summary to cli_output field
+            env_lines = [
+                f"Active window: {snapshot.active_window_title}",
+                f"Open windows ({len(snapshot.open_windows)}): "
+                + (", ".join(snapshot.open_windows[:8]) or "none detected"),
+            ]
+            if snapshot.browser_url:
+                env_lines.append(f"Browser URL: {snapshot.browser_url}")
+            if snapshot.browser_title:
+                env_lines.append(f"Browser title: {snapshot.browser_title}")
+            snapshot.cli_output = "\n".join(env_lines)
+
+            logger.info(
+                f"🔬 Diagnostic snapshot: {snapshot.active_window_title!r} | "
+                f"{len(snapshot.open_windows)} windows | screenshot={'yes' if snapshot.screen_b64 else 'no'}"
+            )
+            return snapshot
+        except Exception as e:
+            logger.warning(f"capture_diagnostic() failed — returning empty snapshot: {e}")
+            return PerceptionSnapshot()
+
     @staticmethod
     def _get_active_window_title() -> str:
         """Get the title of the foreground active window on Windows/OS."""
