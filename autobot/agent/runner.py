@@ -1,17 +1,17 @@
 """
-Agent Runner — Manages the lifecycle of an agent task (browser + LLM + loop).
+Agent Runner — Manages the lifecycle of one agent task.
 
-This is the top-level entry point that the dashboard API calls.
-It handles:
-    1. Launching Chrome via CDP
-    2. Setting up the OpenAI client with the user's LLM config
-    3. Running the AgentLoop
-    4. Logging step-by-step progress
-    5. Cleanup on completion or error
+Simplified from the old runner.py. No browser launcher required upfront,
+no MissionAgent routing, no Judge call. Just:
 
-Usage:
-    runner = AgentRunner.from_env()
-    result = await runner.run("search for AI papers on arxiv")
+  1. Build a Computer (UIAutomation, keyboard, mouse, etc.)
+  2. Create a CoreLoop
+  3. Run it
+  4. Return the result
+
+The web API (web/app.py) and CLI (cli.py) both call AgentRunner.from_env().
+The interface is preserved — from_env(), run(), cancel(), push_override(),
+get_status(), current_step, max_steps — so neither caller needs to change.
 """
 from __future__ import annotations
 
@@ -19,44 +19,36 @@ import logging
 import os
 from typing import Any, Callable
 
-from autobot.agent.loop import AgentLoop
-from autobot.browser.launcher import AsyncBrowserLauncher
-
 logger = logging.getLogger(__name__)
 
 
 class AgentRunner:
     """
-    Top-level runner that manages browser + LLM + agent loop lifecycle.
+    Top-level runner: Computer + LLM + CoreLoop.
 
     The dashboard API creates one of these per task and calls run().
     """
 
     def __init__(
         self,
-        browser_launcher: AsyncBrowserLauncher | None = None,
         llm_client: Any | None = None,
         model: str = "gpt-4o",
         max_steps: int = 25,
-        use_vision: bool = True,
         log_callback: Callable[[str], None] | None = None,
         task_id: str | None = None,
-    ):
-        self.browser_launcher = browser_launcher or AsyncBrowserLauncher.from_env()
+    ) -> None:
         self.llm_client = llm_client
         self.model = model
         self.max_steps = max_steps
-        self.use_vision = use_vision
         self.log = log_callback or (lambda msg: logger.info(msg))
         self.task_id = task_id
 
-        # State tracking for dashboard
-        self.status: str = "idle"  # idle | starting | running | done | failed
+        # Status tracking for dashboard
+        self.status: str = "idle"   # idle | starting | running | done | failed | cancelled
         self.current_step: int = 0
         self.current_goal: str = ""
         self.result: str = ""
-        self._agent_loop: AgentLoop | None = None
-        self._mission_agent: Any | None = None
+        self._loop: Any | None = None   # CoreLoop, set during run()
 
     @classmethod
     def from_env(
@@ -64,18 +56,9 @@ class AgentRunner:
         log_callback: Callable[[str], None] | None = None,
         task_id: str | None = None,
     ) -> "AgentRunner":
-        """Create runner from environment variables."""
+        """Create a runner from environment variables (.env / os.environ)."""
         llm_client = _create_llm_client()
-        provider = os.getenv("AUTOBOT_LLM_PROVIDER", "").lower()
-        has_gemini = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-        if provider == "gemini" or (has_gemini and not os.getenv("OPENROUTER_API_KEY")):
-            default_model = "gemini-1.5-flash"
-        else:
-            default_model = "gpt-4o"
-
-        model = os.getenv("AUTOBOT_LLM_MODEL") or default_model
-
+        model = _default_model()
         return cls(
             llm_client=llm_client,
             model=model,
@@ -85,10 +68,10 @@ class AgentRunner:
 
     async def run(self, goal: str, max_steps: int | None = None) -> str:
         """
-        Run a task end-to-end: launch browser → run agent loop → return result.
+        Run a task end-to-end: UIAutomation → CoreLoop → result.
 
         Args:
-            goal: Natural language task description.
+            goal:      Natural language task description.
             max_steps: Override max steps (default: self.max_steps).
 
         Returns:
@@ -98,231 +81,87 @@ class AgentRunner:
         self.current_goal = goal
         steps = max_steps or self.max_steps
 
-        self.log(f"🤖 Starting task: {goal}")
+        self.log(f"🤖 Starting: {goal}")
         self.log(f"📋 Max steps: {steps} | Model: {self.model}")
 
-        try:
-            # 1. Attach browser ONLY if task requires web automation
-            # Goals like "open Notepad and type hello" or "run this CLI script"
-            # do not need Chrome — starting Chrome unconditionally adds 5-10s
-            # startup delay and forces isolated profile switches unnecessarily.
-            requires_web = any(
-                kw in goal.lower()
-                for kw in ("http://", "https://", "chrome", "browser", "website", "url", "overleaf", "grok", "kaggle", "wikipedia", "web.whatsapp", "site")
+        # Ensure we have an LLM client
+        if self.llm_client is None:
+            self.llm_client = _create_llm_client()
+        if self.llm_client is None:
+            msg = (
+                "No LLM client available. Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, "
+                "or OPENAI_API_KEY in .env. Run 'autobot --doctor' to check your setup."
             )
-            page = None
-            if requires_web:
-                self.log("🌐 Web goal detected — attaching to Chrome via CDP...")
-                try:
-                    page = await self.browser_launcher.start()
-                    self.log(f"✅ Browser connected. Current page: {page.url}")
-                except Exception as browser_error:
-                    self.log(
-                        "⚠️  No browser attached - continuing in OS-only mode "
-                        "(native apps, mouse/keyboard, terminal, files still work).\n"
-                        f"    Reason: {str(browser_error).splitlines()[0]}"
-                    )
-                    logger.warning(f"Browser attach failed, degrading to OS-only: {browser_error}")
-            else:
-                self.log("⚡ Desktop OS goal detected — starting instantly in native OS mode...")
+            self.log(f"❌ {msg}")
+            self.status = "failed"
+            self.result = msg
+            return msg
 
-            # 2. Create LLM client if not provided
-            if self.llm_client is None:
-                self.llm_client = _create_llm_client()
-                if self.llm_client is None:
-                    raise RuntimeError(
-                        "No usable LLM client. Either no API key is set (ANTHROPIC_API_KEY, "
-                        "OPENROUTER_API_KEY, or OPENAI_API_KEY in .env), or ANTHROPIC_API_KEY "
-                        "is set but the 'anthropic' package isn't installed (pip install anthropic). "
-                        "Run 'autobot --doctor' to see which."
-                    )
+        try:
+            from autobot.computer.computer import Computer
+            from autobot.agent.core_loop import CoreLoop
 
-            # 3. Route by complexity. A goal like "open Chrome, hold a 6-turn
-            # conversation on Grok, switch tabs, create+name an Overleaf
-            # project, paste LaTeX, recompile" has multiple independent
-            # phases — previously this ALWAYS went through one flat AgentLoop
-            # sharing a single step budget across the entire goal, with no
-            # phase boundaries. Multi-phase goals now get MissionAgent's
-            # objective decomposition (its own step budget per phase);
-            # single-phase goals keep the original flat-loop path unchanged.
+            computer = Computer()
+
+            def _step_log(msg: str) -> None:
+                self.log(msg)
+                # Mirror the loop's step count
+                if self._loop is not None:
+                    self.current_step = self._loop.step_number
+
+            self._loop = CoreLoop(
+                computer=computer,
+                llm_client=self.llm_client,
+                goal=goal,
+                model=self.model,
+                max_steps=steps,
+                log=_step_log,
+            )
             self.status = "running"
-            from autobot.agent.orchestrator import TaskClassifier
-
-            if TaskClassifier.is_complex(goal):
-                self.log("🔀 Multi-phase goal detected — using MissionAgent objective decomposition")
-                loop_result, history_summary = await self._run_mission(page, goal, steps)
-            else:
-                loop_result, history_summary = await self._run_single_loop(page, goal, steps)
-
-            # 4. Evaluate outcome — either a real Judge LLM call, or, if the
-            # user has opted out of the extra API cost, a free heuristic
-            # using signals already computed by the run itself.
-            #
-            # The Judge is a genuinely SEPARATE LLM call on every single run
-            # — it roughly doubles token spend for the "was this actually
-            # correct" check, on top of whatever the task itself cost. That's
-            # worth paying for by default (it catches an agent that
-            # confidently believed it succeeded when it didn't), but it
-            # shouldn't be mandatory: AUTOBOT_VISION_MODE and
-            # AUTOBOT_APPROVAL_MODE already establish this project's pattern
-            # of cost/behavior knobs, and this is the same category.
-            if os.getenv("AUTOBOT_SKIP_JUDGE", "").lower() in ("1", "true", "yes"):
-                self.log("⚖️ Judge Agent skipped (AUTOBOT_SKIP_JUDGE) — using the run's own success signal")
-                judge_success = (
-                    self._agent_loop.last_done_success if self._agent_loop is not None
-                    else loop_result.startswith("Mission Success!")
-                )
-                from autobot.agent.judge import JudgeOutput
-                judge_output = JudgeOutput(
-                    success=judge_success,
-                    reasoning="Judge LLM call skipped (AUTOBOT_SKIP_JUDGE); "
-                              "verdict is the run's own done(success=...) signal, unverified by a second model.",
-                )
-            else:
-                self.log("⚖️ Judge Agent evaluating outcome...")
-                from autobot.agent.judge import JudgeAgent
-                judge = JudgeAgent(llm_client=self.llm_client, model=self.model)
-
-                judge_output = await judge.evaluate(
-                    goal=goal,
-                    result_text=loop_result,
-                    history_summary=history_summary
-                )
-
-            if judge_output.success:
-                self.log(f"🏆 Judge confirmed success: {judge_output.reasoning}")
-                self.status = "done"
-                self.result = f"{loop_result}\n\n[Judge Verification: SUCCESS] {judge_output.reasoning}"
-            else:
-                self.log(f"📛 Judge reported failure: {judge_output.reasoning}")
-                self.status = "failed"
-                self.result = f"{loop_result}\n\n[Judge Verification: FAILED] {judge_output.reasoning}"
-
-            self.log(f"🏁 Task finished. Result: {self.result[:200]}")
+            self.result = await self._loop.run()
+            self.status = "done"
+            self.log(f"🏁 Finished: {self.result[:200]}")
             return self.result
 
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
             self.status = "failed"
-            self.result = f"Error: {e}\n\nTraceback:\n{tb}"
+            self.result = f"Error: {e}"
             self.log(f"❌ Task failed: {e}\n{tb}")
             raise
-
-        finally:
-            # Disconnect Playwright (Chrome stays running)
-            try:
-                await self.browser_launcher.stop()
-            except Exception:
-                pass
-
-    async def _run_single_loop(self, page: Any, goal: str, steps: int) -> tuple[str, str]:
-        """Run a single-phase goal through one flat AgentLoop (original behavior)."""
-        self._agent_loop = AgentLoop(
-            page=page,
-            llm_client=self.llm_client,
-            goal=goal,
-            model=self.model,
-            max_steps=steps,
-            use_vision=self.use_vision,
-        )
-
-        # Hook into the agent loop to track progress
-        original_execute_step = self._agent_loop._execute_step
-
-        async def _tracked_execute_step() -> str | None:
-            self.current_step = self._agent_loop.step_number + 1
-            self.log(f"📍 Step {self.current_step}/{steps}")
-            result = await original_execute_step()
-
-            # Log the agent's thinking
-            if self._agent_loop.history:
-                last = self._agent_loop.history[-1]
-                self.log(f"  💭 {last.agent_output.next_goal}")
-                for ar in last.action_results:
-                    icon = "✅" if ar.success else "❌"
-                    self.log(f"  {icon} {ar.action_name}")
-                    if ar.error:
-                        self.log(f"     Error: {ar.error}")
-
-            return result
-
-        self._agent_loop._execute_step = _tracked_execute_step
-
-        loop_result = await self._agent_loop.run()
-        history_summary = self._agent_loop._build_history_text()
-        return loop_result, history_summary
-
-    async def _run_mission(self, page: Any, goal: str, steps: int) -> tuple[str, str]:
-        """Run a multi-phase goal through MissionAgent's objective decomposition.
-
-        Each objective gets its own AgentLoop and step budget (default `steps`,
-        or the planner's own per-objective estimate). MissionAgent tracks the
-        currently-running AgentLoop on `current_agent_loop` — we mirror that
-        onto self._agent_loop after each objective so get_status() and
-        cancel() keep working exactly as they do for the single-loop path.
-        """
-        from autobot.agent.mission_agent import MissionAgent
-
-        mission = MissionAgent(
-            page=page,
-            llm_client=self.llm_client,
-            mission_goal=goal,
-            model=self.model,
-            max_steps_per_objective=steps,
-            log_callback=self.log,
-        )
-        self._mission_agent = mission
-
-        loop_result = await mission.run()
-        # Mirror MissionAgent's active AgentLoop so dashboard status/cancel
-        # keep reflecting the last objective that ran.
-        self._agent_loop = mission.current_agent_loop
-        if self._agent_loop is not None:
-            self.current_step = self._agent_loop.step_number + 1
-
-        history_summary = mission._get_mission_summary()
-        return loop_result, history_summary
 
     def cancel(self) -> None:
         """Cancel the running task."""
         self.status = "cancelled"
-        if self._agent_loop:
-            # Set max_steps to 0 and is_cancelled to True to stop the current AgentLoop immediately
-            self._agent_loop.max_steps = 0
-            self._agent_loop.is_cancelled = True
-        if self._mission_agent:
-            # Also stop MissionAgent from advancing to the next objective
-            from autobot.agent.mission import MissionStatus
-            self._mission_agent.mission.status = MissionStatus.FAILED
+        if self._loop is not None:
+            self._loop.is_cancelled = True
         self.log("⚠️ Task cancelled")
 
+    def pause(self) -> None:
+        """Pause the running task."""
+        if self._loop is not None:
+            self._loop.pause()
+        self.status = "paused"
+
+    def resume(self) -> None:
+        """Resume the paused task."""
+        if self._loop is not None:
+            self._loop.resume()
+        self.status = "running"
+
     def push_override(self, new_instruction: str) -> None:
-        """Push mid-flight intervention to active agent loop."""
-        if self._agent_loop:
-            self._agent_loop.push_override(new_instruction)
-            self.log(f"⚡ Mid-flight pivot pushed: {new_instruction}")
+        """Push a mid-flight goal override to the active loop."""
+        if self._loop is not None:
+            self._loop.push_override(new_instruction)
+            self.log(f"⚡ Override pushed: {new_instruction}")
 
     def get_status(self) -> dict[str, Any]:
-        """Get current runner status for the dashboard API and task scheduler.
-
-        The scheduler polls eval_signal, metrics, and stop_progress to drive
-        its ComplexityEstimator stop conditions. Without these keys the entire
-        metric-tracking subsystem silently does nothing.
-        """
-        loop = self._agent_loop
-        last_success = getattr(loop, "_last_done_success", None) if loop else None
-
-        # Derive eval_signal from the loop's last step outcome
-        if self.status in ("done", "completed"):
-            eval_signal = "success" if last_success else "failure"
-        elif self.status == "failed":
-            eval_signal = "failure"
-        else:
-            eval_signal = "continue"
-
+        """Status dict for the dashboard API and task scheduler."""
+        loop = self._loop
         return {
             "status": self.status,
+            "paused": getattr(loop, "is_paused", False) if loop else False,
             "goal": self.current_goal,
             "current_step": self.current_step,
             "max_steps": self.max_steps,
@@ -330,85 +169,91 @@ class AgentRunner:
             "history": [
                 entry.to_history_text()
                 for entry in (loop.history if loop else [])
-            ][-5:],  # Last 5 steps
-            # Scheduler metrics — previously missing, causing dead stop conditions
-            "eval_signal": eval_signal,
-            "metrics": getattr(loop, "_step_metrics", {}),
-            "stop_progress": f"Step {self.current_step}/{self.max_steps}" if self.max_steps else "",
+            ][-5:],
+            "eval_signal": (
+                "success" if self.status == "done" and (loop._last_done_success if loop else False)
+                else "failure" if self.status in ("failed", "cancelled")
+                else "continue"
+            ),
         }
+
+
+# ── LLM client factory (unchanged from old runner.py) ────────────────────────
+
+def _default_model() -> str:
+    """Infer a sensible default model from env vars."""
+    env_model = os.getenv("AUTOBOT_LLM_MODEL", "").strip()
+    if env_model:
+        return env_model
+
+    provider = os.getenv("AUTOBOT_LLM_PROVIDER", "").lower()
+    if provider == "gemini" or (
+        (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+        and not os.getenv("OPENROUTER_API_KEY")
+    ):
+        return "gemini-1.5-flash"
+    return "openai/gpt-4o-mini"
 
 
 def _create_llm_client() -> Any | None:
     """
-    Create an OpenAI-compatible client from environment variables.
+    Create an OpenAI-compatible LLM client from environment variables.
 
-    Supports:
-    - Anthropic Claude (ANTHROPIC_API_KEY)
-    - OpenRouter (OPENROUTER_API_KEY) — default
-    - OpenAI (OPENAI_API_KEY)
-    - Gemini (GEMINI_API_KEY or GOOGLE_API_KEY)
+    Supports: Anthropic (ANTHROPIC_API_KEY), OpenRouter (OPENROUTER_API_KEY),
+              OpenAI (OPENAI_API_KEY), Gemini (GEMINI_API_KEY / GOOGLE_API_KEY).
+    Priority: OpenRouter → Anthropic → Gemini → OpenAI.
     """
-    from dotenv import load_dotenv
-    load_dotenv()
-    from openai import OpenAI
-    from autobot.agent.anthropic_adapter import get_anthropic_llm_client
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(encoding="utf-8-sig")
+    except ImportError:
+        pass
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        logger.error("openai package not installed. Run: pip install openai")
+        return None
+
+    def _key(name: str) -> str | None:
+        val = os.getenv(name, "").strip()
+        return val if val and val.lower() not in ("none", "null", "undefined", "") else None
 
     provider = os.getenv("AUTOBOT_LLM_PROVIDER", "auto").lower()
 
-    def clean_key(name: str) -> str | None:
-        val = os.getenv(name)
-        if not val:
-            return None
-        val = val.strip()
-        if not val or val.lower() in ("none", "null", "undefined"):
-            return None
-        return val
+    anth_key  = _key("ANTHROPIC_API_KEY")
+    or_key    = _key("OPENROUTER_API_KEY")
+    oa_key    = _key("OPENAI_API_KEY")
+    gem_key   = _key("GEMINI_API_KEY") or _key("GOOGLE_API_KEY")
 
-    anth_key = clean_key("ANTHROPIC_API_KEY")
-    or_key = clean_key("OPENROUTER_API_KEY")
-    oa_key = clean_key("OPENAI_API_KEY")
-    gem_key = clean_key("GEMINI_API_KEY") or clean_key("GOOGLE_API_KEY")
-
-    if provider == "anthropic":
-        if not anth_key:
-            return None
+    if provider == "anthropic" and anth_key:
+        from autobot.agent.anthropic_adapter import get_anthropic_llm_client
         return get_anthropic_llm_client(api_key=anth_key)
 
-    elif provider == "openrouter":
-        if not or_key:
-            return None
-        return OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=or_key,
-        )
+    if provider == "openrouter" and or_key:
+        return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
 
-    elif provider == "openai":
-        if not oa_key:
-            return None
+    if provider == "openai" and oa_key:
         return OpenAI(api_key=oa_key)
 
-    elif provider == "gemini":
-        if not gem_key:
-            return None
+    if provider == "gemini" and gem_key:
         return OpenAI(
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             api_key=gem_key,
         )
 
-    else:
-        # Fallback priority: OpenRouter -> Anthropic -> Gemini (Google AI Studio) -> OpenAI
-        if or_key:
-            return OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=or_key,
-            )
-        if anth_key:
-            return get_anthropic_llm_client(api_key=anth_key)
-        if gem_key:
-            return OpenAI(
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=gem_key,
-            )
-        if oa_key:
-            return OpenAI(api_key=oa_key)
-        return None
+    # Auto-detect by key priority
+    if or_key:
+        return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=or_key)
+    if anth_key:
+        from autobot.agent.anthropic_adapter import get_anthropic_llm_client
+        return get_anthropic_llm_client(api_key=anth_key)
+    if gem_key:
+        return OpenAI(
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            api_key=gem_key,
+        )
+    if oa_key:
+        return OpenAI(api_key=oa_key)
+
+    return None
