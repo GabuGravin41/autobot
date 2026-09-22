@@ -1,131 +1,180 @@
-# 🛡️ Autobot Core Design Philosophy & Execution Guidelines
+# Autobot Design Philosophy & Execution Guidelines
 
-This document outlines the **foundational design philosophy, execution rules, and browser control guidelines** for Autobot. It serves as an authoritative guide for developers and AI agents working on this codebase to ensure we never fall back into brittle, over-engineered, or blind automation loops.
-
----
-
-## 🚨 ABSOLUTE LAW: "NO BLIND ACTIONS" — The Prime Directive
-
-> **The system is FORBIDDEN from making any blind decision. It MUST know where it is. Every action MUST be preceded by a grounded, evidence-based observation from at least one of: (a) a live screenshot, (b) DOM/accessibility tree inspection via CDP, or (c) a verified UI state read. Not once, not even a single click, shall be executed without knowing with certainty what element is being targeted.**
-
-### What "blind" means in practice (FORBIDDEN behaviours):
-- Hardcoding pixel coordinates `(x, y)` without first reading them from a screenshot or DOM query for the current page load.
-- Assuming a dropdown is open without taking a screenshot to confirm it.
-- Clicking a sequence of UI elements without verifying each intermediate state.
-- Inferring page layout from a previous session — layouts can shift (banners, modals, scrolled state).
-- Taking any OS-level input action (mouse click, key press, clipboard paste) on a window without first confirming foreground window identity.
-
-### What grounded decisions look like (REQUIRED behaviours):
-1. **Locate before clicking**: Take a screenshot (or query DOM). Read the element's bounding box / pixel position from that live observation. Only then click at the confirmed center.
-2. **Verify after clicking**: Take another screenshot immediately after. Confirm the expected state change appeared (dropdown opened, modal appeared, page changed). If not, STOP and diagnose — do not proceed.
-3. **CDP-first for DOM**: When Chrome is open, use Chrome DevTools Protocol (CDP) to query the DOM and get element bounding boxes, text content, and visibility. This is more accurate than pixel estimation.
-4. **Screenshot-second for visuals**: For elements not in the accessibility tree (custom dropdowns, canvas UI, overlays), fall back to screenshot-based pixel analysis.
-5. **Never chain steps blindly**: Each step is a separate verify → act → verify cycle. A failure at any step must be caught and handled before the next step begins.
+This document describes the architecture Autobot **actually runs today**
+(CoreLoop, UIAutomation-first, Chrome-extension DOM bridge — Sep 2026) and
+the rules that keep it from drifting back toward brittle, blind, or
+over-engineered automation. The previous version of this file described a
+CDP-first, screenshot-before-and-after-every-click architecture that this
+project has since moved off of; that version is preserved under
+`_archive/` for history, not as a second source of truth. If code and this
+document ever disagree, that's a bug in one of them — fix the one that's
+wrong rather than reading around it.
 
 ---
 
-## 🎯 1. Our Aim & Goal
+## The Prime Directive: No Blind Actions
 
-Autobot is a **Sovereign Autonomous Digital Agent**. Its goal is to execute complex, multi-turn digital tasks (e.g., multi-turn academic research on Grok, LaTeX synthesis, Overleaf compilation, Kaggle automation) with **human-level precision and adaptability**.
+The system must know where it is and what it's looking at before it acts.
+That principle hasn't changed — what changed is what "knowing" costs and
+how it's obtained.
 
-### Core Pillars:
-1. **Human-Parallelism**: Autobot acts on the computer precisely the way a human user does.
-2. **Visual Truth**: Autobot sees what the human sees using multimodal visual screenshots on every single step.
-3. **Pragmatic Synergy**: Autobot seamlessly combines DOM accessibility tools, visual perception, and OS desktop controls (mouse/keyboard).
-4. **Local Sovereignty**: Operates using the user's authentic logged-in accounts and desktop environment without requiring raw session exfiltration or brittle database mirroring.
+**Forbidden:**
+- Clicking coordinates that weren't just read from a live index (DOM
+  index, UIAutomation `[N]` index, or a screenshot taken this step).
+- Assuming a menu, dropdown, or page finished loading without checking.
+- Reusing an index or coordinate from a previous step — layouts shift.
+- Acting on a window without confirming it's actually the one you think
+  it is (read the title; don't assume focus survived the last action).
 
----
-
-## ⚖️ 2. Core Design Philosophy
-
-### Rule #1: "Look and Act Like a Human" (No Over-Engineered Hacks)
-* **Never manipulate locked user databases**: Do NOT attempt to copy SQLite cookie databases (`Network/Cookies`) or leveldb files behind Windows DPAPI encryption while Chrome is active. This corrupts files and causes crashes.
-* **Never guess mysterious profile names**: Do NOT guess directory names (`Profile 1` vs `Profile 2`). Look at the screen! If Chrome opens a profile picker ("Who's using Chrome?"), take a screenshot, visually locate the user's profile tile (a distinctive avatar), scroll down if needed, and click it with the mouse.
-* **Ride Along on Existing Sessions**: If Chrome is already open on the desktop with logged-in accounts (Grok, Overleaf), interact with that window directly rather than spawning duplicate browser instances.
-
-### Rule #2: "Zero Blind Actions" (Focus & Verify First)
-* **Verify Window Focus**: Before issuing any keyboard (`Ctrl+T`, `Ctrl+V`, `Enter`) or mouse action, Autobot MUST locate the exact window handle (`hwnd`), restore it (`SW_MAXIMIZE`), send an `Alt` keypress to unlock Windows foreground restrictions, and verify focus via window title.
-* **CDP DOM Query First**: Before clicking any element in a web page, query the DOM via CDP (`document.querySelectorAll`, `getBoundingClientRect`) to get the exact bounding box of the target element. Use this to compute the precise click target. Never use hardcoded coordinates without DOM verification.
-* **Screenshot Before + After Every Click**: Take a screenshot BEFORE every click to confirm starting state. Take a screenshot AFTER every click to confirm the expected state change. If the state did not change as expected, HALT and diagnose.
-* **Dropdown Verification**: When a dropdown is expected to open, take a screenshot and confirm the dropdown is visible (look for its text items) before clicking any item within it.
-* **Fail Fast & Report Anomaly**: If an unexpected dialog or error banner appears (e.g., "Restore pages?", cookie banners), pause immediately, report the visual state, handle it cleanly, screenshot to confirm it's gone, then proceed.
-
----
-
-## 🛠️ 3. Tool Synergy Matrix
-
-Autobot does not rely on a single input mechanism. It categorizes and combines three primary tool sets based on the situation:
-
-| Tool Layer | Best Used For | Example Actions |
-| :--- | :--- | :--- |
-| **DOM & Accessibility Tree** | Structural text extraction, form field detection, fast page inspection | `browser_snapshot`, element query, text scraping |
-| **Multimodal Vision** | Visual perception, identifying un-indexed UI popups, verifying page load states | `screenshot`, visual target localization |
-| **OS Desktop Controls** | Interacting with native desktop Chrome UI, profile pickers, global shortcuts, clipboard paste | `pyautogui.click()`, `mouse.scroll()`, `pyperclip.copy()`, `win32gui.SetForegroundWindow()` |
+**Required:**
+1. **Observe before deciding.** Every step starts with a fresh read of the
+   active window's state — see "Two Perception Sources" below for which
+   one actually shows what.
+2. **Act through the index that was just read**, not a remembered one.
+3. **Verify after acting.** CoreLoop already re-observes after every
+   action and compares against the previous screen; three unchanged
+   observations in a row surfaces a stuck warning to the model rather than
+   letting it silently repeat a dead action forever (see
+   `agent/core_loop.py`'s stuck-detection in `_step()`).
+4. **Screenshot is the fallback, not the default.** A screenshot costs
+   roughly 1-2k tokens versus a few hundred for an index-based read, and it
+   still has to be interpreted rather than acted on directly. Reach for it
+   when the indexed state is genuinely insufficient — a canvas app, a
+   custom WebGL UI, a QR code — not as the first move on every step.
 
 ---
 
-## 📁 4. Chrome Profile Mapping Reference
+## Two Perception Sources, Not One — and Not the Model's Job to Guess
 
-Chrome profile mappings are machine-specific and **not tracked in this repo** —
-each install should keep its own mapping (profile directory → account →
-avatar → logged-in services) in a local, gitignored file (e.g. `.env` or a
-`profiles.local.json`) rather than hardcoded here, since this file is public.
+Autobot looks at the computer through two different mechanisms, because
+one perception source genuinely cannot see everything:
 
-*Default Command for Primary Account Launch*:
-```cmd
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory="Default" "https://grok.com"
-```
+- **UIAutomation** (`computer/window.py`) — the primary source for every
+  window. Native desktop apps (Notepad, Excel, DICOM viewers, Artemis) are
+  fully described this way: `computer.window.extract_ui()` returns an
+  indexed element tree, and `computer.window.click(N)` /
+  `computer.window.type(N, text)` act on those same indices.
+- **The Chrome extension's DOM bridge** (`browser/extension_bridge.py`,
+  the `browser_text` / `browser_list` / `browser_click` / `browser_type` /
+  `browser_paste` actions) — the only source that reliably sees actual web
+  page *content*. UIAutomation's view of Chrome is limited to the
+  toolbar/tabs; it does not consistently expose the page DOM. The bridge
+  works through the already-installed, already-logged-in Autobot Chrome
+  extension polling for commands — no debug port, no isolated profile, no
+  CDP.
 
----
+CDP was tried as a unifying layer for this (Playwright's
+`connect_over_cdp()` against a `--remote-debugging-port` Chrome) and
+retired: it required launching Chrome in a way that fought Windows'
+SingletonLock, needed its own profile disconnected from whatever Chrome
+the user actually had open, and broke in exactly the ways Claude Code and
+other tools that *don't* depend on CDP did not. `computer/browser.py`'s
+CDP client is kept under `_archive/` for reference; nothing in the live
+package imports it, and `computer/computer.py` deliberately does not
+attach it as a submodule — an unreachable tool that still shows up in the
+model's catalog is worse than no tool at all, because the model has no way
+to tell it apart from one that works.
 
-## 🚀 5. Blueprint for Multi-Step Tasks (Grok + Overleaf Benchmark)
-
-When executing complex benchmarks:
-1. **Phase 1 (Clean Launch & Verification)**: Launch Chrome with `--profile-directory="Default"`, focus & maximize window, send `Escape` to dismiss any "Restore pages" popup, and capture screenshot to confirm logged-in state.
-2. **Phase 2 (Structured Multi-Turn Research)**: Execute turn-by-turn prompts (survey $\rightarrow$ mathematical derivation $\rightarrow$ device specs $\rightarrow$ LaTeX synthesis). Capture screenshot after every turn.
-3. **Phase 3 (Overleaf Project Creation & Compilation)**: Open Overleaf tab, create blank project, paste synthesized LaTeX via clipboard (`pyperclip` + `Ctrl+A` + `Ctrl+V`), trigger compilation (`Ctrl+Enter`), and visually verify PDF output.
-
----
-
-## 🔬 6. Testing Methodology & Multimodal Visual Intelligence
-
-### Root Cause Analysis: Why Static Coordinate Scripts Fail
-1. **Static Coordinate Illusion**: Hardcoding $(x, y)$ coordinates — even when measured accurately from a past screenshot — is fundamentally flawed. Web applications (Overleaf, Grok, Chrome UI) dynamically alter layout geometry due to cookie consent overlays, banner notifications, scroll offsets, font rendering latency, and window resizing.
-2. **False Verification**: Saving a screenshot *after* an unverified action without feeding that screenshot back into an active visual reasoning model creates the illusion of logging, but the execution engine remains blind to state failures.
-
-### The Non-Negotiable Multimodal Execution Loop
-To ensure Autobot never executes blind actions during testing or live agent loops, all UI interactions must strictly adhere to the **Perceive $\rightarrow$ Reason $\rightarrow$ Act $\rightarrow$ Verify** cycle:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. PERCEIVE: Capture live screenshot & query DOM via CDP    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. REASON: LLM Vision / DOM Inspector reads current element │
-│    bounding box (x, y, w, h) & text labels                  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. ACT: Focus target window & execute precise click/type    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 4. VERIFY: Capture post-action screenshot & confirm state   │
-│    transition (e.g. Dropdown visible? Modal opened?)        │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-            ┌──────────────────┴──────────────────┐
-            │                                     │
-      [State Confirmed]                   [Anomaly / No Change]
-            │                                     │
-            ▼                                     ▼
-   Proceed to Next Step             Pause, Diagnose & Re-Perceive
-```
+Given two perception sources, the harness — not the model — should decide
+which one is in play whenever that's mechanically determinable.
+`CoreLoop._observe()` checks the active window's title every step and, when
+it's Chrome, appends an explicit hint that the UIAutomation tree above
+won't show page content and `browser_text`/`browser_list` is what's
+actually needed. This is a hint, not an eager fetch — it doesn't call the
+bridge itself, so it costs one string comparison, not a network round trip,
+on every step. The general rule: **whenever the harness can determine which
+tool applies from state it already has, tell the model directly instead of
+leaving it as an inference the model has to get right under time and token
+pressure.** A cheaper model benefits from this more than an expensive one
+does, and cheap-model-friendliness is the actual design target here, not
+"technically possible with a strong enough model."
 
 ---
 
-*Autobot Architecture Team — Sovereignty through Visual & Pragmatic Automation.*
+## Rule: A Tool in the Catalog Must Actually Work
+
+`Computer.get_tool_catalog()` auto-generates the LLM-facing tool list by
+introspecting every submodule attached in `Computer.__init__`. That's
+powerful — a new tool needs no separate catalog-writing step — but it also
+means an attached submodule is a *promise*: the model will use it, because
+it looks exactly as real as everything else in the list. Whenever an
+architecture changes, the tool catalog changes in the same commit, not
+after. Concretely: retiring a perception or actuation path means removing
+its submodule from `Computer.__init__`'s attachment (and
+`_get_all_tools()`'s name list) that same day — not archiving the code and
+leaving the wiring in place "for now." "For now" is how the CDP-era
+`computer.browser.url()` sat in the catalog silently returning blank
+results for weeks after the code that made it work stopped running.
+
+---
+
+## Rule: Other AI Tools Get Driven Through Their CLI/API, Never Through Screenshots of Their Chat Window
+
+When Autobot needs to operate another AI coding tool — Claude Code,
+Antigravity, whatever comes next — the integration point is that tool's
+own headless/scripting mode, not UI automation of its chat panel. Both
+existing integrations (`autobot/integrations/claude_code_bridge.py`,
+`antigravity_bridge.py`) are subprocess wrappers around a documented CLI
+(`claude -p ... --output-format json`, `agy -p ... --output-format
+json`) that return structured JSON directly — no reading pixels out of a
+chat window, no guessing whether a reply has finished streaming, no
+`shell=True` anywhere in either file (every caller-supplied value goes
+into an argv list, never through a shell). This isn't a preference for
+elegance; it's an order of magnitude cheaper in tokens and doesn't break
+every time a UI redesign moves a button.
+
+This got a real, live confirmation in Sep 2026, not just a design
+argument: this account's computer-use tools are click/read-tier
+restricted for exactly the target class this rule is about — IDE and
+terminal windows get view-and-left-click only, browsers get view-only,
+with an explicit instruction not to route around that restriction via
+AppleScript, System Events, or shell commands. On this exact target,
+UI automation isn't just the more expensive option, it's structurally
+unavailable at the tier a real integration would need. Confirm a target
+has a real CLI/API before reaching for computer-use as a fallback — and
+if it doesn't, that's a reason to look harder for one, not a reason to
+start scripting clicks.
+
+---
+
+## Rule: Never Manipulate Locked Chrome State
+
+Do not attempt to copy SQLite cookie databases (`Network/Cookies`) or
+leveldb files behind Windows DPAPI encryption while Chrome is running —
+this corrupts files and crashes the browser. Autobot rides the user's
+*existing*, already-open, already-logged-in Chrome (via the extension) or
+a UIAutomation-focused instance of it — never a duplicated or exfiltrated
+session.
+
+---
+
+## Rule: Self-Correction Escalates, It Doesn't Repeat
+
+When an action doesn't produce the expected effect, the next attempt
+should try a *different interaction category*, not the identical action
+harder. CoreLoop's stuck-detection (three unchanged observations in a row)
+is the current backstop for this; the model is explicitly told to try a
+fundamentally different approach, use `screenshot` for visual context, or
+call `human_input` rather than repeat. A useful next step here (not yet
+built) is encoding specific fallback ladders — e.g. a failed click retries
+via scroll-into-view before trying `screenshot`-guided coordinates — as
+explicit escalation rather than leaving the whole ladder to the model to
+reinvent on every occurrence.
+
+---
+
+## Rule: Successful Runs Should Get Cheaper, Not Just Complete
+
+A run that finishes doesn't just return a result — `SkillDistiller` records
+the proven action sequence as a learned skill (`autobot/knowledge/skills/`)
+and re-injects it as context the next time a similar goal comes in, so the
+second run of a repeated task doesn't re-derive the whole plan from
+scratch. This is the actual mechanism for making a cheap model perform
+like an expensive one over time on the tasks a given user actually
+repeats: not a bigger model, a shorter path.
+
+---
+
+*This document is a working guide, not a museum piece — when the
+architecture changes again, this file changes with it, in the same
+change.*

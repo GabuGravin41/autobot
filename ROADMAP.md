@@ -277,6 +277,266 @@ shouldn't be made unilaterally with zero live-run verification available.
 Recorded here so it's a decision made on purpose next time, not
 rediscovered by surprise a third time.
 
+### Round 5 — CDP retirement, tool-catalog correctness, harness-side perception routing
+
+By this round the architecture had already moved past everything Rounds
+1-4 describe: `AgentLoop`, `MissionAgent`, `dom/extraction.py`,
+`dom/page_snapshot.py`, and `browser/launcher.py` were gone from the live
+`autobot` package namespace entirely (not even present as symlinks in the
+live tree — only under `_archive/`), replaced by `CoreLoop`
+(`agent/core_loop.py`), UIAutomation-first native-app perception
+(`computer/window.py`), and the Chrome extension's DOM bridge
+(`browser/extension_bridge.py`) for web page content. That transition
+itself predates this round and isn't re-litigated here — this round is
+about what was still live and wrong *within* that newer architecture.
+
+**The one CDP path still actually wired in, found and cut:**
+- `computer/computer.py` still imported and instantiated the old CDP
+  `computer/browser.py`'s `Browser` class (`.url()`, `.click_element()`,
+  `.fill()`, built on `dom/page_snapshot.py`'s websocket client to a
+  `--remote-debugging-port` Chrome this codebase no longer launches), and
+  listed `"browser"` in `_get_all_tools()`'s name list — meaning it still
+  showed up in the LLM's tool catalog every step, indistinguishable from a
+  tool that actually works. This is the direct root cause of the failing
+  live-run transcript from earlier this cycle: the model called
+  `computer.browser.url()`, got a silent blank result (no debug-port
+  Chrome was listening), and had no signal that the tool itself, not its
+  own reasoning, was broken. Fixed by removing the import, the
+  instantiation, and the catalog name — `computer/browser.py` and its CDP
+  dependency chain are now unreachable from any live entry point, not just
+  archived alongside code that already was.
+- New standing rule for this class of bug, written into
+  `DESIGN_PHILOSOPHY.md`: a submodule attached in `Computer.__init__` is a
+  promise the tool catalog makes to the model. Retiring a perception or
+  actuation path means removing its attachment the same day, not
+  "archiving the code and leaving the wiring in place for now."
+
+**A second, separate bug behind the same failing transcript, found by
+reading `window.py` end to end rather than assuming the CDP fix alone
+explained the symptom:**
+- `Window.focus()` used `auto.WindowControl(searchDepth=1,
+  Name=title_query).Exists(0)`, which does an **exact** match on the
+  window's `Name` property — despite the method's own docstring always
+  saying "containing." A real Chrome window title looks like `"Traffic
+  Flow Bench Pipeline | Kaggle — Google Chrome"`, never exactly `"Chrome"`,
+  so `focus("Chrome")` never matched, `Exists(0)` was always `False`, and
+  every caller's "if Chrome is already open, focus it" branch was
+  unreachable — `navigate()` fell straight through to "launch a new
+  Chrome" on every single call, even with Chrome already open on the right
+  page. Fixed by enumerating top-level windows (the same source
+  `list_all()` already uses) and matching case-insensitively as a
+  substring, matching what the docstring — and every caller — always
+  assumed it did.
+
+**Item 5 of this round's plan — harness-side perception-source routing,**
+implemented in `CoreLoop._observe()` (`agent/core_loop.py`): the harness
+now checks the active window's title each step and, when it looks like
+Chrome, appends an explicit hint that the UIAutomation tree above won't
+show page content and `browser_text`/`browser_list` is what's actually
+needed — instead of leaving "which perception source applies right now"
+as an inference the model has to get right under time and token pressure,
+with two overlapping tools in its catalog and no signal for which one
+fits the current window. Deliberately a hint, not an eager fetch: it costs
+one string comparison per step, not a network round trip to the extension
+bridge, consistent with the existing `AUTOBOT_VISION_MODE=auto` pattern of
+only paying for a more expensive perception path once the cheaper one has
+proven insufficient.
+
+**Docs:** `DESIGN_PHILOSOPHY.md` and `AUTOBOT_MISSION.md` were both fully
+rewritten — the previous versions described the CDP/Playwright-centric
+architecture as current, which after this round made them actively
+contradictory with the code rather than just outdated. `README.md`'s top
+"4 core pillars" section (`perception/`/`actuation/`/`governance/`
+packages that only exist under `_archive/`) was corrected for the same
+reason. `USE_CASES.md` and `DEPLOYMENT.md` were reviewed and left as-is —
+both already self-caveat as aspirational/not-yet-built in README, and
+weren't judged actively misleading enough to justify the edit this pass.
+
+**Known limitation of this round, worth stating plainly:** the physical
+`_archive/` folder (and its many symlinked CDP-era files — `agent/loop.py`,
+`agent/mission_agent.py`, `dom/extraction.py`, `dom/page_snapshot.py`,
+`browser/launcher.py`, the whole `learning/` package, etc.) was **not**
+deleted from disk. The session doing this round's edits had no shell
+access to the machine running the live code — only the ability to
+overwrite file contents, not delete files or symlinks. Severing the import
+wiring (done) makes this code unreachable from any live entry point;
+physically removing it from disk is still a manual step if the user wants
+it gone rather than archived.
+
+**Also not verified by a live run:** the `window.py` and `computer.py`
+fixes above were written and syntax-checked but not exercised against a
+real Windows/UIAutomation session — the environment making these edits
+had no way to run Python with `uiautomation` installed. Same verification
+gap the "Verification standard" section below already calls out generally;
+flagging it here specifically because both fixes target the exact failure
+this round's investigation started from, and "compiles" isn't the bar this
+document uses for "done."
+
+### Round 6 — Kaggle unattended autonomy, a second AI backend, and the multi-project orchestrator's read-only half
+
+This round followed a real screen-sharing session on the user's own
+machine (live computer-use screenshot + web research against Antigravity's
+official docs), not just code reading — three assumptions from earlier
+planning turned out to be wrong once actually looked at, and the design
+below reflects the corrected picture, not the original guess:
+
+- **The "Claude Code panel" in VS Code is Claude Code's own official VS
+  Code extension**, not a separate integration surface Autobot needs to
+  build UI automation for. Confirmed by looking at the actual running VS
+  Code window. This matters because it means the existing headless-CLI
+  bridge pattern (`claude -p ... --output-format json`, already built and
+  tested) is the correct integration point — there is no second "the panel
+  itself" thing to also automate.
+- **Antigravity has a real, documented headless CLI (`agy`)**, not just a
+  GUI. Confirmed against antigravity.google's own CLI docs, not assumed
+  from the product's GUI-first marketing. `agy -p "prompt" --output-format
+  json` mirrors Claude Code's own headless mode closely enough (JSON
+  envelope, session/conversation resume, a permission-scoping flag) that
+  the existing bridge pattern extends to it directly rather than needing a
+  new integration shape invented from scratch.
+- **The live computer-use tools are genuinely click/read-tier restricted
+  for IDEs, terminals, and browsers on this account** (view + left-click
+  only for IDE/terminal windows, view-only for browsers, with an explicit
+  instruction not to work around this via AppleScript/System
+  Events/shell). This isn't a bug to route around — it's the concrete,
+  live confirmation of `DESIGN_PHILOSOPHY.md`'s standing "CLI/API before
+  UI automation" principle: on this exact class of target (other AI
+  coding tools), UI automation is not just more expensive than an API,
+  it's actively *unavailable* at the tier needed to type into them. The
+  orchestrator feature below was designed around that constraint from the
+  start, not discovered to need a redesign after hitting it.
+
+**Kaggle: unattended autonomy as its own axis, not a fourth approval mode
+(`agent/approval.py`).** The user's explicit ask — keep working on Kaggle
+notebooks while I'm away from the computer — is a different question from
+"how much do I trust the agent's judgment" (`mode`: strict/balanced/
+trusted), which already existed. Conflating them would have meant either
+weakening `strict` mode's meaning for everyone, or leaving unattended runs
+stuck re-prompting into a terminal nobody's watching. Added a second,
+independent `unattended` flag (env var `AUTOBOT_UNATTENDED`, mirroring how
+`mode` already reads `AUTOBOT_APPROVAL_MODE`): CAUTION/DANGER auto-proceed
+while unattended regardless of `mode` — including `strict` — since a
+paused prompt nobody can answer isn't more careful, it's just a stall.
+IRREVERSIBLE (a real competition `submit()`, above all) is the one
+exception the "Safety principle" section below already commits to keeping
+non-bypassable: it still blocks even while unattended, but the block is
+immediate — no `wait_for_approval` call, no timeout clock ticking on a
+decision nobody's there to make — logged and desktop-notified for the user
+to review when they're back, rather than silently either approving itself
+or hanging. `AUTOBOT_AUTO_APPROVE=1` (pre-existing, deliberately blunter)
+is untouched — a separate override, not folded into this. 13 new
+behavioral tests (`tests/test_unattended_approval.py`) drive this through
+the real `ApprovalGuard.gate()` and the real `_ActionStub` `CoreLoop` uses,
+not a hand-rolled stand-in, so a mismatch between the two can't hide.
+
+Also fixed in the same file this round: `kaggle_tool.py`'s `push_kernel()`
+docstring claimed CAUTION tier; the actual risk-classifier pattern
+(`_SAFE_COMPUTER_CALL_RE`) has always made it SAFE, matching the user's
+explicit "notebook iteration should have zero friction, submission always
+stops for a human" line. The code was right; the comment was stale.
+Corrected so it stops being a trap for the next person reading it.
+
+**Antigravity: second headless-CLI backend, same bridge shape as Claude
+Code.** `autobot/integrations/antigravity_bridge.py` (subprocess wrapper
+around `agy -p`, no `shell=True`, same `{"ok","data","error"}` return
+contract as `claude_code_bridge.py`) plus `autobot/computer/
+antigravity_tool.py` (the thin `computer.antigravity.run()` wrapper for
+the LLM-facing `computer_call` path). Wired into the real tool catalog —
+`computer/computer.py`'s `_get_all_tools()` name list, the single source
+of truth both the LLM's catalog and `dispatch.py`'s `getattr` resolution
+read from (the exact site of a real bug fixed in Round 4: a catalog name
+that doesn't match a real attribute is silently unreachable, not a loud
+error) — and confirmed not just by unit tests but by instantiating a real
+`Computer()` and calling the real `dispatch.dispatch_computer_call()`
+with an actual LLM-shaped call string end to end. `--dangerously-skip-
+permissions` gets its own DANGER-tier pattern in `approval.py` (a
+different flag name from Claude Code's `acceptEdits`/`bypassPermissions`,
+so it needed its own regex rather than accidentally relying on the other
+one matching by coincidence); the default (`skip_permissions=False`)
+falls through to `computer_call`'s generic CAUTION default, matching how
+Claude Code's own "plan" mode default is treated. 21 + 6 new tests
+(`tests/test_antigravity_bridge.py`, `tests/test_antigravity_tool.py`)
+plus 5 more for the new DANGER pattern (`tests/
+test_approval_new_patterns.py::TestAntigravitySkipPermissionsIsDanger`).
+
+**Multi-project orchestrator, built read-only-first on purpose.** The
+user's ask — track ~7 simultaneous AI-assisted projects (Claude Code in
+VS Code, two Antigravity projects, more), understand each one's intent,
+check in on progress, and eventually prompt them on his behalf — splits
+into two capabilities with very different risk profiles, and only the
+lower-risk one shipped this round:
+
+- `autobot/knowledge/project_registry.py` — one JSON file per tracked
+  project (mirrors `skill_distiller.py`'s existing storage convention:
+  same directory-under-`knowledge/`, dataclass with `to_dict()`/
+  `from_dict()`, filesystem-safe slug), storing the project's working
+  directory, which backend drives it, and — critically — the user's own
+  stated intent kept **verbatim**, never summarized or rewritten by
+  Autobot at registration time, plus a running log of later intent notes
+  and check-in history. 23 tests, real `tmp_path` fixtures rather than a
+  mocked filesystem, since this module mostly *is* a filesystem wrapper.
+- `autobot/agent/orchestrator_checkin.py` — asks a tracked project's AI
+  backend for a status update (what's done, what's in progress, what's
+  blocked, what needs a decision), explicitly instructing it *not* to
+  start new work in response, and records the summary plus the resumed
+  session/conversation id back to the registry so the next check-in
+  continues the same conversation instead of starting cold every time.
+  Calls `claude_code_bridge.run_headless()` / `antigravity_bridge.
+  run_headless()` directly rather than going through the `computer.
+  claude_code`/`computer.antigravity` LLM-facing wrappers, because this is
+  orchestration Python that needs the full bridge result (specifically the
+  session id), not an LLM tool call that needs a collapsed string — using
+  the layer this code actually belongs to, not routing around the tool
+  layer as a shortcut. `check_in_on_all()` treats one project's failure
+  (backend not installed, timed out) as independent of the others — the
+  whole point of a batch check-in is a full picture even when one project
+  is temporarily unreachable. 24 new tests (`tests/
+  test_orchestrator_checkin.py`), covering successful check-ins, registry
+  updates, session resumption, a project-not-found miss, an unrecognized
+  stored backend (simulating a hand-edited or older-schema registry file)
+  failing clearly instead of crashing three frames down, an exception
+  mid-dispatch converting to an error result instead of propagating, and
+  one failing project not stopping a batch check-in on the rest.
+
+**Deliberately not built this round: sending an actual follow-up
+instruction to another AI on the user's behalf** ("go implement X now"
+while he's not watching). This is a materially bigger decision than
+reading a status report — it can cause real file writes and real
+token/compute spend in someone else's project, unattended. The Kaggle
+unattended-autonomy question above got an explicit, considered answer from
+the user (the `AskUserQuestion` exchange this round, before any code was
+written); the "can Autobot prompt my other AI tools for me while I'm away"
+question hasn't, so it stays out of `orchestrator_checkin.py` — whose own
+module docstring records this reasoning at length — until that same kind
+of explicit decision exists for it. This is the same category of judgment
+call the "Safety principle" section below already asks future work to
+make deliberately rather than by default; recorded here so it's a decision
+revisited on purpose, not skipped past because the read-only half shipped
+and looked done.
+
+**Verification for this round specifically:** every new module above has
+real behavioral tests (92 new tests this round: 13 unattended-approval +
+21 antigravity-bridge + 6 antigravity-tool + 5 antigravity-DANGER-pattern
++ 23 project-registry + 24 orchestrator-checkin — run against the actual
+code, not mocks of the modules under test, per the "Verification
+standard" below). The Antigravity catalog wiring specifically
+was also confirmed by direct instantiation and a real dispatcher call, the
+same standard Round 5's CDP-removal fix was held to, precisely because
+this round started from an explicit user complaint that earlier work
+(the Chrome extension drag-fix) had shipped "carelessly done" despite
+multiple passes — syntax-checking and unit-testing alone were judged not
+sufficient evidence of "actually wired" this time.
+
+**Not yet built, tracked here so it isn't quietly dropped:** the Kaggle
+side's actual end-user workflow beyond the approval-policy groundwork —
+this round made unattended Kaggle iteration *possible* by removing the
+policy obstacle, but didn't add new Kaggle-specific automation on top of
+the existing `kaggle_tool.py`/`demo_kaggle_run.py`. Also not built: any
+UI for the user to register/browse/forget tracked projects (the registry
+above only has a Python API so far — a CLI or dashboard surface for it is
+the natural next step once the read-only check-in loop has real usage to
+learn from).
+
 ## Verification standard
 
 Everything above marked "done and tested" has behavioral tests that

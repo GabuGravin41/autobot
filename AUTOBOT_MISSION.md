@@ -1,103 +1,121 @@
-# AutoBot: Mission, Architecture & Autonomous Computing Manifesto
+# Autobot: Mission & Architecture
 
-> *"The computer was designed as a bicycle for the human mind. AutoBot transforms the computer into an autonomous co-pilot—co-owned by human and AI, operating on equal terms across the entire digital desktop."*
+> *"The computer was designed as a bicycle for the human mind. Autobot turns it into a co-pilot — co-owned by human and AI, operating on equal terms across the desktop."*
 
----
-
-## 1. Executive Summary & Mission
-
-### The Mission
-**AutoBot** is built to create a true **Autonomous OS Co-Pilot**. It is designed to solve a fundamental limitation of modern AI: AI assistants are traditionally trapped inside isolated web chatboxes or restricted sandbox environments, unable to operate your physical computer the way you do.
-
-AutoBot establishes a **co-ownership paradigm** between human and AI:
-- **Equal Capability**: Anything a human can see, click, type, execute, or manage on a laptop, AutoBot can perceive, decide, and actuate.
-- **Human-Controlled Autonomy**: You set the permission dial (*Observer* → *Supervised* → *Full Autonomy*), retaining 100% authority over safety and irreversible actions.
+This document describes the architecture Autobot actually runs (Sep 2026).
+An earlier version of this document described a CDP/Playwright-centric
+design that has since been retired — see `DESIGN_PHILOSOPHY.md` for why,
+and `ROADMAP.md` for the ground-truth log of what's wired up versus
+aspirational. That older version is kept under `_archive/` for history.
 
 ---
 
-## 2. What We Are Building: The Autonomous Computer Engine
+## 1. The Mission
 
-Rather than building an isolated browser extension or a simple CLI wrapper, AutoBot is a unified **OS Co-Pilot Engine** built on a closed-loop architecture inspired by autonomous vehicles:
+AI assistants are traditionally trapped inside chat windows, unable to
+operate a computer the way a human does. Autobot is built to close that
+gap — not by being the most capable possible agent on the most expensive
+possible model, but by making a **cheap, fast model reliable enough at
+computer control that it doesn't need to be an expensive one.** That's the
+actual target: the same shift Cursor made for code editing — not "a model
+smart enough to do anything," but a harness disciplined enough that a
+modest model, given clean state and an unambiguous action set, performs
+like a much larger one would have to without it.
 
-```
-                  ┌──────────────────────────────────────────┐
-                  │          Human Permission Dial           │
-                  │   (Observer | Supervised | Full Auto)    │
-                  └────────────────────┬─────────────────────┘
-                                       │
-┌─────────────────────────┐            ▼            ┌─────────────────────────┐
-│    PERCEPTION PILLAR    ├────────────────────────►│    ACTUATION PILLAR     │
-│                         │   PERCEIVE → PLAN → ACT │                         │
-│ • Desktop Screen Vision │                         │ • Native OS Input       │
-│ • Browser CDP DOM Tree  │    ┌──────────────┐     │ • Browser CDP Engine    │
-│ • Active OS Windows     │    │  Agent Loop  │     │ • Window Focus Manager  │
-│ • Terminal / CLI Output │    └──────────────┘     │ • Shell / CLI Engine    │
-└─────────────────────────┘                         └─────────────────────────┘
-```
-
----
-
-## 3. Core Functionalities
-
-1. **Multi-Modal Screen & Vision Perception**: Captures live desktop screenshots to navigate image-only UIs (Canvas, WebGL, QR codes, native desktop applications) where text-only DOM trees are blind.
-2. **CDP & DOM Tree Extraction**: Directly queries Chrome DevTools Protocol (CDP) for structured ARIA accessibility trees and element indices.
-3. **Native Desktop Input Control**: Drives mouse cursor movement, coordinate clicks, text typing, and global hotkeys via native OS drivers (`PyAutoGUI` / Win32).
-4. **Subprocess & Terminal Execution**: Runs shell commands, code snippets, file system operations, and background services directly on the host machine.
-5. **Governance & Safety Gating**: Evaluates actions before execution to prevent accidental file deletion, unintended financial transactions, or unauthorized external messaging.
+Two commitments follow from that:
+- **Equal capability, not equal cost.** Anything a human can see, click,
+  type, or run on their machine, Autobot can perceive and act on — through
+  the cheapest reliable mechanism for that specific surface, not
+  uniformly through the most general (and most expensive/fragile) one.
+- **Human-controlled autonomy.** A permission model the user sets — from
+  "ask me about everything" to "full autonomy" — with a hard floor
+  (deletion, money, credentials, publishing under the user's identity)
+  that no mode, including full autonomy, is allowed to skip.
 
 ---
 
-## 4. Laptop Actuators & Classes of Movement
+## 2. How It Actually Perceives and Acts
 
-To operate a laptop gracefully, AutoBot categorizes every physical and virtual input mechanism into **5 Classes of Movement / Actuators**:
+Not one universal mechanism — the cheapest reliable one per surface:
 
-### Class I: Native OS Input Actuators
-* **Cursor Movement & Clicking**: Absolute and relative screen coordinate mouse positioning, left/right/double clicking, and click-and-drag operations.
-* **Keyboard Typing & Single Keypresses**: Simulated physical keypresses (`Enter`, `Tab`, `Escape`, `Backspace`, arrow keys) and text string typing.
-* **Global Hotkey Sequences**: System-level key combinations (`Alt + Tab`, `Win + D`, `Ctrl + Shift + Esc`, `Alt + Space`).
+- **Native desktop apps** (Notepad, Excel, DICOM viewers, Artemis, VESTA,
+  DAWs) — **UIAutomation** (`computer/window.py`). An indexed element tree,
+  no vision model needed for the common case.
+- **Web page content** — the already-installed **Chrome extension's DOM
+  bridge** (`browser/extension_bridge.py`), acting on the user's real,
+  already-logged-in Chrome. Not CDP: no debug-port launch, no isolated
+  profile, no fighting Windows' SingletonLock over a Chrome the user
+  already had open. `browser_text` / `browser_list` / `browser_click` /
+  `browser_type` / `browser_paste` are the four actions this gives the
+  agent loop.
+- **Other AI tools with a real API or CLI** (Claude Code, and anything
+  like it) — the actual API/CLI, never screenshots of a chat window. An
+  order of magnitude cheaper in tokens and it doesn't depend on a UI that
+  can redesign itself under you. `computer.claude_code.run(...)`,
+  `computer.kaggle.*` are the working examples of this today.
+- **Genuinely vision-only surfaces** (canvas, WebGL, QR codes) —
+  screenshot, as the deliberate last resort, not the default: a screenshot
+  costs roughly 1-2k tokens against a few hundred for an indexed read, and
+  a cheap model gets less reliable at translating pixels into precise
+  coordinates the more that mode is leaned on. `AUTOBOT_VISION_MODE=auto`
+  spends it only where the cheaper source has already proven insufficient.
+- **The rest of the machine** (shell, files, clipboard) — direct OS calls
+  through `computer/*`, no indirection needed.
 
-### Class II: Window & Desktop Management Levers
-* **Window Focus & Restoration**: Bringing hidden or background application windows (VS Code, Excel, Chrome, Terminal) to the foreground using native OS APIs (`SetForegroundWindow`, `ShowWindow`).
-* **Window Geometry & Workspaces**: Minimizing, maximizing, snapping, and resizing active application windows.
-* **Multi-Monitor & DPI Scaling**: Adjusting coordinate mapping across varying screen resolutions and display scaling factors.
-
-### Class III: Browser Protocol Actuators (CDP / Playwright)
-* **Indexed DOM Element Interaction**: Targeting interactive web elements by unified index (`click_element(index)`, `fill_element(index, text)`).
-* **Tab & Context Management**: Enumerating open browser tabs, switching active tabs, opening new tabs, and managing browser contexts.
-* **URL Navigation & History**: Direct page navigation (`goto`), page reloads, and back/forward navigation.
-
-### Class IV: System CLI & Process Actuators
-* **Subprocess Execution**: Spawning and monitoring shell scripts, Python programs, system diagnostic tools, and background daemons.
-* **File System Manipulation**: Creating, reading, editing, moving, and deleting local files and workspace directories.
-* **Environment & Process Controls**: Inspecting environment variables, process lists, CPU/memory usage, and process termination (`taskkill`).
-
-### Class V: Clipboard & Inter-Process Communication (IPC)
-* **OS Clipboard Buffer**: Reading from and writing to the system copy/paste buffer (`Ctrl + C`, `Ctrl + V`).
-* **Local REST & WebSockets IPC**: Exposing local FastAPI endpoints and WebSockets for real-time frontend dashboard telemetry.
-
----
-
-## 5. Architectural Bottlenecks & Strategic Solutions
-
-| Bottleneck | Root Cause | AutoBot Solution |
-| :--- | :--- | :--- |
-| **Profile & Single-Instance Lock Stalls** | Background Chrome instances hold file handles on `SingletonLock`. | **Graceful CDP Launcher**: Detects CDP availability, clears stale locks cleanly, and falls back to isolated automation profiles when necessary. |
-| **DOM vs. Vision Disconnect** | Web apps with canvas, QR codes, or custom WebGL renderers produce empty DOM trees. | **Hybrid Perception**: Combines screen screenshots with DOM trees so the AI always *sees* visual elements. |
-| **Context Window Token Bloat** | Large single-page apps (SPAs) generate thousands of DOM nodes. | **Smart DOM Compression**: Filters out non-interactive layout containers and strips hidden elements before sending to LLM. |
-| **Asynchronous UI Latency** | Web Workers, SPA state updates, or network delays cause premature action retries. | **Reflection & Verification Steps**: Incorporates deliberate wait/verify checks between action cycles rather than infinite refresh loops. |
+One rule threads all of this: **the harness decides which perception
+source applies whenever that's mechanically determinable, and tells the
+model plainly, instead of leaving two overlapping options for the model to
+guess between under time and token pressure.** `CoreLoop._observe()`
+checking the active window's title and appending a perception hint when
+it's Chrome is the current concrete instance of this rule — expect more
+of these as they're found, not fewer.
 
 ---
 
-## 6. The Governance Model: The Permission Dial
+## 3. The Governance Model: The Permission Dial
 
-To ensure complete safety without sacrificing capability, AutoBot operates under a 3-tier **Permission Dial**:
+* 🛡️ **Strict** — Nothing risky runs without a live "Allow" click.
+* ⚡ **Balanced (default)** — Safe reads/navigation auto-proceed; anything
+  risky pauses for approval.
+* 🚀 **Trusted** — Clicks and shell commands don't stop you. This does
+  **not** extend to the floor below.
 
-* 🛡️ **Level 0 (Observer / Advisor)**: Read-only perception. AutoBot analyzes the screen/logs and suggests actions, but cannot execute OS mutations without manual user approval.
-* ⚡ **Level 1 (Supervised Co-Pilot - Default)**: Auto-approves safe read and navigation actions. Pauses and prompts the user before executing potentially **irreversible actions** (deleting files, sending external messages, financial transactions).
-* 🚀 **Level 2 (Full Autonomy)**: Executes multi-step OS and browser missions independently with real-time status reporting.
+**The floor, in every mode without exception:** deletion, financial
+transactions, credential entry, sending or publishing under the user's
+identity. "Trusted" means "don't ask me about clicks" — it never means
+"do whatever, including things I can't undo." This matters more, not
+less, as capability grows: a wrong action across a bigger surface is a
+bigger mistake, not a smaller one.
 
 ---
 
-## 7. Strategic Vision
+## 4. What Makes This Get Cheaper Over Time, Not Just Wider
 
-AutoBot proves that autonomous computing does not require locked-down cloud containers or third-party SaaS subscriptions. By combining native OS control, browser protocol access, multi-modal vision, and user-controlled governance, AutoBot turns your existing laptop into an **Autonomous AI Workstation**.
+Two mechanisms exist specifically so repeated work doesn't re-pay full
+reasoning cost every run:
+- **Skill distillation** (`autobot/knowledge/skill_distiller.py`) — a
+  successful run's proven action path gets saved and re-injected as
+  context the next time a similar goal comes in, so the second run of a
+  repeated task is a shorter path, not a fresh derivation.
+- **API/CLI-first tool integration** (Kaggle, Claude Code) — reaching a
+  tool through its real interface instead of automating its UI is not
+  just more reliable, it's a standing cost reduction: no vision calls, no
+  DOM traversal, no retry ladder for a page that redesigned itself.
+
+The corollary, learned the expensive way: **capability that gets built and
+never wired into a real, callable path doesn't just fail to help — it
+becomes exactly the kind of clutter that makes the next round of work
+slower and the model's own tool catalog less trustworthy.** See
+`ROADMAP.md`'s verification standard: something only counts as "done" once
+a real run, or a real automated test, exercises it — not when the file
+compiles.
+
+---
+
+## 5. Strategic Vision
+
+Autobot doesn't require a locked-down cloud container or a third-party
+SaaS subscription — it runs against the computer the user already has,
+under permissions the user already controls. The bet is that reliability
+comes from disciplined scaffolding around a modest model, not from
+routing every task to the largest one available.

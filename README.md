@@ -4,15 +4,37 @@ Autobot is a local autonomous OS co-pilot and desktop automation controller desi
 
 ## 🚀 Autonomous OS Co-Pilot Architecture
 
-Autobot is built on 4 core pillars:
+> This section described an earlier CDP/Playwright-centric design (a
+> `perception/` + `actuation/` + `governance/` package split). That
+> architecture was retired in Sep 2026 — see `DESIGN_PHILOSOPHY.md` for why.
+> Those packages only exist under `_archive/` now; nothing in the live
+> `autobot/` package imports them.
 
-1. **Perception (`autobot/perception/`)**: Captures desktop screen vision, active OS window titles, open application lists, and browser DOM trees into a unified `PerceptionSnapshot`.
-2. **Actuation (`autobot/actuation/`)**: Universal execution controller for Playwright CDP browser actions, native mouse/keyboard desktop actions (`PyAutoGUI`), and terminal CLI commands.
-3. **Governance & Permission Dial (`autobot/governance/`)**: Granular user control with 3 permission tiers:
-   - 🛡️ `level_0_observer`: Read-only, asks confirmation before taking OS actions.
-   - ⚡ `level_1_supervised`: Auto-approves safe actions, prompts before irreversible operations (deleting files, sending external messages).
-   - 🚀 `level_2_full`: Full autonomous execution.
-4. **Unified Agent Loop (`autobot/agent/`)**: Connects Perception → Governance → Planning → Actuation → Reflection in a non-blocking execution loop.
+What actually runs today is **CoreLoop** (`autobot/agent/core_loop.py`), a
+single observe → decide → act → verify → distill loop:
+
+1. **Perception, split by surface, not unified into one snapshot type:**
+   native desktop apps via UIAutomation (`autobot/computer/window.py`), web
+   page content via the Chrome extension's DOM bridge
+   (`autobot/browser/extension_bridge.py`, no CDP), and vision/screenshot as
+   the deliberate last resort. CoreLoop's `_observe()` tells the model which
+   source applies each step rather than leaving it to guess.
+2. **Actuation** through the same split: `computer.window.click/type` for
+   native UI, `browser_text/browser_list/browser_click/browser_type/browser_paste`
+   for web content, `computer.mouse`/`computer.keyboard`/`computer.terminal`
+   for the rest of the machine, and direct API/CLI tools
+   (`computer.claude_code`, `computer.kaggle`) where one exists instead of
+   automating a UI.
+3. **Governance & Permission Dial** (`autobot/agent/approval.py`): risk-tiered
+   (SAFE / CAUTION / DANGER / IRREVERSIBLE) gating with 3 modes:
+   - 🛡️ `strict`: nothing risky runs without a live approval.
+   - ⚡ `balanced` (default): safe reads/navigation auto-proceed, risky
+     actions pause for approval.
+   - 🚀 `trusted`: clicks and shell commands don't stop you.
+   IRREVERSIBLE actions are hard-gated in every mode, no exceptions.
+4. **Skill distillation** (`autobot/knowledge/skill_distiller.py`) replaces
+   the old "Reflection" step: a successful run's action path is saved and
+   re-injected as context next time a similar goal comes in.
 
 **Product direction and long-term vision:** see **[AUTOBOT_MISSION.md](AUTOBOT_MISSION.md)** in the project root.
 
@@ -219,6 +241,165 @@ To get the system to **iterate with the AI until tests pass** (or until a goal i
    - Optionally set **Target URL** to your app (e.g. `http://localhost:3000`) so the engine can open it and capture console errors.  
    - Run **Autonomous mode**. Each loop: the engine runs the diagnostics command, captures exit code and output, passes that **state** to the AI (OpenRouter/DeepSeek by default). The AI returns the next steps (e.g. open Grok, set clipboard with a fix request, run a command). The engine executes them and loops until the goal is met or max loops are reached.  
    - So: **functionality first**—the AI uses real state (test output, errors, clipboard) to decide what to do next, and you can iterate until the “crazy” goal is achieved.
+
+## Browser control without CDP (extension DOM bridge)
+
+CoreLoop's primary perception is UIAutomation, not CDP — but UIAutomation
+only reliably sees Chrome's toolbar and tabs, not the content of the page
+itself. For actual page content, Autobot talks to the page through the
+**Autobot Chrome extension** (`extension/`), which is already installed in
+your real, logged-in Chrome and can read/click the DOM directly through
+permissions Chrome already granted it — no debug port, no isolated
+profile, none of the SingletonLock/profile-corruption issues CDP launch
+caused on Windows.
+
+**One-time setup:**
+1. `chrome://extensions` → enable **Developer mode** → **Load unpacked** →
+   select the `extension/` folder. (Already loaded? Click its reload icon
+   to pick up updates.)
+2. Click the Autobot toolbar icon once on any normal page to confirm the
+   content script is alive there.
+3. Start the backend (`autobot --server`, or `python -m autobot.main`).
+
+**Try it directly** (no LLM needed — proves the bridge itself works):
+```bash
+python demo_extension_bridge.py          # status + read the focused tab + list its clickable elements
+python demo_extension_bridge.py list     # numbered list of visible clickable elements
+python demo_extension_bridge.py click 3  # click element [3] from the last `list`
+```
+
+**From the agent loop:** CoreLoop exposes this as four actions —
+`browser_text`, `browser_list`, `browser_click`, `browser_type` — documented
+in `autobot/prompts/system_prompt.md`. They act on whichever tab is
+currently focused in your real Chrome.
+
+The bridge is a simple HTTP-polling round trip (backend queues a command →
+extension's background.js polls for it every ~1s → runs it in the active
+tab's content script → posts the result back) — see
+`autobot/browser/extension_bridge.py` for the implementation and
+`tests/test_extension_bridge.py` for offline tests of the queue mechanics.
+
+## Kaggle + Claude Code + Antigravity + Overleaf
+
+Four different mechanisms for four different levels of API access —
+picked deliberately, not automated-by-default:
+
+- **Kaggle** — a real API. `autobot/computer/kaggle_tool.py`'s `Kaggle`
+  class wraps `kaggle.api.kaggle_api_extended.KaggleApi` directly (the same
+  library the official `kaggle` CLI itself is built on). Reachable from the
+  agent loop via the existing `computer_call` action:
+  `computer.kaggle.pull_kernel(kernel, path)`, `.kernel_status(kernel)`,
+  `.push_kernel(path)`, `.kernel_output(kernel, path)` — all new tonight,
+  alongside the pre-existing `.list_competitions()`, `.download_data()`,
+  `.submit()`, `.get_leaderboard()`. Tests: `tests/test_kaggle_tool.py`
+  (kernel methods, mocked KaggleApi — no real Kaggle account touched).
+  Risk tiers are deliberately split: `pull_kernel`/`push_kernel`/
+  `kernel_status`/`kernel_output` are SAFE-tier — create, edit, run, and
+  read a notebook as many times as you want, no approval pause in any
+  mode. `computer.kaggle.submit(...)` (a real competition submission) is
+  the opposite: IRREVERSIBLE-tier in `autobot/agent/approval.py`, always
+  requires a live "Allow" click, in every approval mode including
+  `trusted`. Tests for the split: `tests/test_approval_new_patterns.py`
+  and `tests/test_core_loop.py::TestKaggleRiskSeparation`.
+  **Keeps working while you're away from the computer**: set
+  `AUTOBOT_UNATTENDED=1` and CAUTION/DANGER actions (including Kaggle
+  kernel iteration) proceed automatically instead of pausing on a prompt
+  nobody's there to answer — logged and desktop-notified so you can review
+  what happened when you're back. `submit()` is the one exception: it
+  stays IRREVERSIBLE and never auto-proceeds, unattended or not — see
+  `approval.py`'s "Unattended mode" docstring and
+  `tests/test_unattended_approval.py`.
+- **Claude Code** — a real headless CLI mode. `autobot/integrations/
+  claude_code_bridge.py` wraps `claude -p --output-format json` as a
+  subprocess (no shell=True — argv only, so nothing in a prompt can be
+  interpreted as shell syntax); `autobot/computer/claude_code_tool.py`'s
+  thin `ClaudeCode` class exposes it the same way as Kaggle:
+  `computer.claude_code.run(prompt, cwd=..., permission_mode=...)`.
+  `permission_mode` defaults to `"plan"` (read-only); `"acceptEdits"` /
+  `"bypassPermissions"` are DANGER-tier and gated accordingly. Tests:
+  `tests/test_claude_code_bridge.py` (subprocess/argv contract, mocked —
+  no real `claude` CLI invoked) and `tests/test_claude_code_tool.py` (the
+  wrapper class).
+- **Antigravity** — Google Antigravity's own headless CLI (`agy`), the
+  same shape of integration as Claude Code above: `autobot/integrations/
+  antigravity_bridge.py` wraps `agy -p --output-format json` as a
+  subprocess (no shell=True), `autobot/computer/antigravity_tool.py`
+  exposes `computer.antigravity.run(prompt, cwd=..., skip_permissions=...,
+  model=..., effort=..., agent=...)`. `skip_permissions` defaults to
+  `False` (agy respects its own scoped allowlist); `True`
+  (`--dangerously-skip-permissions`) is DANGER-tier, mirroring Claude
+  Code's write-capable modes. Tests: `tests/test_antigravity_bridge.py`,
+  `tests/test_antigravity_tool.py`, and the DANGER-pattern tests in
+  `tests/test_approval_new_patterns.py`.
+- **Overleaf** — no public write API, so this is the one leg that still
+  needs the browser DOM bridge above. `browser_paste` (new tonight,
+  alongside `browser_text`/`browser_list`/`browser_click`/`browser_type`)
+  dispatches a synthetic `paste` event rather than writing `value`/
+  `textContent` directly, because Overleaf's editor (CodeMirror) manages
+  its own document state and a direct write doesn't reliably register —
+  paste events are what these editors actually listen for. **This is
+  unproven against the real, live Overleaf editor** — it hasn't been run
+  against an actual document yet. Try it supervised first; if the paste
+  event doesn't register, the documented fallback is a real OS-level paste
+  (`computer.clipboard.set(text)` then `computer.keyboard.press("ctrl+v")`
+  after `browser_click` focuses the editor).
+
+A typical goal for the agent loop: pull a kernel, hand its code to Claude
+Code, push the result back, poll until the run completes, pull the output,
+have Claude Code draft a paper section from it, then paste that into
+Overleaf. See the "Kaggle + Claude Code + Overleaf Workflow" section of
+`autobot/prompts/system_prompt.md` for the exact sequence the agent is
+told to follow, and why each step is checked before the next one starts.
+
+## Multi-project orchestrator (Claude Code / Antigravity check-ins)
+
+For juggling several AI-assisted coding projects at once — Claude Code in
+VS Code, more than one Antigravity project, whatever else uses one of the
+two backends above — without re-explaining each one's goal every time you
+switch context:
+
+- **`autobot/knowledge/project_registry.py`** — register a project once
+  with `registry.register(name, working_dir, backend, intent)`. `intent`
+  is stored exactly as you wrote or pasted it — never summarized or
+  rewritten by Autobot — because the whole point is Autobot remembering
+  what *you* said you wanted, not its own paraphrase of it. `backend` is
+  `"claude_code"` or `"antigravity"` (validated — an unrecognized backend
+  raises immediately rather than silently producing a project the
+  check-in loop can never reach later). One JSON file per project under
+  `autobot/knowledge/projects/`, same storage pattern as the skill
+  library. `add_intent_note(name, note)` appends something new you told
+  it about a project without overwriting the original intent. Tests:
+  `tests/test_project_registry.py` (23 tests, real temp-directory
+  fixtures).
+- **`autobot/agent/orchestrator_checkin.py`** — `OrchestratorCheckIn().
+  check_in_on("project-name")` asks that project's AI backend for a
+  status update (what's done, in progress, blocked, and what needs a
+  decision from you) and records the summary back to the registry.
+  `check_in_on_all()` sweeps every tracked project; one project's backend
+  being unreachable doesn't stop the others from reporting in. Each
+  check-in resumes the project's prior Claude Code session / Antigravity
+  conversation by id, so the AI has context from earlier check-ins
+  instead of a cold start every time. Tests:
+  `tests/test_orchestrator_checkin.py` (24 tests).
+
+**Deliberately read-only for now.** This asks each project's AI "what's
+your status," never "go do X" — sending an actual follow-up instruction on
+your behalf while you're not watching is a bigger decision (real file
+writes, real token/compute spend in someone else's project, unattended)
+than reading a status report, and it hasn't gotten the same kind of
+explicit go-ahead the Kaggle unattended-mode question above did. The
+check-in prompt itself explicitly tells the backend not to start new
+work in response. Extending this to actual autonomous prompting is the
+natural next step, but on purpose not this one — see
+`orchestrator_checkin.py`'s module docstring for the full reasoning.
+
+Also fixed tonight, found while wiring this in: `computer_call` actions
+(the only way `computer.kaggle.*`, `computer.claude_code.*`,
+`computer.research.*`, `computer.vault.*`, and `computer.files.*` are
+reachable — none of them have dedicated action names) were silently
+failing on every single call — `CoreLoop._dispatch()` called the async
+`dispatch_computer_call()` without awaiting it, which doesn't run it at
+all. Regression test: `tests/test_core_loop.py::TestComputerCallDispatch`.
 
 ## Notes
 
