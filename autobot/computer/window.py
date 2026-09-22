@@ -76,12 +76,30 @@ class Window:
 
     @_needs_com
     def focus(self, title_query: str) -> bool:
-        """Focus a window containing the given title text."""
-        window = auto.WindowControl(searchDepth=1, Name=title_query)
-        if window.Exists(0):
-            window.SetFocus()
-            window.SetActive()
-            return True
+        """Focus a window containing the given title text.
+
+        `auto.WindowControl(Name=title_query)` does an EXACT match on the
+        window's Name property, despite this method's own docstring always
+        having promised "containing" — so `focus("Chrome")` against a real
+        Chrome window (titled e.g. "Traffic Flow Bench Pipeline | Kaggle —
+        Google Chrome") never matched, `Exists(0)` was always False, and
+        every caller's "if Chrome is already open, focus it" branch was
+        unreachable — navigate() fell straight through to "launch a new
+        Chrome" on every single call, even with Chrome already open and
+        focused on the right page. Fixed by actually doing substring
+        matching: enumerate top-level windows (same source list_all() uses)
+        and match case-insensitively, so the search matches what the
+        docstring — and every caller — always assumed it did.
+        """
+        query = title_query.strip().lower()
+        if not query:
+            return False
+        for w in auto.GetRootControl().GetChildren():
+            name = w.Name or ""
+            if query in name.lower():
+                w.SetFocus()
+                w.SetActive()
+                return True
         return False
 
     @_needs_com

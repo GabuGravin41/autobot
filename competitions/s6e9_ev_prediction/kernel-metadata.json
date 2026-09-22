@@ -1,0 +1,13 @@
+{
+  "id": "daltongabrielomondi/autobot-s6e9-ev-baseline",
+  "title": "Autobot S6E9 EV Baseline",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "playground-series-s6e9"
+  ]
+}

@@ -12,6 +12,21 @@ This replaces the 1,119-line loop.py with a single, readable loop that:
 Design principles:
   - UIAutomation is PRIMARY. CDP browser is an optional tool the model calls,
     not a required dependency that must be set up before anything else works.
+  - For actual web page DOM content (which UIAutomation sees unreliably —
+    Chrome's toolbar/tabs, not consistently the page itself), the
+    browser_text / browser_list / browser_click / browser_type actions go
+    through the Chrome extension's content script (see
+    autobot/browser/extension_bridge.py) instead of CDP — no debug port,
+    no profile launch, no SingletonLock fights.
+  - Kaggle (kernel pull/push/status/output — autobot/computer/kaggle_tool.py)
+    and Claude Code (headless runs — autobot/computer/claude_code_tool.py)
+    are reached through the existing `computer_call` action, i.e.
+    `computer.kaggle.pull_kernel(...)` / `computer.claude_code.run_headless(...)`
+    — real APIs/CLIs, not UI automation of either tool's web/chat interface.
+    No new action names needed: computer_call's AST-safe dispatcher
+    (autobot/computer/dispatch.py) already reaches any public method on any
+    Computer submodule, and _classify_risk() below already risk-classifies
+    computer_call by pattern-matching the call string.
   - One action per step. Simpler to verify, simpler to debug.
   - No MissionAgent, no TaskClassifier, no complexity routing.
     Just this loop. Add those back after this works on real tasks.
@@ -131,6 +146,12 @@ class CoreLoop:
         self._last_done_success: bool = False
 
         # Services
+        # ApprovalGuard also reads AUTOBOT_UNATTENDED itself (unattended=None
+        # here means "check the env var") — set it before starting a run
+        # you're stepping away from (e.g. Kaggle kernel iteration overnight)
+        # so CAUTION/DANGER don't stall waiting for an Allow click nobody's
+        # there to give. See approval.py's module docstring for the exact
+        # behavior this changes, and note the IRREVERSIBLE floor doesn't move.
         self._approval = ApprovalGuard(mode=os.getenv("AUTOBOT_APPROVAL_MODE", "balanced"))
         self._distiller = SkillDistiller()
 
@@ -255,18 +276,55 @@ class CoreLoop:
 
     # ── OBSERVE ───────────────────────────────────────────────────────────────
 
+    # Window titles that mean "this is Chrome" — used to decide whether to
+    # append the perception hint below. Substring match, case-insensitive,
+    # same spirit as window.py's focus() fix.
+    _BROWSER_TITLE_MARKERS = ("chrome",)
+
     def _observe(self) -> str:
-        """Extract the UIAutomation tree of the active window."""
+        """Extract the current screen state.
+
+        UIAutomation (the active window's element tree) is the base layer
+        for every window, browser included. But when the active window IS
+        Chrome, that tree only ever shows the toolbar/tabs — never the page
+        itself (see system_prompt.md's Browser Notes) — so a model relying
+        on OBSERVE alone would see an empty-looking browser every single
+        step and have no signal that a second perception source
+        (browser_text/browser_list, via the extension bridge) exists and is
+        what it actually needs here. Previously the model had to *guess*
+        that on its own from static system-prompt instructions alone, with
+        no per-step reminder — this appends an explicit, cheap (no network
+        call — just a string check on the window title already read this
+        step) hint instead of leaving that judgment call to the model each
+        time. This is a hint, not an eager fetch: it does not itself call
+        browser_text, so it costs nothing beyond the one string comparison
+        and doesn't add a bridge round-trip on steps where the model was
+        about to do something else entirely (e.g. click Chrome's own
+        toolbar).
+        """
+        title = self._active_window_title()
         try:
             if hasattr(self.computer, "window") and self.computer.window is not None:
                 tree = self.computer.window.extract_ui()
-                title = self.computer.window.active_title()
-                if title:
-                    return f"Active window: {title}\n{tree}"
-                return tree
+                screen = f"Active window: {title}\n{tree}" if title and title != "(unknown)" else tree
+            else:
+                screen = "(Could not extract screen state — try using 'screenshot' action)"
         except Exception as e:
             logger.debug(f"UIAutomation extraction failed: {e}")
-        return "(Could not extract screen state — try using 'screenshot' action)"
+            screen = "(Could not extract screen state — try using 'screenshot' action)"
+
+        if self._looks_like_browser(title):
+            screen += (
+                "\n\n[Perception hint: the active window is Chrome. The tree above is "
+                "UIAutomation's view of Chrome's own toolbar/tabs — it will NOT show the "
+                "web page's content, links, or text. Use browser_text or browser_list now "
+                "to see what's actually on the page before deciding your next action.]"
+            )
+        return screen
+
+    def _looks_like_browser(self, title: str) -> bool:
+        t = (title or "").lower()
+        return any(marker in t for marker in self._BROWSER_TITLE_MARKERS)
 
     def _active_window_title(self) -> str:
         try:
@@ -308,25 +366,48 @@ class CoreLoop:
                     ),
                 })
             except Exception as e:
-                logger.error(f"LLM call failed (attempt {attempt+1}): {e}")
+                # Surface this to the run log (self.log), not just Python's
+                # logging module — logger.error() alone lands in the
+                # backend's OWN terminal (python -m autobot.main), which is
+                # a different window than wherever the run's log is being
+                # watched (dashboard, /api/logs, this script). Without this,
+                # every real cause (bad key, rate limit, unknown model,
+                # network error) collapses into the same opaque "LLM failed
+                # to respond after retries" with no way to tell them apart.
+                msg = f"LLM call failed (attempt {attempt+1}/2): {type(e).__name__}: {e}"
+                logger.error(msg)
+                self.log(f"  ⚠️ {msg}")
                 if attempt == 1:
                     return None
         return None
 
     async def _llm_call(self, messages: list[dict]) -> str:
-        """Make the LLM API call. Returns raw text content."""
+        """
+        Make the LLM API call. Returns raw text content.
+
+        self.llm_client is usually a SYNCHRONOUS client (openai.OpenAI(...),
+        or the Anthropic adapter — both real network calls under a plain
+        `def create(...)`, not `async def`). Calling create() already
+        performs the request; only the subsequent `await` on its non-
+        awaitable result would fail. So: check whether create is actually a
+        coroutine function BEFORE calling it, and route accordingly — never
+        call it once to find out, throw that (already-executed, already-
+        billed) response away, and call it again. The previous version did
+        exactly that on every single step for a sync client, which is the
+        common case here — double cost, double latency, and if a provider
+        rate-limits two rapid calls, the second (real, kept) attempt could
+        fail because of the first (wasted, discarded) one.
+        """
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": 0.1,
         }
-        try:
-            resp = await self.llm_client.chat.completions.create(**kwargs)
-        except TypeError:
-            # Some clients are sync-only (Anthropic adapter)
-            resp = await asyncio.to_thread(
-                self.llm_client.chat.completions.create, **kwargs
-            )
+        create = self.llm_client.chat.completions.create
+        if asyncio.iscoroutinefunction(create):
+            resp = await create(**kwargs)
+        else:
+            resp = await asyncio.to_thread(create, **kwargs)
         return (resp.choices[0].message.content or "").strip()
 
     def _parse_llm_response(self, raw: str) -> LLMResponse | None:
@@ -453,16 +534,81 @@ class CoreLoop:
         elif name == "computer_call":
             call_str = str(p.get("call", ""))
             from autobot.computer.dispatch import dispatch_computer_call
-            ok, result = dispatch_computer_call(self.computer, call_str)
+            # dispatch_computer_call is `async def`. This method (_dispatch)
+            # is itself synchronous — it's invoked via asyncio.to_thread from
+            # _act() specifically so blocking calls are safe here — which
+            # means there is no event loop already running on this thread.
+            # Calling the coroutine function without awaiting it does NOT
+            # run its body; it just constructs a coroutine object, and the
+            # `ok, result = <that object>` below used to raise "cannot
+            # unpack non-iterable coroutine object" immediately. That
+            # exception propagated out of _dispatch() and was caught by
+            # _act()'s try/except as a generic "Error executing
+            # computer_call: ..." — so every computer_call action was
+            # silently failing, every time. Since computer.kaggle.*,
+            # computer.research.*, computer.vault.*, and computer.files.*
+            # have no dedicated action names of their own (unlike
+            # run_shell/navigate/browser_*), computer_call is the ONLY way
+            # to reach them — so all four tool modules were unreachable
+            # from any real agent run until this fix. asyncio.run() here is
+            # safe precisely because this thread has no other loop to
+            # conflict with.
+            ok, result = asyncio.run(dispatch_computer_call(self.computer, call_str))
             return result
+
+        elif name == "browser_text":
+            return self._browser_bridge_call("read_text")
+
+        elif name == "browser_list":
+            return self._browser_bridge_call("list_elements")
+
+        elif name == "browser_click":
+            index = int(p.get("index", 0))
+            return self._browser_bridge_call("click_index", index=index)
+
+        elif name == "browser_type":
+            index = int(p.get("index", 0))
+            text = str(p.get("text", ""))
+            return self._browser_bridge_call("type_index", index=index, text=text)
+
+        elif name == "browser_paste":
+            # For CodeMirror/Monaco/ProseMirror-style rich editors (e.g.
+            # Overleaf's LaTeX editor) where browser_type's direct
+            # value/textContent write doesn't reliably register — see
+            # extension/content.js's paste_text handler and its module
+            # docstring for why a synthetic paste event is used instead.
+            index = int(p.get("index", 0))
+            text = str(p.get("text", ""))
+            return self._browser_bridge_call("paste_text", index=index, text=text)
 
         else:
             valid = ["click", "type_into", "type", "key", "focus", "navigate",
-                     "run_shell", "screenshot", "wait", "human_input", "computer_call", "done"]
+                     "run_shell", "screenshot", "wait", "human_input", "computer_call",
+                     "browser_text", "browser_list", "browser_click", "browser_type",
+                     "browser_paste", "done"]
             return (
                 f"Unknown action '{name}'. "
                 f"Valid actions: {', '.join(valid)}"
             )
+
+    def _browser_bridge_call(self, cmd_type: str, **params: Any) -> str:
+        """
+        Call into the Chrome extension DOM bridge (autobot/browser/
+        extension_bridge.py) and return a compact text result for the LLM.
+
+        This is the CDP-free path for actual web page content: UIAutomation
+        sees Chrome's toolbar/tabs but not reliably the page DOM (see the
+        "Browser Notes" section of system_prompt.md), and CDP requires
+        launching/attaching to a debug port, which is exactly the profile-
+        lock fragility this project moved away from. The already-installed
+        Autobot extension talks to the page directly through its content
+        script instead.
+        """
+        from autobot.browser.extension_bridge import bridge
+        result = bridge.run(cmd_type, timeout=10.0, **params)
+        if not result.get("ok"):
+            return f"{cmd_type} failed: {result.get('error', 'unknown error')}"
+        return json.dumps(result.get("data"))[:_MAX_OUTPUT_CHARS]
 
     def _navigate(self, url: str) -> str:
         """
@@ -565,7 +711,9 @@ class CoreLoop:
         name = action.name
 
         if name in ("click", "type", "type_into", "key", "focus", "navigate",
-                    "screenshot", "wait", "done"):
+                    "screenshot", "wait", "done",
+                    "browser_text", "browser_list", "browser_click", "browser_type",
+                    "browser_paste"):
             return RiskTier.SAFE
 
         if name == "run_shell":
@@ -584,11 +732,17 @@ class CoreLoop:
 
         if name == "computer_call":
             call_str = str(action.params.get("call", ""))
-            from autobot.agent.approval import _IRREVERSIBLE_RE, _DANGER_RE
+            from autobot.agent.approval import _IRREVERSIBLE_RE, _DANGER_RE, _SAFE_COMPUTER_CALL_RE
             if _IRREVERSIBLE_RE.search(call_str):
                 return RiskTier.IRREVERSIBLE
             if _DANGER_RE.search(call_str):
                 return RiskTier.DANGER
+            if _SAFE_COMPUTER_CALL_RE.search(call_str):
+                # Kaggle kernel pull/push/status/output — create/edit/read a
+                # notebook in the user's own account. Explicitly SAFE (never
+                # pauses, in any approval mode) so iteration stays frictionless;
+                # only a real competition submit() is hard-gated above.
+                return RiskTier.SAFE
             return RiskTier.CAUTION
 
         return RiskTier.SAFE

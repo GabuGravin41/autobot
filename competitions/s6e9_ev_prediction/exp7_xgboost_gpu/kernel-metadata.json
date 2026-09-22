@@ -1,0 +1,13 @@
+{
+  "id": "daltongabrielomondi/autobot-s6e9-xgboost-gpu-enriched-features",
+  "title": "Autobot S6E9 XGBoost GPU Enriched Features",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "playground-series-s6e9"
+  ]
+}

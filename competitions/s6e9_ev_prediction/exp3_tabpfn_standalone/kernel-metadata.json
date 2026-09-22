@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-s6e9-tabpfn-standalone",
+  "title": "Autobot S6E9 TabPFN Standalone",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "playground-series-s6e9"
+  ],
+  "dataset_sources": [
+    "takatophy/tabpfn-v25-models"
+  ]
+}

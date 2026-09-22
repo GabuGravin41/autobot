@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-s6e9-exp9-top10-lgbm",
+  "title": "Autobot S6E9 Exp9 Top10 LGBM",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "competition_sources": [
+    "playground-series-s6e9"
+  ],
+  "dataset_sources": [
+    "itzzomkar/ev-adoption-behavior-and-range-anxiety"
+  ]
+}

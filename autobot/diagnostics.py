@@ -17,7 +17,6 @@ Run with:  autobot --doctor
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import platform
 import shutil
@@ -73,9 +72,16 @@ def _module_present(name: str) -> bool:
 
 def check_required_packages() -> list[Check]:
     """Packages the agent cannot run at all without."""
-    # Note: playwright's bundled browser download is NOT required. Autobot
-    # attaches to the user's real Chrome via connect_over_cdp() and never
-    # calls chromium.launch(), so only the Python driver matters here.
+    # Note: playwright's bundled browser download is NOT required, and as of
+    # the Round 5 CDP retirement (see ROADMAP.md) neither is a debug-port
+    # Chrome — Autobot no longer attaches via connect_over_cdp() at all;
+    # browser perception now goes through the Chrome extension's DOM bridge
+    # (browser/extension_bridge.py) instead. `playwright`/`websockets` are
+    # kept in this required list because other code paths in this package
+    # still import them; if you're seeing this comment while investigating
+    # a missing-package failure, confirm they're still genuinely load-bearing
+    # rather than another CDP-era leftover before treating a FAIL here as
+    # blocking — see ROADMAP.md Round 5 for the full context.
     required = {
         "pydantic": "pip install pydantic",
         "openai": "pip install openai",
@@ -134,7 +140,15 @@ def check_optional_packages() -> list[Check]:
 
 
 def check_chrome() -> Check:
-    """Locate the Chrome executable the launcher will try to start."""
+    """Confirm Chrome is actually installed.
+
+    Not "the launcher will start it with a debug port" (that was the
+    retired CDP path - see ROADMAP.md Round 5). Browser perception now goes
+    through the Autobot Chrome extension polling an already-open, already-
+    logged-in Chrome, so this just confirms Chrome exists on the machine at
+    all; it doesn't confirm the extension itself is installed and running,
+    which this script has no way to check from outside the browser.
+    """
     candidates = [
         os.getenv("AUTOBOT_CHROME_EXECUTABLE"),
         os.getenv("CHROME_EXECUTABLE"),
@@ -155,21 +169,87 @@ def check_chrome() -> Check:
     )
 
 
-def check_cdp(port: int | None = None) -> Check:
-    """Is a Chrome already listening on the DevTools port we attach to?"""
-    port = port or int(os.getenv("AUTOBOT_CDP_PORT", "9222"))
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2) as r:
-            info = json.loads(r.read())
-        browser = info.get("Browser", "unknown")
-        return Check(f"Chrome DevTools port {port}", OK, f"reachable - {browser}")
-    except Exception:
-        return Check(
-            f"Chrome DevTools port {port}", WARN,
-            "nothing listening (Autobot will try to launch Chrome itself)",
-            "If launching fails, close ALL Chrome windows first, or start Chrome "
-            f'manually with --remote-debugging-port={port}',
-        )
+def check_kaggle() -> list[Check]:
+    """Kaggle API package + credentials — computer.kaggle.* is unreachable
+    without both. kaggle_tool.py's _get_api() calls the official
+    KaggleApi().authenticate(), which reads ~/.kaggle/kaggle.json or the
+    KAGGLE_USERNAME/KAGGLE_KEY env vars — neither is Autobot's own .env, so
+    this is worth checking explicitly rather than assuming "the app has a
+    .env file" means Kaggle is configured too."""
+    checks: list[Check] = []
+    if _module_present("kaggle"):
+        checks.append(Check("package: kaggle", OK))
+    else:
+        checks.append(Check(
+            "package: kaggle", FAIL, "not installed",
+            "pip install kaggle",
+        ))
+        return checks  # credential check below would be meaningless without the package
+
+    kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
+    has_env_creds = bool(os.getenv("KAGGLE_USERNAME")) and bool(os.getenv("KAGGLE_KEY"))
+    if kaggle_json.exists():
+        checks.append(Check("Kaggle credentials", OK, str(kaggle_json)))
+    elif has_env_creds:
+        checks.append(Check("Kaggle credentials", OK, "KAGGLE_USERNAME / KAGGLE_KEY set"))
+    else:
+        checks.append(Check(
+            "Kaggle credentials", FAIL,
+            f"no {kaggle_json} and KAGGLE_USERNAME/KAGGLE_KEY not set",
+            "On kaggle.com: Account -> Create New API Token, downloads "
+            "kaggle.json - put it at "
+            f"{kaggle_json}, or set KAGGLE_USERNAME and KAGGLE_KEY in .env.",
+        ))
+    return checks
+
+
+def check_claude_code_cli() -> Check:
+    """The `claude` CLI is what computer.claude_code.run() shells out to
+    (autobot/integrations/claude_code_bridge.py) - a separate prerequisite
+    from having Claude Code's VS Code extension installed, and separate
+    from Autobot's own LLM key above (that key drives Autobot's own
+    decision loop; this CLI is what does the actual coding work Autobot
+    delegates to it)."""
+    if shutil.which("claude"):
+        return Check("Claude Code CLI (claude)", OK, "found on PATH")
+    return Check(
+        "Claude Code CLI (claude)", FAIL, "not found on PATH",
+        "Install: npm install -g @anthropic-ai/claude-code, then run "
+        "'claude' once interactively to sign in - computer.claude_code.run() "
+        "cannot do that sign-in step itself in headless mode.",
+    )
+
+
+def check_antigravity_cli() -> Check:
+    """agy is optional - only needed if a task actually calls
+    computer.antigravity.run(). Warn, don't fail: most single-project
+    Kaggle/Claude Code work never touches it."""
+    if shutil.which("agy"):
+        return Check("Antigravity CLI (agy)", OK, "found on PATH")
+    return Check(
+        "Antigravity CLI (agy)", WARN,
+        "not found on PATH - computer.antigravity.* will fail if called",
+        "Only needed for tasks that use Antigravity. See antigravity.google/docs/cli/.",
+    )
+
+
+def check_unattended_mode() -> Check:
+    """Informational: is Autobot willing to keep going without you at the
+    keyboard? A run started for "keep working on this while I'm away" with
+    this unset will pause at the first CAUTION/DANGER action and then just
+    sit there - not a bug, but easy to mistake for one. See approval.py's
+    "Unattended mode" docstring for exactly what this does and does not
+    bypass (a real Kaggle competition submit() is never auto-approved by
+    this, unattended or not)."""
+    raw = os.getenv("AUTOBOT_UNATTENDED", "0").strip().lower()
+    on = raw in ("1", "true", "yes")
+    if on:
+        return Check("unattended mode", OK,
+                     "ON - CAUTION/DANGER proceed without pausing while you're away")
+    return Check("unattended mode", OK,
+                 "off - will pause and wait for you on CAUTION/DANGER actions "
+                 "(set AUTOBOT_UNATTENDED=1 in .env for a run meant to keep going "
+                 "while you're not at the computer)")
 
 
 def check_llm_config() -> list[Check]:
@@ -446,8 +526,11 @@ def run_all() -> list[Check]:
         check_proxy_env,
         check_llm_connectivity,
         lambda: [check_approval_mode()],
+        lambda: [check_unattended_mode()],
         lambda: [check_chrome()],
-        lambda: [check_cdp()],
+        check_kaggle,
+        lambda: [check_claude_code_cli()],
+        lambda: [check_antigravity_cli()],
         check_writable_dirs,
         lambda: [check_learned_skills()],
     ]

@@ -12,6 +12,11 @@ API surface:
   GET  /api/runs           → historical runs
   DELETE /api/runs         → format/delete all historical runs
 
+  GET  /api/extension/poll    → polled by the Chrome extension for pending DOM commands
+  POST /api/extension/result  → the extension posts a command's result here
+  POST /api/extension/command → submit a DOM command and block for the result (CDP-free browser bridge)
+  GET  /api/extension/status  → whether the extension is currently connected
+
   WS   /ws/logs            → real-time log streaming
 """
 from __future__ import annotations
@@ -33,6 +38,7 @@ from pydantic import BaseModel
 
 from ..agent.runner import AgentRunner
 from ..computer.liveness import SystemLivenessManager
+from ..browser.extension_bridge import bridge as _ext_bridge
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -252,6 +258,72 @@ def resume_agent():
     return {"status": "running"}
 
 
+# ── Extension DOM Bridge ──────────────────────────────────────────────────────
+#
+# Lets the backend interact with the page DOM through the already-installed
+# Autobot Chrome extension instead of CDP — no debug port, no isolated
+# profile, no SingletonLock fights. See autobot/browser/extension_bridge.py
+# for the full flow. This is what CoreLoop's browser_list / browser_click /
+# browser_type / browser_text actions call into (core_loop.py's
+# _browser_bridge_call), and it's also reachable directly over HTTP for
+# testing — see demo_extension_bridge.py at the repo root.
+
+@app.get("/api/extension/poll")
+def extension_poll():
+    """
+    Polled by the Autobot Chrome extension's background.js roughly every
+    second. Returns the next queued DOM command, or {"command": null} if
+    nothing is waiting. Also updates the extension's last-seen liveness
+    timestamp, so /api/extension/status can report whether it's connected.
+    """
+    return {"command": _ext_bridge.take_next()}
+
+
+class ExtensionResultRequest(BaseModel):
+    id: str
+    ok: bool
+    data: Any = None
+    error: str = ""
+
+
+@app.post("/api/extension/result")
+def extension_result(req: ExtensionResultRequest):
+    """The extension posts a command's executed result here."""
+    delivered = _ext_bridge.complete(req.id, req.ok, req.data, req.error)
+    return {"delivered": delivered}
+
+
+@app.get("/api/extension/status")
+def extension_status():
+    """Whether the extension has polled recently — i.e. it's installed,
+    enabled, and pointed at this backend right now."""
+    return {"connected": _ext_bridge.extension_connected}
+
+
+class ExtensionCommandRequest(BaseModel):
+    type: str
+    params: dict[str, Any] = {}
+    timeout: float = 10.0
+
+
+@app.post("/api/extension/command")
+async def extension_command(req: ExtensionCommandRequest):
+    """
+    Send a DOM command to the extension in the user's real browser and
+    block until it answers. Supported types (see content.js's
+    runDomCommand): read_text, list_elements, click_index, type_index.
+
+    This is the primary way to test the bridge directly — e.g.
+    `curl -X POST http://127.0.0.1:8000/api/extension/command
+        -H "Content-Type: application/json"
+        -d '{"type": "list_elements"}'`
+    should return the numbered, visible, clickable elements on whatever
+    tab is currently focused in the user's real Chrome.
+    """
+    result = await asyncio.to_thread(_ext_bridge.run, req.type, req.timeout, **req.params)
+    return result
+
+
 class OrchestrateRequest(BaseModel):
     goal: str
     max_steps: int = 25
@@ -373,7 +445,7 @@ def get_settings():
     return {
         "llm_provider": os.getenv("AUTOBOT_LLM_PROVIDER", "auto"),
         "llm_model": os.getenv("AUTOBOT_LLM_MODEL", ""),
-        "browser_mode": "cdp",  # Enforced now
+        "browser_mode": "uiautomation",  # CoreLoop's primary perception; browser DOM tasks use the extension bridge (see /api/extension/*), not CDP
         "has_anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
         "has_openrouter_key": bool(os.getenv("OPENROUTER_API_KEY")),
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),

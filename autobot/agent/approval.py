@@ -20,6 +20,29 @@ Risk tiers:
                  (deleted research data, an unwanted purchase, a leaked
                  credential) is not something "you can just undo."
 
+Unattended mode (AUTOBOT_UNATTENDED=1, or ApprovalGuard(unattended=True)) —
+a SEPARATE axis from `mode` above, not a fourth mode value. `mode` answers
+"how much do I trust the agent's judgment"; `unattended` answers "is anyone
+actually at the keyboard to click Allow right now." The user's own framing
+for this (Sep 2026, deciding how the Kaggle-notebook-iteration workflow
+should behave while they're away from the computer): "act like trusted
+mode" for CAUTION/DANGER while unattended — REGARDLESS of what `mode` is
+set to, since a `strict`-mode run left going overnight that just hangs on
+the first CAUTION action accomplishes nothing — while the IRREVERSIBLE
+floor stays exactly as hard as it always is: unattended does not mean "no
+one will notice," it means "no one is here to say yes," and those are
+different things for exactly the tier that can't be undone. Concretely:
+  - CAUTION / DANGER, unattended=True: proceed automatically, logged and
+    desktop-notified for later review, independent of `mode`.
+  - IRREVERSIBLE, unattended=True: still never proceeds. The only change
+    from the attended case is *how* it's blocked — no `wait_for_approval`
+    call (which would sit on a `timeout`-second clock with nobody able to
+    answer it), just an immediate, clearly logged skip, so the run moves on
+    to its next action instead of stalling on a decision no one is present
+    to make. AUTOBOT_AUTO_APPROVE=1 (a separate, pre-existing, deliberately
+    blunt global override — see gate() below) still bypasses this if set;
+    unattended mode does not imply it and does not set it.
+
 Usage (from AgentLoop._execute_step):
     from autobot.agent.approval import ApprovalGuard, RiskTier
     guard = ApprovalGuard(mode="balanced")
@@ -81,13 +104,55 @@ _IRREVERSIBLE_PATTERNS = [
     r"\bslack\b.*\bsend\b|\bwhatsapp\b|\btelegram\b.*\bsend\b",
     r"\btweet\b",
     r"\bgit push\b", r"\bnpm publish\b",
+    # A real Kaggle competition submission — consumes a limited daily
+    # attempt and posts to a live leaderboard under the user's account.
+    # Matched against the computer_call string itself (e.g.
+    # `computer.kaggle.submit("comp", "file.csv", "msg")`), which is the
+    # only way this method is reachable — see kaggle_tool.py's Kaggle.submit().
+    # Deliberately separate from kernels_push/push_kernel, which just
+    # re-runs a kernel in your own account and is SAFE-tier below — the
+    # user drew this line explicitly: iterate on notebooks freely, but
+    # submit always needs a live human decision, no matter how much trust
+    # has been granted elsewhere.
+    r"kaggle\.submit\(", r"competition_submit\b", r"competitions_submit\b",
 ]
+
+# computer_call strings that should be SAFE even though the generic
+# computer_call classifier (see core_loop.py's _classify_risk()) defaults
+# everything else to CAUTION. Kaggle kernel create/edit/read methods only
+# touch a kernel in the user's own account — never a competition
+# leaderboard, never a submission attempt (that's submit(), always
+# IRREVERSIBLE via the pattern above) — so they should never pause for
+# approval in ANY mode, including strict. This is what actually lets
+# "create a notebook, edit it, run it, look at the output" happen freely
+# while a real competition submission still always stops for a human.
+_SAFE_COMPUTER_CALL_PATTERNS = [
+    r"kaggle\.(pull_kernel|push_kernel|kernel_status|kernel_output)\(",
+]
+_SAFE_COMPUTER_CALL_RE = re.compile("|".join(_SAFE_COMPUTER_CALL_PATTERNS), re.IGNORECASE)
 
 _DANGER_PATTERNS = [
     # Shell execution — risky (can do almost anything) but not itself
     # irreversible; individual destructive sub-commands are still caught
     # by _IRREVERSIBLE_PATTERNS above regardless of which action carries them.
     r"subprocess", r"os\.system", r"shell=True",
+    # Claude Code headless runs (computer.claude_code.run(...)) requesting a
+    # write-capable permission_mode — it can edit or create real files (and,
+    # for bypassPermissions, run shell/tool calls) without prompting, which
+    # is a materially different risk than the "plan" (read-only) default.
+    # Matched against the computer_call string's permission_mode argument.
+    r"accept.?edits", r"bypass.?permissions",
+    # Antigravity headless runs (computer.antigravity.run(...)) requesting
+    # skip_permissions=True — the same shape of risk as claude_code's
+    # write-capable modes above (agy approves all tool calls, including
+    # file writes and shell execution, without asking) via a materially
+    # different flag name (--dangerously-skip-permissions), so it needs its
+    # own pattern rather than reusing "bypass.?permissions". The default
+    # (skip_permissions=False, respecting agy's own scoped allowlist) is
+    # NOT matched here and falls through to computer_call's generic CAUTION
+    # default — the same treatment claude_code.run()'s "plan" mode default
+    # gets, deliberately kept consistent between the two integrations.
+    r"skip_permissions\s*=\s*true", r"dangerously.?skip.?permissions",
 ]
 
 _CAUTION_PATTERNS = [
@@ -155,9 +220,15 @@ class ApprovalGuard:
     so it can be changed between runs via the settings API.
     """
 
-    def __init__(self, mode: str | None = None) -> None:
+    def __init__(self, mode: str | None = None, unattended: bool | None = None) -> None:
         self.mode = (mode or os.getenv("AUTOBOT_APPROVAL_MODE", "balanced")).lower()
-        logger.info(f"ApprovalGuard active — mode: {self.mode}")
+        if unattended is None:
+            unattended = os.getenv("AUTOBOT_UNATTENDED", "0").strip().lower() in ("1", "true", "yes")
+        self.unattended = unattended
+        logger.info(
+            f"ApprovalGuard active — mode: {self.mode}"
+            + (" — UNATTENDED (CAUTION/DANGER auto-proceed, IRREVERSIBLE auto-skips)" if self.unattended else "")
+        )
 
     def classify(self, action: "ActionModel", element_context: str = "") -> RiskTier:
         """Classify an action into SAFE / CAUTION / DANGER / IRREVERSIBLE.
@@ -190,11 +261,20 @@ class ApprovalGuard:
 
         IRREVERSIBLE — ALWAYS pauses for explicit "Allow", in every mode
                         including trusted. No setting can bypass this tier;
-                        that is the point of it.
+                        that is the point of it. When unattended=True there
+                        is no one to answer the pause, so it becomes an
+                        immediate, logged skip instead of a wait — see the
+                        module docstring's "Unattended mode" section.
         trusted       — DANGER proceeds automatically (with a notification);
                         CAUTION proceeds silently.
         balanced      — Pauses for DANGER; CAUTION proceeds with a log line.
         strict        — Pauses for CAUTION and DANGER too.
+        unattended    — Independent of the above: CAUTION/DANGER proceed
+                        exactly like trusted mode regardless of self.mode,
+                        because self.mode's whole point is "how much should
+                        I interrupt the person watching" and there isn't
+                        one. Checked before the mode branches below, so it
+                        always wins for these two tiers.
 
         Returns True to proceed, False to skip this action.
         """
@@ -208,7 +288,25 @@ class ApprovalGuard:
             if os.getenv("AUTOBOT_AUTO_APPROVE") == "1":
                 logger.warning(f"[AUTO_APPROVE/IRREVERSIBLE] Proceeding automatically: {text[:100]}")
                 return True
+            if self.unattended:
+                logger.warning(
+                    f"⛔ [UNATTENDED/IRREVERSIBLE] Skipped — no one present to approve: {text[:150]}"
+                )
+                _send_notification(
+                    title="Autobot skipped an IRREVERSIBLE action while unattended",
+                    body=f"{text[:120]}\nThis needed a live Allow and no one was there, so it did not run. "
+                         f"Review the log when you're back.",
+                )
+                return False
             return await self._request_approval(text, tier_label, goal, timeout)
+
+        if self.unattended and tier in (RiskTier.CAUTION, RiskTier.DANGER):
+            logger.warning(f"[UNATTENDED/{tier_label}] Proceeding without pause: {text[:100]}")
+            _send_notification(
+                title=f"Autobot — {tier_label} action (unattended)",
+                body=f"Doing: {text[:120]}\nYou were away, so this proceeded automatically. Review the log.",
+            )
+            return True
 
         if self.mode == "trusted":
             if tier == RiskTier.DANGER:

@@ -1,0 +1,133 @@
+# Autobot Autonomous Kaggle Playbook: 2026 IEEE Big Data Traffic Flow Bench
+
+> **Competition**: [2026 IEEE Big Data - Traffic Flow Bench](https://www.kaggle.com/competitions/2026-ieee-big-data-traffic-flow-bench)  
+> **Evaluation Metric**: MAE / RMSE on Masked Freeway States  
+> **Prize Pool**: \,500 USD | **Deadline**: 2026-11-07  
+> **Submission Allowance**: 5 submissions / day (High-Conviction Precision Mode)  
+> **Execution Strategy**: 100% Remote Kaggle Cloud Execution (Zero local RAM overhead)  
+
+---
+
+## 1. Competition Overview & Problem Topology
+The task requires reconstructing masked freeway traffic states (speed, density, flow) across major California highway corridors (e.g. D12 I-405 North), forecasting queues, respecting physical conservation laws, and recovering origin-destination demand.
+
+### Key Data Assets:
+1. **Physical Corridors**: Topological mainline maps (lwr_mainline_topology.csv), ramp attachments (amp_attachment_map.csv), path incidence matrices (path_link_incidence.csv).
+2. **Fundamental Diagram (FD) Parameters**: d_parameters.csv containing calibrated free-flow speeds ($), link capacities, and jam densities per station.
+3. **Sensor State Observations**: Masked mainline time series parquets under various masking regimes (e.g. R1, R2) with sensor dropouts.
+
+---
+
+## 2. Public SOTA Intelligence & Baseline Dissection
+- **Reference Pipeline**: lamhuy8904/traffic-flow-bench-pipeline (37 upvotes)
+- **Methodology**:
+  - **Non-Negative Least Squares (NNLS)**: Solves the linear path-link assignment matrix  x = b$ with  \ge 0$ to reconstruct link flows and origin-destination demand without negative traffic volume artifacts.
+  - **Lighthill-Whitham-Richards (LWR) Physics Constraints**: Restricts speed and flow to stay within the fundamental traffic triangle defined by  = k \cdot v$.
+  - **Corridor Partitioning**: Reconstructs each highway corridor independently to fit within Kaggle 16GB CPU/GPU memory.
+
+---
+
+## 3. Autobot Experiment Registry
+
+| Exp ID | Kernel Slug | Approach | Model Family | Hardware | Status | Local CV MAE | Public LB |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Exp 1** | `daltongabrielomondi/autobot-traffic-exp1-nnls-baseline` | Physical LWR + NNLS Demand Reconstruction | Physics / NNLS | Kaggle CPU | **COMPLETE** | S_speed=0.914, S_flow=0.890, Task2 IoU=0.3930 | **0.53880** |
+
+---
+
+## 4. Experiment 1 Post-Mortem & Execution Analytics
+
+### 4.1 Execution Timings & Diagnostics
+- **Runtime Platform**: Kaggle Cloud CPU (4 vCPUs, 30 GB RAM).
+- **Total Execution Duration**: 765.4 seconds (~12.8 minutes).
+  - Network topology & FD parameter loading (10 corridors): **17.8s**
+  - Task 1 & 3 Spatio-temporal interpolation (7,006,647 cells): **647.8s**
+  - Task 2 Bottleneck onset kinematics (240 windows, 174,000 cells): **4.5s**
+  - Task 4 Prior-regularized NNLS path flow ($\lambda=20.0$, 70,708 paths): **1.2s**
+  - Multi-task table indexing and chunked streaming: **86.1s**
+- **Output Artifacts**: Successfully downloaded to `competitions/ieee_traffic_flow/output_exp1_baseline/`:
+  - `submission.csv` (382.04 MB)
+  - `state_submission.csv` (660.05 MB)
+  - `queue_submission.csv` (10.52 MB)
+  - `odme_submission.csv` (39 bytes)
+  - `autobot-traffic-exp1-nnls-baseline.log` (8.53 KB)
+
+### 4.2 Triple-Gate Submission Integrity Audit
+The generated submission was subjected to strict data integrity tests:
+1. **Total Rows**: Exactly **6,980,503** rows (100% matched to `submission_key.csv`).
+2. **Key Contiguity**: `min_id = 1`, `max_id = 6,980,503` with strictly contiguous row sequence.
+3. **Task Breakdown**:
+   - `state` (Tasks 1 & 3): **6,735,795** rows
+   - `queue` (Task 2): **174,000** rows
+   - `odme` (Task 4): **70,708** rows
+4. **NaN / Null Check**: **0 NaNs** across all 6 columns (`submission_id`, `task`, `speed_kmh`, `flow_vph`, `queue_pred`, `path_flow`).
+
+### 4.3 Bug Diagnosis & Upstream Patch
+- **Root Cause**: The public pipeline contained outdated hardcoded assertions (`assert n_rows == 6_985_307` and `assert task_counts.get('state') == 6_740_599`), causing the kernel to throw `AssertionError` at the very final diagnostic block despite `submission.csv` being completely and perfectly written.
+- **Resolution**: Patched `competitions/ieee_traffic_flow/exp1_nnls_baseline/main.py` to assert against official dimensions (6,980,503 total rows, 6,735,795 state rows).
+
+### 4.4 Leaderboard Submission Result
+- **Submission ID**: `56442877`
+- **Submission Message**: `Autobot Exp 1: Physical LWR + NNLS Demand Reconstruction Baseline`
+- **Status**: `SubmissionStatus.COMPLETE`
+- **Public Leaderboard Score**: **0.53880**
+- **Daily Quota Remaining**: 4 / 5 submissions remaining today.
+
+---
+
+---
+
+## 5. Experiment 2: Dynamic Bottleneck Discovery & Kinematic Queue Tuning
+
+### 5.1 Hypotheses & Architectural Changes
+1. **Dynamic Bottleneck Discovery Across All 10 Corridors**:
+   - The Exp 1 baseline only mapped 8 corridors in `EMPIRICAL_TOP2_BOTTLENECKS`, completely omitting `D12_I405_N` and `D12_I405_S`.
+   - Exp 2 introduces automatic dynamic fallback: if a panel is unmapped, it inspects historical speeds in `window_history.parquet` and identifies the 3 links with lowest mean speed.
+2. **Recent Deceleration Tracking**:
+   - For `onset` windows, breakdowns do not occur purely at static links; links undergoing acute deceleration ($\le v_{\text{cut}}$) within the final 15 minutes before $T_0$ are dynamically added to the candidate queue pool.
+3. **Adaptive NNLS Regularization ($\lambda$)**:
+   - Replaced fixed $\lambda = 20.0$ with network-density scaling: $\lambda = \text{clip}(20.0 \times \frac{|P|}{2|L|}, 12.0, 30.0)$, regularizing dense corridors appropriately without under-fitting sparse links.
+4. **Clean Exit Assurances**:
+   - Validated dimensions against the official `6,980,503` row specification.
+
+### 5.2 Cloud Execution & Liveness
+- **Kernel Slug**: `daltongabrielomondi/autobot-traffic-exp2-kinematic-queue-tuning`
+- **Compute Target**: Kaggle Cloud 4-Core CPU (0 GPU consumed).
+- **60-Second Liveness Verification**: Verified `KernelWorkerStatus.RUNNING` at $t+30$s.
+- **Estimated Runtime**: ~12.5 minutes.
+- **Submissions Remaining Today**: 4 / 5.
+
+---
+
+## 6. Experiment 3: Official Physics Benchmark + Structural Kalman Filter (SOTA Breakthrough)
+- **Date**: 2026-09-22
+- **Kernel**: `daltongabrielomondi/autobot-traffic-exp3-official-physics-sota`
+- **Submission ID**: `56467996`
+- **Cloud Execution Time**: 14.8 minutes (4-Core CPU)
+- **Submission Method**: Direct Cloud Kernel Binding (`kaggle competitions submit ... -k ... -v 1 -f submission.csv`) in <7 seconds.
+- **Official Public Score**: **`0.65915`** (Massive **+0.12035 jump** over Exp 1 `0.53880` and +0.11255 over Exp 2 `0.54660`!).
+- **Leaderboard Movement**: Rose from Rank #112 to Rank #104.
+
+### Why Exp 3 Succeeded
+1. **Elimination of Triangle Violations**: Discarded `links.csv` flat 105 km/h speeds. Used authoritative `fd_parameters.csv` for free-flow speed, critical density, and queue speed cutoffs ($v_{cut}$).
+2. **Structural Kalman Filter (Zhou & Mahmassani 2007)**:
+   - Learned historical weekday x time-of-day profile per link from `train` (2,730 partitions).
+   - Applied RTS backward smoother to same-day observed deviations across 288 slots per link.
+   - Enforced physical 50 vph floor guard, preventing the zero-flow disqualification trap ($EMPTY\_FLOOR\_VPH$).
+3. **Official ODME Solver**:
+   - Masked unobserved connectors to prevent artificial zero-count penalties.
+   - Solved regularized NNLS against official synthetic weak priors.
+4. **Verified Zero-Defect Alignment**:
+   - 6,980,503 rows, exactly 0 NaNs, 0 missing lookup gaps against `submission_key.csv`.
+
+### Next Evolution: The Path to 0.85 - 0.92+
+- The 0.30 weight on Task 2 ($S_{queue}$) represents the largest proportional gain remaining:
+  - Persistence scores only 0.3017 on queue IoU.
+  - Upgrading Task 2 from naive persistence to a spatio-temporal classifier (predicting queue propagation upstream at wave speed $w = C / (k_{jam} - k_{crit})$) can lift $S_{queue}$ to 0.80+, adding $+0.15$ to the overall composite score.
+
+---
+
+## 7. Submission Economics Policy
+- Daily Quota: **5 submissions / day**.
+- Submissions Used Today: 3 / 5 (Remaining: 2 / 5).
+- **Rule**: Every candidate must be validated against unmasked validation folds before burning a submission token. Format integrity (zero negative flows, zero NaNs, exact parquet row alignment) must pass triple-gate verification.

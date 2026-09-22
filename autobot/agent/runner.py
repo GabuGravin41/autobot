@@ -81,8 +81,10 @@ class AgentRunner:
         self.current_goal = goal
         steps = max_steps or self.max_steps
 
-        self.log(f"🤖 Starting: {goal}")
-        self.log(f"📋 Max steps: {steps} | Model: {self.model}")
+        # No "Starting.../Max steps..." log line here on purpose — CoreLoop.run()
+        # logs the same thing itself (via this same self.log callback) once it's
+        # constructed below, and having both log it produced duplicate lines in
+        # the run log.
 
         # Ensure we have an LLM client
         if self.llm_client is None:

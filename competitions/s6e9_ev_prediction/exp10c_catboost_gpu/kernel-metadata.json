@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-s6e9-exp10c-catboost-gpu",
+  "title": "Autobot S6E9 Exp10C CatBoost GPU",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "playground-series-s6e9"
+  ],
+  "dataset_sources": [
+    "itzzomkar/ev-adoption-behavior-and-range-anxiety"
+  ]
+}

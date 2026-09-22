@@ -155,14 +155,17 @@ def _run_setup() -> None:
     print("🛠️ Running Autobot Setup...")
 
     # NOTE: We deliberately do NOT run `playwright install chromium`.
-    # Autobot drives the user's REAL Chrome (with their real logins) by
-    # launching it with --remote-debugging-port and attaching via
-    # connect_over_cdp(). It never calls chromium.launch(), so Playwright's
-    # ~150MB bundled browser is never used. Downloading it is pure waste, and
-    # it fails outright on networks that intercept TLS (corporate proxies,
-    # HTTPS-scanning antivirus) because Playwright's bundled Node has its own
-    # CA store that doesn't include the intercepting certificate.
-    print("ℹ️  Skipping Playwright browser download — Autobot uses your real Chrome.")
+    # As of the Round 5 CDP retirement (see ROADMAP.md), Autobot no longer
+    # attaches to Chrome via --remote-debugging-port / connect_over_cdp() at
+    # all — browser perception now goes through the Autobot Chrome extension
+    # polling an already-open, already-logged-in Chrome instead. Playwright's
+    # ~150MB bundled browser was never used even in the CDP era (it only ever
+    # attached to the user's real Chrome, never launched its own), so
+    # downloading it remains pure waste, and it still fails outright on
+    # networks that intercept TLS (corporate proxies, HTTPS-scanning
+    # antivirus) because Playwright's bundled Node has its own CA store that
+    # doesn't include the intercepting certificate.
+    print("Skipping Playwright browser download - Autobot uses your real Chrome via its extension.")
 
     # Verify the Playwright *driver* imports (this is what we actually need).
     try:

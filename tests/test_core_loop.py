@@ -11,6 +11,8 @@ They verify:
   - Skill distillation is called on success
   - Override mid-flight changes the goal
   - Cancel stops the loop
+  - computer_call actually runs the target method instead of silently
+    failing (see TestComputerCallDispatch below for why this one matters)
 """
 from __future__ import annotations
 
@@ -59,7 +61,16 @@ def _make_llm_client(responses: list[dict]) -> MagicMock:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # asyncio.get_event_loop() outside a running loop is deprecated/removed
+    # behavior in modern Python and, worse, flaky here specifically: the new
+    # computer_call fix in core_loop.py calls asyncio.run() internally (see
+    # CoreLoop._dispatch()), and once anything in this thread has called
+    # asyncio.run(), a later get_event_loop() call can raise "There is no
+    # current event loop" — breaking whichever test happens to run next,
+    # for a reason that has nothing to do with that test. asyncio.run()
+    # always creates and tears down its own fresh loop, so it has no such
+    # ordering dependency.
+    return asyncio.run(coro)
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -258,6 +269,145 @@ def test_llm_response_parse_rejects_invalid_json():
     loop = CoreLoop.__new__(CoreLoop)
     resp = loop._parse_llm_response("this is not json at all !!!")
     assert resp is None
+
+
+# ── computer_call dispatch (regression) ─────────────────────────────────────
+#
+# dispatch_computer_call() in autobot/computer/dispatch.py is `async def`.
+# _dispatch() (this section's target) is a synchronous method run via
+# asyncio.to_thread from _act(), so it has no event loop of its own. It used
+# to call `ok, result = dispatch_computer_call(self.computer, call_str)`
+# without awaiting — that doesn't run the coroutine, it just builds one, and
+# unpacking two values out of a coroutine object raises TypeError
+# immediately. Since computer.kaggle.*, computer.claude_code.*,
+# computer.research.*, computer.vault.*, and computer.files.* have no
+# dedicated action names of their own (unlike run_shell/navigate/browser_*),
+# computer_call was the ONLY way to reach any of them — so all five tool
+# modules were silently unreachable from every real agent run until this
+# was fixed with asyncio.run(...).
+
+class _StubKaggleLike:
+    """Stands in for computer.kaggle / computer.claude_code / etc."""
+
+    def ping(self, msg: str = "pong") -> str:
+        return f"stub says: {msg}"
+
+
+class TestComputerCallDispatch:
+    def _make_loop_with_stub_tool(self) -> CoreLoop:
+        computer = _make_computer()
+        computer.stub_tool = _StubKaggleLike()
+        return CoreLoop(computer=computer, llm_client=MagicMock(), goal="test", max_steps=1)
+
+    def test_computer_call_actually_executes(self):
+        """Before the fix, this raised TypeError('cannot unpack non-iterable
+        coroutine object') instead of returning the method's real result."""
+        loop = self._make_loop_with_stub_tool()
+        action = Action(name="computer_call", params={"call": 'computer.stub_tool.ping(msg="hello")'})
+        result = loop._dispatch(action)
+        assert result == "stub says: hello"
+
+    def test_computer_call_unknown_method_reports_error_not_raise(self):
+        """A genuinely bad call should come back as a clean error string
+        from dispatch_computer_call()'s own error handling, not raise."""
+        loop = self._make_loop_with_stub_tool()
+        action = Action(name="computer_call", params={"call": "computer.stub_tool.does_not_exist()"})
+        result = loop._dispatch(action)
+        assert "unknown method" in result.lower() or "error" in result.lower()
+
+    def test_computer_call_reaches_end_to_end_through_run(self):
+        """Full observe→decide→act cycle with a real (mocked) LLM response
+        naming a computer_call action — proves the fix works through the
+        actual asyncio.to_thread path in _act(), not just via a direct
+        _dispatch() call."""
+        computer = _make_computer()
+        computer.stub_tool = _StubKaggleLike()
+        llm = _make_llm_client([
+            {
+                "thinking": "call the stub tool",
+                "next_goal": "ping",
+                "action": {"name": "computer_call", "params": {"call": 'computer.stub_tool.ping(msg="hi")'}},
+            },
+            {
+                "thinking": "done",
+                "next_goal": "Done",
+                "action": {"name": "done", "params": {"text": "finished", "success": True}},
+            },
+        ])
+        loop = CoreLoop(computer=computer, llm_client=llm, goal="test", max_steps=5)
+        with patch.object(loop._approval, "gate", new=AsyncMock(return_value=True)):
+            _run(loop.run())
+        assert loop.history[0].result == "stub says: hi"
+        assert loop.history[0].success is True
+
+
+# ── browser_paste dispatch ───────────────────────────────────────────────────
+
+def test_browser_paste_calls_bridge_with_paste_text():
+    """browser_paste should reach ExtensionBridge.run('paste_text', ...) —
+    not 'type_index' — with index/text forwarded through unchanged."""
+    computer = _make_computer()
+    loop = CoreLoop(computer=computer, llm_client=MagicMock(), goal="test", max_steps=1)
+    with patch("autobot.browser.extension_bridge.bridge.run") as mock_run:
+        mock_run.return_value = {"ok": True, "data": {"pasted_into": "editor", "chars": 5}}
+        action = Action(name="browser_paste", params={"index": 2, "text": "hello"})
+        result = loop._dispatch(action)
+    mock_run.assert_called_once_with("paste_text", timeout=10.0, index=2, text="hello")
+    assert "pasted_into" in result
+
+
+def test_browser_paste_is_safe_tier():
+    loop = CoreLoop.__new__(CoreLoop)
+    from autobot.agent.approval import RiskTier
+    action = Action(name="browser_paste", params={"index": 1, "text": "x"})
+    assert loop._classify_risk(action) == RiskTier.SAFE
+
+
+# ── Kaggle notebook iteration is frictionless; submit is always gated ──────
+#
+# The user's explicit ask: creating/editing/running a notebook should never
+# need approval, but a real competition submission always should — in every
+# approval mode, not just the default. This exercises CoreLoop._classify_risk()
+# end-to-end (not just the regexes in isolation) for the actual computer_call
+# strings the agent would emit.
+
+class TestKaggleRiskSeparation:
+    def _classify(self, call_str: str):
+        from autobot.agent.approval import RiskTier
+        loop = CoreLoop.__new__(CoreLoop)
+        action = Action(name="computer_call", params={"call": call_str})
+        return loop._classify_risk(action)
+
+    def test_push_kernel_is_safe(self):
+        from autobot.agent.approval import RiskTier
+        assert self._classify('computer.kaggle.push_kernel("./work")') == RiskTier.SAFE
+
+    def test_pull_kernel_is_safe(self):
+        from autobot.agent.approval import RiskTier
+        assert self._classify('computer.kaggle.pull_kernel("user/k", "./work")') == RiskTier.SAFE
+
+    def test_kernel_status_is_safe(self):
+        from autobot.agent.approval import RiskTier
+        assert self._classify('computer.kaggle.kernel_status("user/k")') == RiskTier.SAFE
+
+    def test_kernel_output_is_safe(self):
+        from autobot.agent.approval import RiskTier
+        assert self._classify('computer.kaggle.kernel_output("user/k", "./out")') == RiskTier.SAFE
+
+    def test_submit_is_irreversible(self):
+        from autobot.agent.approval import RiskTier
+        call = 'computer.kaggle.submit("comp", "sub.csv", "msg")'
+        assert self._classify(call) == RiskTier.IRREVERSIBLE
+
+    def test_irreversible_beats_strict_mode_bypass(self):
+        """IRREVERSIBLE is checked before the SAFE-pattern check in
+        _classify_risk() — confirm submit() can never accidentally slip
+        into the SAFE bucket even if a future edit reorders things carelessly."""
+        from autobot.agent.approval import RiskTier
+        call = 'computer.kaggle.submit("comp", "sub.csv", "msg")'
+        tier = self._classify(call)
+        assert tier != RiskTier.SAFE
+        assert tier == RiskTier.IRREVERSIBLE
 
 
 if __name__ == "__main__":

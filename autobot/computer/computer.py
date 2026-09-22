@@ -13,6 +13,34 @@ Usage:
     computer.mouse.click(100, 200)
     computer.keyboard.type("hello")
     catalog = computer.get_tool_catalog()  # → inject into system prompt
+
+No `computer.browser` submodule (CDP retired, Sep 2026): the project
+moved off Chrome DevTools Protocol entirely — it required a debug-port
+Chrome launch that fought Windows SingletonLock and needed its own
+isolated profile, disconnected from whatever Chrome the user actually
+had open. Actual web page content now goes through the Chrome extension's
+DOM bridge instead (autobot/browser/extension_bridge.py, the
+browser_text/browser_list/browser_click/browser_type/browser_paste
+CoreLoop actions) — no debug port, rides the user's real logged-in
+Chrome. The old CDP-based `computer/browser.py` (Browser.url(),
+click_element(), fill(), all built on autobot/dom/page_snapshot.py's
+websocket client to a `--remote-debugging-port` Chrome that this
+codebase no longer launches) is kept only under `_archive/` for
+reference; it is deliberately NOT imported or instantiated here.
+
+This matters beyond just avoiding a crash: get_tool_catalog() below
+auto-lists every public method on every submodule attached to this
+class. A retired, non-functional submodule wired in here doesn't just
+sit unused — it actively appears in the LLM's tool catalog every step,
+indistinguishable from a tool that actually works, and gets called.
+That's exactly what happened before this fix: `computer.browser.url()`
+still showed up in the catalog and a live run reached for it, got a
+silent blank/empty result (no debug-port Chrome to answer), and the
+model had no signal that the tool itself — not its own reasoning — was
+the problem. The fix is structural, not a one-off: only attach a
+submodule here once its live perception/action path is confirmed
+working, and remove it from here the same day its replacement ships,
+not "eventually."
 """
 from __future__ import annotations
 
@@ -25,10 +53,11 @@ from autobot.computer.mouse import Mouse
 from autobot.computer.keyboard import Keyboard
 from autobot.computer.display import Display
 from autobot.computer.clipboard import Clipboard
-from autobot.computer.browser import Browser
 from autobot.computer.files import Files
 from autobot.computer.terminal import Terminal
 from autobot.computer.kaggle_tool import Kaggle
+from autobot.computer.claude_code_tool import ClaudeCode
+from autobot.computer.antigravity_tool import Antigravity
 from autobot.computer.research_tool import Research
 from autobot.computer.vault import Vault
 from autobot.computer.anti_sleep import anti_sleep
@@ -37,10 +66,10 @@ logger = logging.getLogger(__name__)
 
 # Windows native-app control (UIA) is optional. `uiautomation` is a Windows-only
 # COM package and is commented out in requirements.txt, so importing it
-# unconditionally here made `Computer()` — and therefore AgentLoop, and
+# unconditionally here made `Computer()` — and therefore CoreLoop, and
 # therefore every entry point — fail at import on any Windows machine that
-# installed from requirements.txt. Degrade to browser+mouse/keyboard control
-# instead of taking the whole agent down with us.
+# installed from requirements.txt. Degrade to mouse/keyboard/browser-bridge
+# control instead of taking the whole agent down with us.
 Window = None  # type: ignore[assignment]
 HAS_NATIVE_UI = False
 
@@ -50,9 +79,9 @@ if platform.system() == 'Windows':
         HAS_NATIVE_UI = True
     except ImportError as e:
         logger.warning(
-            "Native Windows UI control unavailable (%s). Browser and mouse/keyboard "
-            "control still work; native desktop apps (Artemis, VESTA, Excel...) do not. "
-            "Install with: pip install uiautomation",
+            "Native Windows UI control unavailable (%s). Browser-bridge and "
+            "mouse/keyboard control still work; native desktop apps (Artemis, "
+            "VESTA, Excel...) do not. Install with: pip install uiautomation",
             e,
         )
 
@@ -66,6 +95,8 @@ class Computer:
 
     The key method is get_tool_catalog(), which auto-extracts method signatures
     and docstrings from all submodules and formats them for LLM injection.
+
+    Deliberately no `self.browser` — see the module docstring above.
     """
 
     def __init__(self) -> None:
@@ -73,10 +104,11 @@ class Computer:
         self.keyboard = Keyboard()
         self.display = Display()
         self.clipboard = Clipboard()
-        self.browser = Browser()
         self.files = Files()
         self.terminal = Terminal()
         self.kaggle = Kaggle()
+        self.claude_code = ClaudeCode()
+        self.antigravity = Antigravity()
         self.research = Research()
         self.vault = Vault()
         self.anti_sleep = anti_sleep
@@ -92,16 +124,22 @@ class Computer:
         tools that coincidentally matches (Mouse -> "mouse"), but
         `self.anti_sleep = anti_sleep` is an AntiSleepManager instance, so the
         catalog advertised `computer.antisleepmanager.start(...)` — a name
-        dispatch.py's `getattr(computer, "antisleepmanager")` can never
-        resolve, since no such attribute exists. The whole feature (the
-        background mouse-mover that keeps the machine from sleeping mid-run)
-        was consequently unreachable from any LLM-emitted call. Returning the
-        real attribute name here, and using it directly in get_tool_catalog(),
-        makes catalog names and dispatch resolution structurally unable to
-        diverge again for any future tool.
+        dispatch.py's `getattr(computer, ...)` can never resolve. The whole
+        feature (the background mouse-mover that keeps the machine from
+        sleeping mid-run) was consequently unreachable from any LLM-emitted
+        call. Returning the real attribute name here, and using it directly
+        in get_tool_catalog(), makes catalog names and dispatch resolution
+        structurally unable to diverge again for any future tool.
+
+        Just as importantly: this list is the ONLY thing that decides what
+        the LLM is told it can call. A name that isn't in here (like
+        "browser", removed Sep 2026 along with computer/browser.py's CDP
+        code) simply never appears in the catalog — no separate cleanup
+        step needed elsewhere.
         """
-        names = ["mouse", "keyboard", "display", "clipboard", "browser",
-                 "files", "terminal", "vault", "kaggle", "research", "anti_sleep"]
+        names = ["mouse", "keyboard", "display", "clipboard",
+                 "files", "terminal", "vault", "kaggle", "claude_code",
+                 "antigravity", "research", "anti_sleep"]
         if hasattr(self, "window"):
             names.append("window")
         return [(name, getattr(self, name)) for name in names]

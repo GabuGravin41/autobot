@@ -1,0 +1,13 @@
+{
+  "id": "daltongabrielomondi/autobot-traffic-exp1-nnls-baseline",
+  "title": "Autobot Traffic Exp1 NNLS Baseline",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "competition_sources": [
+    "2026-ieee-big-data-traffic-flow-bench"
+  ]
+}
