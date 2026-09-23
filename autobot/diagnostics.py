@@ -170,12 +170,21 @@ def check_chrome() -> Check:
 
 
 def check_kaggle() -> list[Check]:
-    """Kaggle API package + credentials — computer.kaggle.* is unreachable
-    without both. kaggle_tool.py's _get_api() calls the official
-    KaggleApi().authenticate(), which reads ~/.kaggle/kaggle.json or the
-    KAGGLE_USERNAME/KAGGLE_KEY env vars — neither is Autobot's own .env, so
-    this is worth checking explicitly rather than assuming "the app has a
-    .env file" means Kaggle is configured too."""
+    """Kaggle API package + CLI binary + credentials — computer.kaggle.* is
+    unreachable without all three. kaggle_tool.py's _get_api() calls the
+    official KaggleApi().authenticate(), which reads ~/.kaggle/kaggle.json
+    or the KAGGLE_USERNAME/KAGGLE_KEY env vars — neither is Autobot's own
+    .env, so this is worth checking explicitly rather than assuming "the
+    app has a .env file" means Kaggle is configured too.
+
+    The CLI binary check (Round 7, Sep 2026) is separate from the package
+    check because they can diverge on Windows: `pip install kaggle` always
+    installs the Python package, but the `kaggle` console-script entry
+    point only lands on PATH if pip's user-scripts directory is on it —
+    a real, common gap. get_leaderboard(), list_top_kernels(), and
+    submit_code_competition() all shell out to this binary directly (see
+    kaggle_tool.py's module docstring for why), so a missing CLI is a real
+    blocker for those three even when `import kaggle` works fine."""
     checks: list[Check] = []
     if _module_present("kaggle"):
         checks.append(Check("package: kaggle", OK))
@@ -185,6 +194,20 @@ def check_kaggle() -> list[Check]:
             "pip install kaggle",
         ))
         return checks  # credential check below would be meaningless without the package
+
+    if shutil.which("kaggle"):
+        checks.append(Check("kaggle CLI binary", OK, "found on PATH"))
+    else:
+        checks.append(Check(
+            "kaggle CLI binary", FAIL,
+            "`kaggle` package imports fine but the CLI isn't on PATH",
+            "Find it with 'python -m pip show -f kaggle' (look for a "
+            "Scripts/kaggle.exe entry) and add that directory to PATH. "
+            "Without this, get_leaderboard/list_top_kernels/"
+            "submit_code_competition will fail even though pull_kernel/"
+            "push_kernel/kernel_status/kernel_output (Python-API-based) "
+            "still work.",
+        ))
 
     kaggle_json = Path.home() / ".kaggle" / "kaggle.json"
     has_env_creds = bool(os.getenv("KAGGLE_USERNAME")) and bool(os.getenv("KAGGLE_KEY"))

@@ -39,6 +39,7 @@ from pydantic import BaseModel
 from ..agent.runner import AgentRunner
 from ..computer.liveness import SystemLivenessManager
 from ..browser.extension_bridge import bridge as _ext_bridge
+from ..computer.kaggle_watchdog import DEFAULT_LEDGER_PATH, KaggleJobLedger, poll_pending
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -50,6 +51,7 @@ _run_log: list[str] = []
 _ws_clients: set[WebSocket] = set()
 _event_loop: asyncio.AbstractEventLoop | None = None
 _liveness = SystemLivenessManager()
+_kaggle_watchdog_task: asyncio.Task | None = None
 
 # Guards the check-then-set on _agent_status/_agent_runner in start_agent_run().
 # Route handlers here are sync `def`s, which FastAPI dispatches to its worker
@@ -82,18 +84,82 @@ async def _broadcast(msg: str) -> None:
         _ws_clients.discard(ws)
 
 
+# ── Kaggle job watchdog (background) ────────────────────────────────────────
+#
+# The "decoupled supervisor daemon" the Round 7 Kaggle lessons called for
+# (see autobot/computer/kaggle_watchdog.py's module docstring for the real
+# incident this closes — a kernel crashed 19s after reporting RUNNING and
+# nothing was watching after the agent's turn ended). This server process
+# is the one part of Autobot that is actually long-lived — a CLI
+# `autobot "<task>"` run is a single process that exits when the task
+# finishes, so it cannot be the thing polling a multi-minute-to-multi-hour
+# remote job. This task can, because `autobot --server` stays up.
+#
+# It reads the SAME on-disk ledger (~/.autobot/kaggle_jobs.json by default)
+# that kaggle_tool.py's push_kernel() writes to from a completely separate
+# CLI process — that's the point: state lives on disk, not in any one
+# process's memory or any one conversation's context window, so a job
+# registered by a `autobot "compete in this kernel"` CLI run is still
+# tracked here even after that CLI process has already exited.
+#
+# Deliberately lazy about building a KaggleApi client: most Autobot
+# sessions never touch Kaggle, and this loop must never crash the whole
+# dashboard server just because Kaggle credentials aren't configured.
+async def _kaggle_watchdog_loop(interval: float) -> None:
+    ledger = KaggleJobLedger(DEFAULT_LEDGER_PATH)
+    api = None
+    api_init_failed = False
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            ledger.load()  # re-read from disk — other processes write it too
+            if not ledger.pending():
+                continue
+            if api is None and not api_init_failed:
+                try:
+                    from kaggle.api.kaggle_api_extended import KaggleApi
+                    api = KaggleApi()
+                    api.authenticate()
+                except Exception as e:
+                    api_init_failed = True
+                    _log(f"Kaggle watchdog: credentials not available, pausing job polling ({e})")
+                    continue
+            if api is None:
+                continue
+            changed = await asyncio.to_thread(poll_pending, api, ledger)
+            for job in changed:
+                _log(f"Kaggle job {job.kernel}: status -> {job.status}"
+                     + (f" (error: {job.error_log})" if job.status == "error" and job.error_log else ""))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # A polling hiccup must never take the loop down permanently —
+            # log it and keep going on the next interval.
+            _log(f"Kaggle watchdog: poll failed, will retry next interval ({e})")
+
+
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    global _event_loop
+    global _event_loop, _kaggle_watchdog_task
     _event_loop = asyncio.get_event_loop()
     _log("Autobot backend starting...")
+
+    watchdog_interval = float(os.getenv("AUTOBOT_KAGGLE_WATCHDOG_INTERVAL", "30"))
+    _kaggle_watchdog_task = asyncio.create_task(_kaggle_watchdog_loop(watchdog_interval))
 
     yield
     _log("Autobot backend shutting down.")
     if _agent_runner:
         _agent_runner.cancel()
+    if _kaggle_watchdog_task:
+        _kaggle_watchdog_task.cancel()
+        try:
+            await _kaggle_watchdog_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
@@ -348,6 +414,22 @@ class LeetCodeMissionRequest(BaseModel):
 def start_leetcode_mission(req: LeetCodeMissionRequest):
     goal = f"Open LeetCode, find and solve {req.num_problems} problems using {req.language}."
     return start_agent_run(AgentRunRequest(goal=goal, max_steps=req.num_problems * 5))
+
+
+@app.get("/api/kaggle/jobs")
+def get_kaggle_jobs():
+    """
+    Dump the Kaggle job ledger for the dashboard — every kernel Autobot has
+    ever pushed (from this server process or any CLI `autobot` run, since
+    the ledger is a shared on-disk file, not in-memory state), its last
+    known status, and whether its initial liveness check passed. This is
+    the same state _kaggle_watchdog_loop() polls in the background; this
+    endpoint just lets the dashboard show it without waiting for the next
+    log line.
+    """
+    from dataclasses import asdict
+    ledger = KaggleJobLedger(DEFAULT_LEDGER_PATH)
+    return {"jobs": [asdict(j) for j in ledger.all()]}
 
 
 @app.get("/api/browser/screenshot")

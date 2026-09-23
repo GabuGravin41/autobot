@@ -31,6 +31,7 @@ caller asked for and reports what actually happened.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from typing import Any
@@ -83,6 +84,25 @@ def run_headless(
             "ok": False,
             "data": None,
             "error": "claude CLI not found on PATH. Install: npm install -g @anthropic-ai/claude-code",
+        }
+    if cwd and not os.path.isdir(cwd):
+        # Ported from antigravity_bridge.py (Round 6 adversarial-review fix,
+        # flagged there as "identical bug, out of scope for that round's
+        # diff" — ported here Round 8 since orchestrator_dispatch.py now
+        # calls both bridges from tracked projects' working_dir, making a
+        # stale/deleted directory a real, not just theoretical, path).
+        # subprocess.run(cwd=...) raises FileNotFoundError for a missing
+        # directory, which is the SAME exception type the `except
+        # FileNotFoundError` clause below catches for a completely
+        # different reason (the `claude` binary itself vanishing from PATH
+        # between the is_available() check and exec) — without this
+        # earlier check, a bad cwd would be caught by that clause and
+        # misreported as "claude CLI not found on PATH", actively
+        # misleading a caller who has claude installed just fine.
+        return {
+            "ok": False,
+            "data": None,
+            "error": f"cwd does not exist or is not a directory: {cwd}",
         }
 
     args = [

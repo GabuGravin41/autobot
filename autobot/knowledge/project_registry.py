@@ -223,8 +223,22 @@ class ProjectRegistry:
         return project
 
     def _save(self, project: TrackedProject) -> None:
+        # Atomic write (temp file + rename), matching kaggle_watchdog.py's
+        # KaggleJobLedger.save(). Previously a plain write_text() — flagged
+        # in Round 6 as "not triggered by today's only caller's genuinely
+        # sequential for-loop, but worth a real decision before this
+        # registry gets a concurrent caller." Round 8's orchestrator_dispatch.py
+        # is exactly that concurrent caller (multiple asyncio tasks calling
+        # record_check_in/update_session at once via dispatch_on_all) — each
+        # task writes a DIFFERENT project's file, so there's no cross-task
+        # contention on one file, but a crash or interrupt mid-write to any
+        # single file must never leave that one project's JSON half-written
+        # and unreadable on the next load(). Rename is atomic on both POSIX
+        # and Windows.
         path = self._path_for(project.name)
-        path.write_text(json.dumps(project.to_dict(), indent=2), encoding="utf-8")
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(project.to_dict(), indent=2), encoding="utf-8")
+        tmp.replace(path)
 
     def _path_for(self, name: str) -> Path:
         return self.projects_dir / f"{self._safe_name(name)}.json"

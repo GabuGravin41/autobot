@@ -1,0 +1,11 @@
+{
+  "name": "ieee_traffic_flow",
+  "working_dir": "c:\\Users\\User 1\\OneDrive\\Desktop\\projects\\django projects\\personal projects\\autobot\\competitions\\ieee_traffic_flow",
+  "backend": "antigravity",
+  "intent": "Reach Top 10% (0.85712+ / Rank <= 13) in 2026 IEEE Big Data Traffic Flow Bench (.5k prize) using spatio-temporal shockwave queue modeling and spatial-Kalman hybrid state reconstruction.",
+  "created_at": "2026-09-23T04:44:17.780400+00:00",
+  "session_id": "2808c914-a5f4-4c13-bd4b-45abb1db2d9d",
+  "last_checked_at": "2026-09-23T04:44:17.806149+00:00",
+  "last_status_summary": "Exp 4 running on 4-Core CPU: Spatio-temporal shockwave queue model + Spatial-Kalman hybrid state.",
+  "intent_notes": []
+}

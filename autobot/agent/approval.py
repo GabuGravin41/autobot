@@ -115,6 +115,16 @@ _IRREVERSIBLE_PATTERNS = [
     # submit always needs a live human decision, no matter how much trust
     # has been granted elsewhere.
     r"kaggle\.submit\(", r"competition_submit\b", r"competitions_submit\b",
+    # submit_code_competition() (added Sep 2026 Round 7) is the Code-
+    # Competition equivalent of submit() — binds a kernel version to a
+    # real leaderboard submission via the `kaggle competitions submit
+    # -k ... -v ...` CLI form (see kaggle_tool.py's module docstring for
+    # why this one shells out to the CLI instead of the Python API). Same
+    # IRREVERSIBLE reasoning as submit() above: it's a real, quota-
+    # consuming leaderboard attempt, just reached through a different
+    # kaggle_tool.py method for competitions that reject a bare CSV
+    # upload.
+    r"kaggle\.submit_code_competition\(",
 ]
 
 # computer_call strings that should be SAFE even though the generic
@@ -128,6 +138,12 @@ _IRREVERSIBLE_PATTERNS = [
 # while a real competition submission still always stops for a human.
 _SAFE_COMPUTER_CALL_PATTERNS = [
     r"kaggle\.(pull_kernel|push_kernel|kernel_status|kernel_output)\(",
+    # get_leaderboard() and list_top_kernels() (added Sep 2026 Round 7) are
+    # both read-only — a public leaderboard snapshot and a public kernel
+    # listing, neither touches the user's own kernels, submissions, or
+    # account state, so they belong in the same frictionless tier as the
+    # kernel read/iterate methods above.
+    r"kaggle\.(get_leaderboard|list_top_kernels)\(",
 ]
 _SAFE_COMPUTER_CALL_RE = re.compile("|".join(_SAFE_COMPUTER_CALL_PATTERNS), re.IGNORECASE)
 

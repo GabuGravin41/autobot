@@ -129,5 +129,40 @@ The generated submission was subjected to strict data integrity tests:
 
 ## 7. Submission Economics Policy
 - Daily Quota: **5 submissions / day**.
-- Submissions Used Today: 3 / 5 (Remaining: 2 / 5).
+- Submissions Used Today: 4 / 5 (Remaining: 1 / 5).
 - **Rule**: Every candidate must be validated against unmasked validation folds before burning a submission token. Format integrity (zero negative flows, zero NaNs, exact parquet row alignment) must pass triple-gate verification.
+
+---
+
+## 8. Experiment 4: Spatio-Temporal Shockwave Queue Modeling & Spatial-Kalman Hybrid
+- **Date**: 2026-09-23
+- **Kernel**: `daltongabrielomondi/autobot-traffic-exp4-spatiotemporal-physics-sota` (Version 2)
+- **Submission ID**: `56483173`
+- **Cloud Execution Time**: 16.2 minutes (4-Core CPU)
+- **Submission Method**: Direct Cloud Kernel Binding
+- **Official Public Score**: **`0.66542`** (Further +0.00627 gain over Exp 3 `0.65915`).
+- **Leaderboard Position**: Rank #104 / 133.
+
+### Post-Mortem & Diagnosis
+1. **The False-Alarm Breakdown Trap in Task 2**:
+   - In Exp 4, candidate bottlenecks were activated for onset windows starting at step 1 (T+5m to T+10m).
+   - In reality, physical breakdown accumulation requires 20-30 minutes of vehicle density buildup before speed drops below $v_{\text{cut}}$.
+   - Predicting queue at T+5m to T+20m on onset windows generated 4 consecutive time-slots of pure false alarms against an empty ground truth, causing the IoU for those early steps to collapse to 0.0.
+
+---
+
+## 9. Experiment 5: Delayed Onset Bottleneck Dynamics & Controlled Upstream Wave Propagation
+- **Date**: 2026-09-23
+- **Kernel**: `daltongabrielomondi/autobot-traffic-exp5-delayed-onset-sota`
+- **Execution Target**: Kaggle Cloud 4-Core CPU (0 GPU consumed).
+- **Liveness Verification**: Confirmed `KernelWorkerStatus.RUNNING` at t+30s and t+60s.
+
+### Architectural Innovations
+1. **Strict Delayed Onset Timing**:
+   - Steps 0–3 ($T+5$m to $T+20$m): Strict 0.0 queue prediction on onset windows (100% precision, eliminating early false-alarm IoU collapse).
+   - Steps 4–5 ($T+25$m, $T+30$m): Target activation on empirically validated recurrent bottleneck links (`EMPIRICAL_TOP2_BOTTLENECKS`).
+2. **Controlled Shockwave Propagation on Ongoing Queues**:
+   - Steps 0–2: Exact persistent preservation of origin queue.
+   - Steps 3–5: Backward wave expansion by 1 upstream link along corridor order only for links with declining speed.
+3. **ODME Pareto-Optimal Regularization**:
+   - Retained $\lambda = 0.05$ with unobserved connector masking ($S_{\text{ODME}} \approx 0.8359$).
