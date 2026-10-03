@@ -41,10 +41,15 @@ def test_eris_limb(comp):
         ok, res = await dispatch_computer_call(comp, "computer.eris.list_challenges()")
         assert ok is True
         assert "challenges" in res
+        assert "jx718881s2bdje8ev9qn27536h8fcv2d" in res
 
         ok, res = await dispatch_computer_call(comp, "computer.eris.fetch_challenge('test-quest-01')")
         assert ok is True
         assert "test-quest-01" in res
+
+        ok, res = await dispatch_computer_call(comp, "computer.eris.scaffold_kaggle_solution('test-quest-01')")
+        assert ok is True
+        assert "kaggle_dir" in res
     asyncio.run(_run())
 
 

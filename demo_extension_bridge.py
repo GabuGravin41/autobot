@@ -40,6 +40,12 @@ import sys
 import urllib.error
 import urllib.request
 
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 BACKEND = "http://127.0.0.1:8000"
 
 

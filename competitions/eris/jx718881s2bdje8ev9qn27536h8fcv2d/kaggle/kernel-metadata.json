@@ -1,0 +1,13 @@
+{
+  "id": "daltongabrielomondi/eris-solution-jx718881",
+  "title": "Project Eris Solution jx718881",
+  "code_file": "solution.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

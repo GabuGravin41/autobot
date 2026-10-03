@@ -30,6 +30,8 @@ htmlcov/
 *.key
 *.pem
 secrets.json
+competitions/eris/.session*
+competitions/eris/.token*
 
 # IDE/editor folders
 .idea/
