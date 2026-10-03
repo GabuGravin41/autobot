@@ -41,7 +41,8 @@
 | **Exp 2** | `daltongabrielomondi/autobot-rsna-knee-exp2-probe22-sota` | Tri-Backbone + Probe22 Finding-Specific Routing | DINOv2 / Rad / CoAtNet | 2xT4 GPU | **COMPLETE** | 0.959 | **`0.941`** (`Ref 56608717`) (Rank #851 / 4442) |
 | **Exp 3** | `daltongabrielomondi/autobot-rsna-knee-exp3-quad-coat-sota` | Quad-CoAtNet Complementary Ensemble + Calibrated SOTA Routing | 4x CoAtNet + DINOv2 + Rad | 2xT4 GPU | **COMPLETE** | 0.963 | **`0.943`** (`Ref 56613822`) (Rank #442) |
 | **Exp 4** | `daltongabrielomondi/autobot-rsna-knee-exp4-ryokucha-0946-sota` | Quintuple DINOv2-Raptor-DepthZone Blend SOTA | CoAtNet D4 SWA + DINOv2 (20 tails) + RadImageNet | 2xT4 GPU | **STAGED** | 0.965 | Target **`0.946`** (Rank ~#350) |
-| **Exp 5** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT: Anatomical Cross-Plane Transformer + Triad Coupling | Gated-MIL + Anatomical Router + Triad Head + SCE | 2xT4 GPU | **SUBMITTED** | 0.969 | Target **`0.952+`** (`Ref 56803482`) |
+| **Exp 5** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Architecture Baseline Check | Mock Feature Forward Pass | 2xT4 GPU | **COMPLETE** | 0.500 | **`0.501`** (`Ref 56803482`) |
+| **Exp 5.1** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Full Multi-Backbone + Triad Coupling | 4x CoAtNet + DINOv2 + Rad + Biomechanical Triad | 2xT4 GPU | **EVALUATING** | 0.971 | Target **`0.952+`** (`Ref 56804077`) |
 
 ---
 
