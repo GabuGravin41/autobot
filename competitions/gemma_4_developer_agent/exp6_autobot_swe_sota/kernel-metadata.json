@@ -1,0 +1,14 @@
+{
+  "id": "daltongabrielomondi/autobot-gemma4-exp6-swe-sota",
+  "title": "Autobot Gemma4 Exp6 SWE SOTA",
+  "code_file": "main.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "competition_sources": [
+    "gemma-4-developer-agent"
+  ]
+}

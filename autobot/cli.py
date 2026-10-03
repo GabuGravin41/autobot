@@ -88,6 +88,14 @@ def main() -> None:
     _use_system_certificates()
     _load_env()
 
+    # Subcommand families with their own parsers.
+    if len(sys.argv) > 1 and sys.argv[1] == "butler":
+        from autobot.butler.cli import main as butler_main
+        sys.exit(butler_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "kaggle":
+        from autobot.kaggle_cli import main as kaggle_main
+        sys.exit(kaggle_main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         prog="autobot",
         description="Autobot — A sovereign digital agent with full computer control.",
@@ -282,21 +290,20 @@ def _show_jobs() -> None:
     and print what's there — same on-disk file, same source of truth,
     just polled synchronously instead of on a background schedule.
     """
-    from autobot.computer.kaggle_watchdog import DEFAULT_LEDGER_PATH, KaggleJobLedger, poll_pending
+    from autobot.computer.kaggle_watchdog import KaggleJobLedger, default_ledger_path, poll_pending
 
-    ledger = KaggleJobLedger(DEFAULT_LEDGER_PATH)
+    ledger = KaggleJobLedger()
     jobs = ledger.all()
     if not jobs:
-        print(f"No Kaggle jobs recorded yet in {DEFAULT_LEDGER_PATH}")
+        print(f"No Kaggle jobs recorded yet in {default_ledger_path()}")
         print("(jobs are registered automatically by kaggle_tool.py's push_kernel())")
         return
 
     pending = ledger.pending()
     if pending:
         try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            api = KaggleApi()
-            api.authenticate()
+            from autobot.computer.kaggle_watchdog import make_kaggle_api
+            api = make_kaggle_api()
             changed = poll_pending(api, ledger)
             if changed:
                 print(f"Status changed for {len(changed)} job(s):")

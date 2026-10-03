@@ -1,5 +1,10 @@
 # Autobot
 
+> **New (Sep 2026): the butler.** Autobot now runs as an always-on task manager that hands work to
+> Claude Code / Antigravity, checks results itself, and asks you only for decisions. Start with
+> **[BUTLER.md](BUTLER.md)**; Gmail setup is in **[GMAIL_SETUP.md](GMAIL_SETUP.md)**.
+
+
 Autobot is a local autonomous OS co-pilot and desktop automation controller designed to execute complex workflows directly on your laptop setup.
 
 ## 🚀 Autonomous OS Co-Pilot Architecture

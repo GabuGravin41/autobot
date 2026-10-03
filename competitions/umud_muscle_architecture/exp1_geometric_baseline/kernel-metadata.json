@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-umud-exp1-geometric-baseline",
+  "title": "Autobot UMUD Exp1 Geometric Baseline",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "umud-challenge-muscle-architecture-in-ultrasound-data"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

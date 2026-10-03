@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from autobot.agent.action_models import Action, LLMResponse, StepRecord
+from autobot.agent.action_models import ACTION_PARAMS, Action, LLMResponse, StepRecord
 from autobot.agent.approval import ApprovalGuard, RiskTier
 from autobot.computer.computer import Computer
 from autobot.knowledge.skill_distiller import SkillDistiller
@@ -106,6 +106,9 @@ _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "syst
 _MAX_SAME_ACTION_REPEATS = 2   # if the same action name fails this many times, give up on it
 _MAX_STUCK_STEPS = 3           # if screen doesn't change for this many steps, ask human
 _MAX_OUTPUT_CHARS = 8_000      # truncate tool output before sending to LLM
+_HISTORY_WINDOW = 8            # recent steps shown to the model every step
+_MAX_IDENTICAL_REPEATS = 3     # identical action+result this many times -> blocked
+_PARSE_ATTEMPTS = 3            # re-asks when the model's reply isn't a valid action
 
 
 # ── CoreLoop ──────────────────────────────────────────────────────────────────
@@ -144,6 +147,8 @@ class CoreLoop:
         self._last_screen: str = ""
         self._same_screen_count: int = 0
         self._last_done_success: bool = False
+        self._pending_image_b64: str | None = None   # screenshot to show on the next step
+        self._vision = os.getenv("AUTOBOT_VISION", "").strip().lower() in ("1", "true", "yes", "on")
 
         # Services
         # ApprovalGuard also reads AUTOBOT_UNATTENDED itself (unattended=None
@@ -251,11 +256,31 @@ class CoreLoop:
         self.log(f"  💭 {llm_resp.next_goal}")
         self.log(f"  ▶️  {llm_resp.action.describe()}")
 
+        # A cancel that arrived while the LLM call was in flight must not be
+        # followed by one more real action (the Sep 7 run log shows exactly
+        # that: "Task cancelled", then another computer_call).
+        if self.is_cancelled:
+            self.log("⚠️ Cancelled.")
+            return "Cancelled by user."
+
         # 3. ACT
         if llm_resp.action.name == "done":
             return await self._handle_done(llm_resp, screen)
 
-        action_result, new_screen = await self._act(llm_resp.action, screen)
+        repeats = self._identical_repeats(llm_resp.action)
+        if repeats >= _MAX_IDENTICAL_REPEATS:
+            # The model has already run this exact action this many times and
+            # got the same result each time. Running it again cannot help; the
+            # Sep 7 Overleaf run spent 12 steps cycling through three calls
+            # like this. Refuse, and say so plainly in the next prompt.
+            action_result = (
+                f"BLOCKED: you have already run {llm_resp.action.describe()} {repeats} times "
+                f"and it returned the same result every time. It will not be run again. "
+                f"Choose a different action, or use human_input, or finish with done(success=false)."
+            )
+            new_screen = screen
+        else:
+            action_result, new_screen = await self._act(llm_resp.action, screen)
 
         # 4. RECORD
         record = StepRecord(
@@ -263,7 +288,7 @@ class CoreLoop:
             next_goal=llm_resp.next_goal,
             action=llm_resp.action,
             result=action_result,
-            success="error" not in action_result.lower() and "failed" not in action_result.lower(),
+            success=self._looks_successful(action_result),
             screen_before=screen,
             screen_after=new_screen,
         )
@@ -344,25 +369,32 @@ class CoreLoop:
     ) -> LLMResponse | None:
         """Call the LLM and parse its response. Retries once on parse failure."""
         step_prompt = self._build_step_prompt(screen, skill_context, stuck_warning)
+        user_content: Any = step_prompt
+        if self._pending_image_b64 and self._vision:
+            user_content = [
+                {"type": "text", "text": step_prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{self._pending_image_b64}"}},
+            ]
+        self._pending_image_b64 = None
         messages = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "user",   "content": step_prompt},
+            {"role": "user",   "content": user_content},
         ]
 
-        for attempt in range(2):
+        for attempt in range(_PARSE_ATTEMPTS):
             try:
                 raw = await self._llm_call(messages)
                 parsed = self._parse_llm_response(raw)
                 if parsed is not None:
                     return parsed
-                self.log(f"  ⚠️ Could not parse LLM response (attempt {attempt+1}), retrying…")
-                # Add the bad response to the conversation so the model can self-correct
+                self.log(f"  ⚠️ Could not parse a valid action (attempt {attempt+1}/{_PARSE_ATTEMPTS}), re-asking…")
                 messages.append({"role": "assistant", "content": raw or ""})
                 messages.append({
                     "role": "user",
                     "content": (
-                        "Your response was not valid JSON with the required fields "
-                        "(thinking, next_goal, action). Please respond with ONLY a JSON object."
+                        "That reply did not contain a usable action. Reply with ONE JSON object exactly like:\n"
+                        '{"thinking": "...", "next_goal": "...", "action": {"name": "click", "params": {"index": 3}}}\n'
+                        f"Valid action names: {', '.join(sorted(ACTION_PARAMS))}."
                     ),
                 })
             except Exception as e:
@@ -374,10 +406,10 @@ class CoreLoop:
                 # every real cause (bad key, rate limit, unknown model,
                 # network error) collapses into the same opaque "LLM failed
                 # to respond after retries" with no way to tell them apart.
-                msg = f"LLM call failed (attempt {attempt+1}/2): {type(e).__name__}: {e}"
+                msg = f"LLM call failed (attempt {attempt+1}/{_PARSE_ATTEMPTS}): {type(e).__name__}: {e}"
                 logger.error(msg)
                 self.log(f"  ⚠️ {msg}")
-                if attempt == 1:
+                if attempt >= 1:
                     return None
         return None
 
@@ -411,18 +443,49 @@ class CoreLoop:
         return (resp.choices[0].message.content or "").strip()
 
     def _parse_llm_response(self, raw: str) -> LLMResponse | None:
-        """Parse LLM JSON response. Tolerates markdown code fences."""
-        import re
-        text = raw.strip()
-        # Strip ```json ... ``` fences
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        try:
-            data = json.loads(text)
-            return LLMResponse.from_dict(data)
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.debug(f"JSON parse failed: {e}\nRaw: {raw[:300]}")
-            return None
+        """Parse the model's reply into a real action, or None (never a default action)."""
+        parsed = LLMResponse.parse(raw)
+        if parsed is None:
+            logger.debug(f"Unparseable model reply: {str(raw)[:300]}")
+        return parsed
+
+    # ── History helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _looks_successful(result: str) -> bool:
+        r = (result or "").strip().lower()
+        if not r or r in ("none", "[]", "{}", '""', "null"):
+            return False   # an empty result is not evidence that anything worked
+        return not any(w in r for w in ("error", "failed", "blocked:", "not found", "traceback"))
+
+    @staticmethod
+    def _signature(action: Action) -> str:
+        return json.dumps([action.name, action.params], sort_keys=True, default=str)
+
+    def _identical_repeats(self, action: Action) -> int:
+        """How many times this exact action already ran AND produced the same result."""
+        sig = self._signature(action)
+        # BLOCKED notices don't count as a new result — otherwise a block would
+        # reset the counter and let the very next identical call through.
+        results = [h.result for h in self.history
+                   if self._signature(h.action) == sig and not h.result.startswith("BLOCKED:")]
+        if not results:
+            return 0
+        last = results[-1]
+        return sum(1 for r in results if r == last)
+
+    def _repeated_summary(self) -> str:
+        """Actions run 2+ times with an identical result, one line each."""
+        seen: dict[str, tuple[Action, str, int]] = {}
+        for h in self.history:
+            key = self._signature(h.action) + "\x00" + h.result
+            a, r, n = seen.get(key, (h.action, h.result, 0))
+            seen[key] = (a, r, n + 1)
+        lines = [
+            f"  - {a.describe()[:120]} (x{n}) -> {' '.join(r.split())[:100] or '(empty result)'}"
+            for a, r, n in seen.values() if n >= 2
+        ]
+        return "\n".join(lines)
 
     def _build_step_prompt(self, screen: str, skill_context: str, stuck_warning: str) -> str:
         """Assemble the per-step user message sent to the LLM."""
@@ -433,13 +496,28 @@ class CoreLoop:
             parts.append(f"\n{skill_context}")
 
         if self.history:
+            # The model used to see ONLY the last step, so it could not know it
+            # had already tried something three steps ago — that is how the
+            # Sep 7 run cycled through the same three calls for 12 steps.
+            recent = self.history[-_HISTORY_WINDOW:]
+            lines = []
+            for h in recent:
+                icon = "OK " if h.success else "ERR"
+                result = " ".join(h.result.split())[:160]
+                lines.append(f"  step {h.step} [{icon}] {h.action.describe()[:120]} -> {result}")
+            skipped = len(self.history) - len(recent)
+            header = f"\n# Steps So Far ({len(self.history)} total"
+            header += f", oldest {skipped} not shown)" if skipped else ")"
+            parts.append(header + "\n" + "\n".join(lines))
+
             last = self.history[-1]
-            icon = "✅" if last.success else "❌"
-            parts.append(
-                f"\n# Previous Step Result\n"
-                f"{icon} Action: {last.action.describe()}\n"
-                f"Result: {last.result[:500]}"
-            )
+            parts.append(f"\n# Previous Step Full Result\n{last.result[:1500]}")
+
+            repeated = self._repeated_summary()
+            if repeated:
+                parts.append(
+                    "\n# Already Tried (same result each time — do NOT repeat these)\n" + repeated
+                )
 
         parts.append(f"\n# Current Screen State\n{screen}")
 
@@ -519,8 +597,17 @@ class CoreLoop:
 
         elif name == "screenshot":
             img_b64 = self.computer.display.screenshot()
-            # Return a short confirmation — the image itself is not injected into text
-            return "Screenshot captured. If you need to see it, the next step will include visual context."
+            if not self._vision:
+                # Previously this claimed "the next step will include visual
+                # context" — it never did. Say what is actually true.
+                return (
+                    "Screenshot captured, but vision is OFF for this model (AUTOBOT_VISION is not set), "
+                    "so you cannot see it. Use the element tree, browser_text/browser_list, or human_input instead."
+                )
+            if isinstance(img_b64, str) and len(img_b64) > 100:
+                self._pending_image_b64 = img_b64
+                return "Screenshot captured. It is attached to your next step."
+            return f"Screenshot failed: {str(img_b64)[:200]}"
 
         elif name == "wait":
             secs = float(p.get("seconds", 1))

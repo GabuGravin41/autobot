@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-traffic-exp8-physics-sota",
+  "title": "Autobot Traffic Exp8 Physics Sota",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "2026-ieee-big-data-traffic-flow-bench"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

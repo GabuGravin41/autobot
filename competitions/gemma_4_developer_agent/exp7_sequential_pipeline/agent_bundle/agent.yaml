@@ -1,0 +1,8 @@
+name: autobot_swe_pipeline
+agent_class: SequentialAgent
+description: 4-stage sequential software engineering pipeline with isolated contexts for surgical repository repair.
+sub_agents:
+  - config_path: sub_agents/localizer.yaml
+  - config_path: sub_agents/reproducer.yaml
+  - config_path: sub_agents/patcher.yaml
+  - config_path: sub_agents/finalizer.yaml

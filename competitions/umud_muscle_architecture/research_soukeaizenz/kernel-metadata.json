@@ -1,0 +1,23 @@
+{
+  "id": "soukeaizenz/anatomynet-biomechanical-u-net-0-399-1-sota",
+  "id_no": 135800958,
+  "title": "AnatomyNet: Biomechanical U-Net [0.399 #1 SOTA]",
+  "code_file": "anatomynet-biomechanical-u-net-0-399-1-sota.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [
+    ""
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "umud-challenge-muscle-architecture-in-ultrasound-data"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
+}

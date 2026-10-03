@@ -1,0 +1,17 @@
+{
+  "id": "daltongabrielomondi/autobot-traffic-exp11-lgbm-physics-sota",
+  "title": "Autobot Traffic Exp11 LGBM Physics SOTA",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "2026-ieee-big-data-traffic-flow-bench"
+  ],
+  "dataset_sources": [
+    "soukeaizenz/tfb-task2-lgbm"
+  ],
+  "kernel_sources": []
+}

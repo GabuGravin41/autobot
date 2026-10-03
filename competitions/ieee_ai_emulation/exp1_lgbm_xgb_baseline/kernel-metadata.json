@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-emulation-exp1-lgbm-xgb-baseline",
+  "title": "Autobot Emulation Exp1 LGBM XGB Baseline",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "competition_sources": [
+    "ieee-bigdata-cup-2026-ai-emulation-challenge"
+  ],
+  "dataset_sources": [
+    "zhihaow/carbonglobe"
+  ]
+}

@@ -1,0 +1,11 @@
+name: patcher
+model: gemma-4-31b-it-qat-w4a16-ct
+description: Surgical patch engineer that implements and verifies the code change.
+include_contents: none
+instruction: !include ../prompts/patcher.md
+generate_content_config: !include ../configs/sampling.yaml
+tools:
+  - read_file
+  - edit_file
+  - run_command
+output_key: patch_note

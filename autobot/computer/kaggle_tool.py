@@ -60,10 +60,28 @@ from autobot.computer.kaggle_watchdog import (
     DEFAULT_LEDGER_PATH,
     KaggleJobLedger,
     check_capacity as _check_capacity,
+    make_kaggle_api,
+    refresh_for_capacity,
     verify_liveness as _verify_liveness,
 )
+from autobot.util.filelock import FileLock
 
 logger = logging.getLogger(__name__)
+
+
+def _utf8_env() -> dict:
+    """Environment for a child `kaggle` process that can't crash on non-cp1252 text.
+
+    `kaggle kernels output` writes the kernel's log to disk with Python's
+    default encoding — cp1252 on Windows — and dies on the first tqdm
+    progress-bar glyph ('▉'), leaving a 0-byte .log (soil_grain_size_photos
+    §5). PYTHONUTF8 must be set when the interpreter STARTS, so it has to
+    go on the child process, not on this one.
+    """
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def _run_kaggle_cli(args: List[str], timeout: int = 120) -> str:
@@ -83,6 +101,7 @@ def _run_kaggle_cli(args: List[str], timeout: int = 120) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=_utf8_env(),
         )
     except FileNotFoundError:
         raise RuntimeError(
@@ -105,7 +124,7 @@ class Kaggle:
     Requires kaggle-api package and ~/.kaggle/kaggle.json credentials.
     """
 
-    def __init__(self, ledger_path: str | Path = DEFAULT_LEDGER_PATH):
+    def __init__(self, ledger_path: str | Path | None = None):
         self._api = None
         self._ledger_path = ledger_path
         self._ledger: KaggleJobLedger | None = None
@@ -113,12 +132,10 @@ class Kaggle:
     def _get_api(self):
         if self._api is None:
             try:
-                from kaggle.api.kaggle_api_extended import KaggleApi
-                self._api = KaggleApi()
-                self._api.authenticate()
-            except Exception as e:
+                self._api = make_kaggle_api()
+            except RuntimeError as e:
                 logger.error(f"Kaggle API authentication failed: {e}")
-                raise RuntimeError(f"Kaggle API not configured: {e}")
+                raise
         return self._api
 
     def _get_ledger(self) -> KaggleJobLedger:
@@ -316,12 +333,20 @@ class Kaggle:
         return str(status)
 
     def kernel_output(self, kernel: str, path: str = "./kernel_output") -> str:
-        """Download a completed kernel run's output files into `path`. Read-only."""
+        """Download a completed kernel run's output files (and its log) into `path`. Read-only."""
         if not kernel:
             raise ValueError("kernel_output: kernel slug required")
-        api = self._get_api()
         os.makedirs(path, exist_ok=True)
-        api.kernels_output(kernel, path)
+        # Via the CLI in a UTF-8 child process (see _utf8_env): the in-process
+        # API call writes the log with this interpreter's default encoding and
+        # crashes on Windows as soon as the log contains a progress-bar glyph.
+        try:
+            _run_kaggle_cli(["kernels", "output", kernel, "-p", path, "-o"], timeout=600)
+        except RuntimeError as e:
+            if "not found on PATH" not in str(e):
+                raise
+            api = self._get_api()
+            api.kernels_output(kernel, path)
         logger.info(f"Downloaded output of kernel {kernel} to {path}")
         return f"Output of kernel {kernel} downloaded to {path}"
 
@@ -391,28 +416,47 @@ class Kaggle:
         hardware = ("gpu" if metadata.get("enable_gpu") in (True, "true", "True") else "cpu") if kernel_id else None
 
         ledger = self._get_ledger() if kernel_id else None
-        if kernel_id and enforce_capacity:
-            has_capacity, capacity_msg = _check_capacity(ledger, hardware)
-            if not has_capacity:
-                raise RuntimeError(
-                    f"push_kernel: refusing to dispatch {kernel_id} — {capacity_msg}. "
-                    f"Kaggle's account-wide {hardware.upper()} slot limit would be "
-                    f"exceeded. Check 'autobot --jobs' for what's active, wait for one "
-                    f"to finish, or pass enforce_capacity=False if you're certain this "
-                    f"account's real limit differs."
-                )
-            logger.debug(f"push_kernel: capacity check for {kernel_id} ({hardware}): {capacity_msg}")
-
         api = self._get_api()
-        result = api.kernels_push(path)
-        logger.info(f"Pushed kernel from {path}: {result}")
-        summary = str(result)
 
-        if not kernel_id:
-            logger.debug(f"push_kernel: no 'id' in {meta_path}, skipping tracking/verification")
-            return summary
+        # Check-capacity -> push -> register is one critical section across
+        # every process on this machine (several agents share one Kaggle
+        # account and one ledger file). Without the lock, two processes can
+        # both see a free slot and both push. The ledger is re-read inside
+        # the lock and suspect entries are refreshed from the live API first.
+        lock = FileLock(Path(ledger.path).with_suffix(".lock"), timeout=120) if kernel_id else None
+        if lock:
+            lock.acquire()
+        try:
+            if kernel_id:
+                ledger.load()
+                if enforce_capacity:
+                    try:
+                        refresh_for_capacity(api, ledger)
+                    except Exception as e:  # never let a refresh failure block a push
+                        logger.warning(f"push_kernel: live capacity refresh failed: {e}")
+                    has_capacity, capacity_msg = _check_capacity(ledger, hardware)
+                    if not has_capacity:
+                        raise RuntimeError(
+                            f"push_kernel: refusing to dispatch {kernel_id} — {capacity_msg}. "
+                            f"Kaggle's account-wide {hardware.upper()} slot limit would be "
+                            f"exceeded. Check 'autobot --jobs' for what's active, wait for one "
+                            f"to finish, or pass enforce_capacity=False if you're certain this "
+                            f"account's real limit differs."
+                        )
+                    logger.debug(f"push_kernel: capacity check for {kernel_id} ({hardware}): {capacity_msg}")
 
-        ledger.register(kernel_id, competition=competition, path=path, hardware=hardware)
+            result = api.kernels_push(path)
+            logger.info(f"Pushed kernel from {path}: {result}")
+            summary = str(result)
+
+            if not kernel_id:
+                logger.debug(f"push_kernel: no 'id' in {meta_path}, skipping tracking/verification")
+                return summary
+
+            ledger.register(kernel_id, competition=competition, path=path, hardware=hardware)
+        finally:
+            if lock:
+                lock.release()
 
         if not verify_liveness:
             return summary

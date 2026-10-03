@@ -45,17 +45,62 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
+import uuid
+from pathlib import Path
 from typing import Any
+
+from autobot.integrations.cli_exec import classify_error, is_batch_shim, resolve_exe, run_cli, strip_flag, unknown_flag
 
 _DEFAULT_TIMEOUT = 600.0   # headless coding turns can run long, same rationale as claude_code_bridge.py
 
 _CLI_NAME = "agy"
 
+# A prompt longer than this, or containing characters cmd.exe mangles, is
+# handed to agy through a file when agy is a .cmd/.bat shim (see cli_exec.py).
+_MAX_INLINE_PROMPT = 6000
+_CMD_UNSAFE = ("\n", "\r", "%", "!")
+
 
 def is_available() -> bool:
     """True if the `agy` CLI is installed and on PATH."""
     return shutil.which(_CLI_NAME) is not None
+
+
+def _timeout_flag(timeout: float) -> list[str]:
+    # agy's own --print-timeout defaults to 5m and kills the run itself, so
+    # any headless coding turn longer than five minutes died regardless of
+    # the timeout this wrapper was given. Pass ours through (whole minutes,
+    # the format agy documents: "5m").
+    minutes = max(1, int((timeout + 59) // 60))
+    return ["--print-timeout", f"{minutes}m"]
+
+
+def _exclude_from_git(root: Path, pattern: str) -> None:
+    """Add pattern to .git/info/exclude (local-only ignore; nothing tracked changes)."""
+    exclude = root / ".git" / "info" / "exclude"
+    try:
+        if exclude.parent.is_dir():
+            existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+            if pattern not in existing.splitlines():
+                with exclude.open("a", encoding="utf-8") as fh:
+                    fh.write(("" if existing.endswith("\n") or not existing else "\n") + pattern + "\n")
+    except OSError:
+        pass
+
+
+def _prompt_via_file(prompt: str, cwd: str | None) -> tuple[str, Path]:
+    """Write a long/multi-line prompt to a file inside the workspace and
+    return a short one-line prompt that points at it."""
+    base = Path(cwd) if cwd else Path.home() / ".autobot"
+    folder = base / ".autobot"
+    folder.mkdir(parents=True, exist_ok=True)
+    if cwd:
+        _exclude_from_git(Path(cwd), ".autobot/")
+    path = folder / f"task_{uuid.uuid4().hex[:10]}.md"
+    path.write_text(prompt, encoding="utf-8")
+    short = (f"Your full instructions are in the file .autobot/{path.name} in the current "
+             f"workspace. Read that file first and carry out its instructions exactly.")
+    return short, path
 
 
 def run_headless(
@@ -68,116 +113,108 @@ def run_headless(
     continue_session: bool = False,
     conversation_id: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
+    *,
+    json_schema: dict | str | None = None,
 ) -> dict[str, Any]:
     """
-    Run one headless Antigravity turn and return its result.
+    Run one headless Antigravity turn and return
+    {"ok", "data", "error", "error_class"}. Never raises.
 
-    skip_permissions:
-      False (default) — agy respects the scoped allowlist in
-                         ~/.gemini/antigravity-cli/settings.json. Anything
-                         not pre-allowlisted simply won't happen in headless
-                         mode (there's no one to answer an interactive
-                         permission prompt), the same "the safe default
-                         just declines rather than hanging" shape as Claude
-                         Code's "plan" mode.
-      True              — passes --dangerously-skip-permissions: agy
-                           approves all tool calls, including file writes
-                           and command execution, without asking. Most
-                           capable, least safe — mirrors claude_code_bridge's
-                           "bypassPermissions".
-
-    conversation_id / continue_session let a caller resume a specific
-    project's ongoing Antigravity conversation (e.g. "what's your status
-    on the referral dashboard" as turn one, a follow-up prompt as turn two)
-    instead of starting a fresh conversation with no memory of prior turns
-    — this is the actual mechanism the orchestrator's per-project check-in
-    loop depends on (see the project registry module).
-
-    model / effort / agent forward directly to agy's own --model / --effort
-    / --agent flags (see `agy models` / `agy agents` on the target machine
-    for valid values) — left optional and unvalidated here on purpose,
-    since agy's own accepted values can change out from under this file
-    faster than this file should need updating to match.
+    skip_permissions=False (default) respects the allowlist in
+    ~/.gemini/antigravity-cli/settings.json; True passes
+    --dangerously-skip-permissions. json_schema -> data["structured_output"]
+    (documented at antigravity.google/docs/cli/headless/).
     """
     if not prompt or not prompt.strip():
-        return {"ok": False, "data": None, "error": "run_headless: prompt is required"}
+        return {"ok": False, "data": None, "error": "run_headless: prompt is required", "error_class": "other"}
     if not is_available():
         return {
-            "ok": False,
-            "data": None,
+            "ok": False, "data": None, "error_class": "not_installed",
             "error": f"{_CLI_NAME} CLI not found on PATH. Install Google Antigravity "
                      f"and ensure its CLI is on PATH (see antigravity.google/docs/cli/).",
         }
     if cwd and not os.path.isdir(cwd):
-        # subprocess.run(cwd=...) raises FileNotFoundError for a missing
-        # directory and NotADirectoryError for a cwd that exists but is a
-        # file — and the except FileNotFoundError clause below is there for
-        # a *different* case (the agy binary itself vanishing from PATH
-        # between the is_available() check above and exec). Without this
-        # check, a bad cwd (e.g. a tracked project's working_dir that was
-        # since moved or deleted — see project_registry.py) would raise
-        # FileNotFoundError and get caught by that same clause, reporting
-        # "agy CLI not found on PATH" — actively misleading a caller who
-        # has agy installed just fine, since the real problem is unrelated
-        # to the CLI at all.
-        return {
-            "ok": False,
-            "data": None,
-            "error": f"cwd does not exist or is not a directory: {cwd}",
-        }
+        return {"ok": False, "data": None, "error_class": "other",
+                "error": f"cwd does not exist or is not a directory: {cwd}"}
 
-    args = [_CLI_NAME, "-p", prompt, "--output-format", "json"]
-    if skip_permissions:
-        args.append("--dangerously-skip-permissions")
-    if model:
-        args += ["--model", model]
-    if effort:
-        args += ["--effort", effort]
-    if agent:
-        args += ["--agent", agent]
-    if conversation_id:
-        args += ["--conversation", conversation_id]
-    elif continue_session:
-        args += ["--continue"]
+    prompt_arg = prompt
+    prompt_file: Path | None = None
+    exe = resolve_exe(_CLI_NAME)
+    if is_batch_shim(exe) and (len(prompt) > _MAX_INLINE_PROMPT or any(c in prompt for c in _CMD_UNSAFE)):
+        prompt_arg, prompt_file = _prompt_via_file(prompt, cwd)
+
+    schema_file: Path | None = None
+    extra: list[str] = []
+    if json_schema is not None:
+        tmp_dir = Path.home() / ".autobot" / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        schema_file = tmp_dir / f"schema_{uuid.uuid4().hex[:10]}.json"
+        schema_file.write_text(json_schema if isinstance(json_schema, str) else json.dumps(json_schema),
+                               encoding="utf-8")
+        extra += ["--json-schema", str(schema_file)]
+
+    def build(with_timeout_flag: bool) -> list[str]:
+        args = [_CLI_NAME, "-p", prompt_arg, "--output-format", "json"]
+        if with_timeout_flag:
+            args += _timeout_flag(timeout)
+        if skip_permissions:
+            args.append("--dangerously-skip-permissions")
+        if model:
+            args += ["--model", model]
+        if effort:
+            args += ["--effort", effort]
+        if agent:
+            args += ["--agent", agent]
+        if conversation_id:
+            args += ["--conversation", conversation_id]
+        elif continue_session:
+            args += ["--continue"]
+        return args + extra
 
     try:
-        proc = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "data": None, "error": f"{_CLI_NAME} -p timed out after {timeout}s"}
-    except FileNotFoundError:
-        return {"ok": False, "data": None, "error": f"{_CLI_NAME} CLI not found on PATH."}
-    except Exception as e:
-        return {"ok": False, "data": None, "error": f"{type(e).__name__}: {e}"}
+        argv = build(True)
+        res = run_cli(argv, cwd=cwd, timeout=timeout + 30)
+        for _ in range(4):
+            if res.ok or res.timed_out or res.not_found:
+                break
+            flag = unknown_flag(res.stderr + " " + res.stdout)
+            if not flag or flag not in argv or flag in ("--output-format",):
+                break
+            argv = strip_flag(argv, flag, {"--print-timeout", "--model", "--effort", "--agent",
+                                           "--conversation", "--json-schema", "--output-format"})
+            res = run_cli(argv, cwd=cwd, timeout=timeout + 30)
+    finally:
+        for f in (prompt_file, schema_file):
+            if f is not None:
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
 
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
+    if res.not_found:
+        return {"ok": False, "data": None, "error": res.stderr, "error_class": "not_installed"}
+    if res.timed_out:
+        return {"ok": False, "data": res.stdout or None, "error": f"{_CLI_NAME} -p timed out after {timeout}s",
+                "error_class": "timeout"}
 
-    # agy's documented exit codes: 0 success, 1 model/config error, 2
-    # streaming-protocol violation or unsupported slash command. None of
-    # those are this function's problem to disambiguate beyond "ok: False,
-    # here's stderr" — the caller (antigravity_tool.py) surfaces it as a
-    # RuntimeError, same as claude_code_bridge's non-zero-exit path.
-    if proc.returncode != 0:
-        return {"ok": False, "data": out or None, "error": err or f"{_CLI_NAME} exited with code {proc.returncode}"}
+    out = (res.stdout or "").strip()
+    err = (res.stderr or "").strip()
+
+    if res.returncode != 0:
+        return {"ok": False, "data": out or None,
+                "error": err or f"{_CLI_NAME} exited with code {res.returncode}",
+                "error_class": classify_error(f"{err} {out}")}
 
     try:
         parsed = json.loads(out)
     except json.JSONDecodeError:
-        return {"ok": True, "data": {"result": out}, "error": "warning: could not parse JSON output"}
+        return {"ok": True, "data": {"result": out, "response": out},
+                "error": "warning: could not parse JSON output", "error_class": ""}
 
-    # The docs' JSON envelope carries a `status` field independent of the
-    # process exit code (SUCCESS, ERROR, CANCELED, INTERRUPTED, INVALID,
-    # WAITING, RUNNING) — a clean exit (0) with status != SUCCESS is a real,
-    # distinct outcome (e.g. the turn was interrupted or is still WAITING on
-    # something) that a caller checking only proc.returncode would miss.
     status = parsed.get("status") if isinstance(parsed, dict) else None
     if status and status != "SUCCESS":
-        return {"ok": False, "data": parsed, "error": f"{_CLI_NAME} status: {status}"}
+        detail = str(parsed.get("error") or "").strip()
+        message = f"{_CLI_NAME} status: {status}" + (f": {detail}" if detail else "")
+        return {"ok": False, "data": parsed, "error": message, "error_class": classify_error(message)}
 
-    return {"ok": True, "data": parsed, "error": ""}
+    return {"ok": True, "data": parsed, "error": "", "error_class": ""}

@@ -101,28 +101,105 @@ class StepRecord:
 
 # ── LLM response ──────────────────────────────────────────────────────────────
 
+# Every action CoreLoop can execute, with its positional parameter order.
+# Used to validate action names and to map positional/list/scalar arguments
+# from weaker models onto real parameter names (see autobot/util/jsonx.py).
+ACTION_PARAMS: dict[str, list[str]] = {
+    "click": ["index"],
+    "type_into": ["index", "text"],
+    "type": ["text"],
+    "key": ["combo"],
+    "focus": ["title"],
+    "navigate": ["url"],
+    "run_shell": ["command", "timeout"],
+    "screenshot": [],
+    "wait": ["seconds"],
+    "human_input": ["prompt"],
+    "computer_call": ["call"],
+    "browser_text": [],
+    "browser_list": [],
+    "browser_click": ["index"],
+    "browser_type": ["index", "text"],
+    "browser_paste": ["index", "text"],
+    "done": ["text", "success"],
+}
+
+_META_KEYS = ("thinking", "next_goal", "reasoning", "thought", "plan")
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("true", "yes", "y", "1", "success", "succeeded")
+
+
 @dataclass
 class LLMResponse:
     """
     Parsed output from one LLM call.
 
-    The model always returns JSON with these three fields (see system_prompt.md).
+    The model is asked for JSON with three fields (see system_prompt.md):
+    thinking, next_goal, action{name, params}. from_dict() accepts that and
+    the many near-miss shapes weaker models produce instead.
+
+    It returns None for anything it can't map to a REAL action. It used to
+    turn any unrecognized action shape into `done` (with success defaulting
+    to True), which ended the run on step 1 and reported "Task complete" —
+    reproduced with {"type": "click", "index": 1}. None makes CoreLoop re-ask
+    instead.
     """
     thinking: str
     next_goal: str
     action: Action
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "LLMResponse":
-        raw_action = data.get("action", {})
-        if isinstance(raw_action, dict):
-            name = raw_action.get("name", "done")
-            params = raw_action.get("params", {})
-        else:
-            name = "done"
-            params = {"text": "Could not parse action", "success": False}
+    def from_dict(cls, data: dict[str, Any]) -> "LLMResponse | None":
+        from autobot.util.jsonx import coerce_call
+
+        if not isinstance(data, dict):
+            return None
+        call = None
+        raw_action = data.get("action")
+        if raw_action is not None:
+            call = coerce_call(raw_action, ACTION_PARAMS)
+        if call is None:
+            # Action fields placed at the top level next to thinking/next_goal.
+            flat = {k: v for k, v in data.items() if k not in _META_KEYS}
+            call = coerce_call(flat, ACTION_PARAMS)
+        if call is None and isinstance(raw_action, dict) and isinstance(raw_action.get("name"), str) \
+                and isinstance(raw_action.get("params", {}), dict) and raw_action["name"].strip():
+            # Canonical shape with an unknown name: keep it, so the dispatcher
+            # answers "Unknown action 'x'. Valid actions: ..." in the history.
+            call = (raw_action["name"].strip(), dict(raw_action.get("params") or {}))
+        if call is None:
+            return None
+
+        name, params = call
+        if name == "done":
+            # "done" only counts as success when the model says so explicitly.
+            params = dict(params)
+            params["success"] = _truthy(params.get("success", False))
+            params.setdefault("text", "")
+
+        thinking = data.get("thinking") or data.get("reasoning") or data.get("thought") or ""
         return cls(
-            thinking=str(data.get("thinking", "")),
-            next_goal=str(data.get("next_goal", "")),
+            thinking=str(thinking),
+            next_goal=str(data.get("next_goal", "") or data.get("plan", "") or ""),
             action=Action(name=name, params=params),
         )
+
+    @classmethod
+    def parse(cls, raw: str | None) -> "LLMResponse | None":
+        """Parse raw model text (fenced, prose-wrapped, single-quoted...)."""
+        from autobot.util.jsonx import coerce_call, extract_json
+
+        data = extract_json(raw)
+        if isinstance(data, dict):
+            return cls.from_dict(data)
+        if isinstance(raw, str):
+            call = coerce_call(raw.strip().splitlines()[-1] if raw.strip() else "", ACTION_PARAMS)
+            if call:
+                return cls.from_dict({"action": {"name": call[0], "params": call[1]}})
+        return None

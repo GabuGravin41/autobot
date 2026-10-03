@@ -22,6 +22,8 @@ without a database" already works and is already tested elsewhere.
 from __future__ import annotations
 
 import hashlib
+import os
+import threading
 import json
 import logging
 import re
@@ -93,7 +95,11 @@ class ProjectRegistry:
     """Register, look up, update, and list tracked projects."""
 
     def __init__(self, projects_dir: Path | None = None) -> None:
-        self.projects_dir = projects_dir or (Path.cwd() / "autobot" / "knowledge" / "projects")
+        if projects_dir is None:
+            from autobot.paths import knowledge_dir, migrate_legacy_projects
+            migrate_legacy_projects()
+            projects_dir = knowledge_dir("projects")
+        self.projects_dir = projects_dir
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
     def register(
@@ -236,7 +242,7 @@ class ProjectRegistry:
         # and unreadable on the next load(). Rename is atomic on both POSIX
         # and Windows.
         path = self._path_for(project.name)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(project.to_dict(), indent=2), encoding="utf-8")
         tmp.replace(path)
 

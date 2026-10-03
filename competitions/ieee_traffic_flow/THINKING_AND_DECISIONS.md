@@ -185,3 +185,28 @@ The generated submission was subjected to strict data integrity tests:
 - In Exp 6, activating the recurrent bottleneck at $T+20$m (`dt_min >= 19.5`) caused a mild -0.00560 drop vs. Exp 5 (`0.69045` -> `0.68485`).
 - **Physical Reason**: Vehicle accumulation to congestion breakdown takes a minimum of 20–25 minutes. Activating at $T+20$m triggers false positives on windows where the breakdown doesn't occur until $T+25$m–$T+30$m.
 - **Rule Confirmed**: On California highway corridors, holding strict 0.0 queue prediction through $T+20$m and initiating activation strictly at $T+25$m is the empirical optimal sweet spot.
+
+---
+
+## 11. Experiment 7: Unified SOTA Monotonic Surface + Delayed Onset Kinematics
+- **Date**: 2026-09-23
+- **Kernel**: `daltongabrielomondi/autobot-traffic-exp7-unified-champion-sota`
+- **Submission ID**: `56486337` (Version 1)
+- **Cloud Execution Time**: 9.4 minutes (4-Core CPU)
+- **Public Score (v1)**: `0.53880`
+
+### Diagnostic Audit & Post-Mortem:
+1. **Silent Zero Failure Mode Detected**:
+   - Examination of downloaded kernel artifacts revealed that Task 1 (States) and Task 2 (Queues) ran with 100% data coverage (8,726 queue cells activated via Delayed Onset Kinematics).
+   - In Task 4 (ODME path flow reconstruction), a sanity check on a nonexistent artifact `network/base_od.csv` caused all 10 corridor panels to be skipped, producing an empty ODME table.
+   - When aligned against `submission_key.csv`, all 70,708 ODME rows defaulted to `0.0`.
+   - The competition composite score collapsed: $0.20 \times S_{\text{odme}} = 0.0$, losing ~0.167 points and reverting the submission to the baseline level (0.53880).
+
+2. **Autonomous Scaffolding Lesson for Autobot Architecture**:
+   - **Active Value Assertions**: Never rely purely on `.isna().any()` or `shape` checks. Empty dataframes filled with zeros pass `isna()` easily.
+   - **Contract Guardrail**: Added strict assertions: `assert odme_nonzeros >= 60_000, f'FATAL: ODME non-zero values collapsed ({odme_nonzeros})!'`. If any sub-task fails to populate non-zero predictions, the kernel must raise an immediate fatal exception rather than submitting a silently degraded file.
+
+3. **Version 2 Hotfix Dispatched**:
+   - Replaced Task 4 operator and prior binding with the verified implementation from Exp 5 (`lambda = 0.05`).
+   - Added active non-zero assertions across all task blocks in Cell 7.
+   - Dispatched Version 2 to Kaggle Cloud; running smoothly in parallel with Biohub Exp 2 & Exp 3.

@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-umud-exp2-variational-kinematics",
+  "title": "Autobot UMUD Exp2 Variational Kinematics",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "umud-challenge-muscle-architecture-in-ultrasound-data"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

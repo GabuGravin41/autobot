@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-soil-exp2-pca-pls-loo-blend",
+  "title": "Autobot Soil Exp2 PCA PLS LOO Blend",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "competition_sources": [
+    "soil-grain-size-from-photos"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

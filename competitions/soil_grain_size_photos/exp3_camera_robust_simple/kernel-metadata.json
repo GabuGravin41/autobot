@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-soil-exp3-camera-robust-simple",
+  "title": "Autobot Soil Exp3 Camera Robust Simple",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "competition_sources": [
+    "soil-grain-size-from-photos"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

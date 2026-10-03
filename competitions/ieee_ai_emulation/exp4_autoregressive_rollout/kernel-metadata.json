@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-emulation-exp4-autoregressive-rollout",
+  "title": "Autobot Emulation Exp4 Autoregressive Rollout",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "ieee-bigdata-cup-2026-ai-emulation-challenge"
+  ],
+  "dataset_sources": [
+    "zhihaow/carbonglobe"
+  ]
+}

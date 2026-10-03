@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from ..agent.runner import AgentRunner
 from ..computer.liveness import SystemLivenessManager
 from ..browser.extension_bridge import bridge as _ext_bridge
-from ..computer.kaggle_watchdog import DEFAULT_LEDGER_PATH, KaggleJobLedger, poll_pending
+from ..computer.kaggle_watchdog import KaggleJobLedger, poll_pending
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -106,7 +106,7 @@ async def _broadcast(msg: str) -> None:
 # sessions never touch Kaggle, and this loop must never crash the whole
 # dashboard server just because Kaggle credentials aren't configured.
 async def _kaggle_watchdog_loop(interval: float) -> None:
-    ledger = KaggleJobLedger(DEFAULT_LEDGER_PATH)
+    ledger = KaggleJobLedger()
     api = None
     api_init_failed = False
 
@@ -118,9 +118,8 @@ async def _kaggle_watchdog_loop(interval: float) -> None:
                 continue
             if api is None and not api_init_failed:
                 try:
-                    from kaggle.api.kaggle_api_extended import KaggleApi
-                    api = KaggleApi()
-                    api.authenticate()
+                    from ..computer.kaggle_watchdog import make_kaggle_api
+                    api = make_kaggle_api()
                 except Exception as e:
                     api_init_failed = True
                     _log(f"Kaggle watchdog: credentials not available, pausing job polling ({e})")
@@ -163,6 +162,10 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Autobot API", version="1.0.0", lifespan=lifespan)
+
+from .butler_api import router as _butler_router  # noqa: E402
+
+app.include_router(_butler_router)
 
 # Allow Vite dev server
 _extra_origins = [o.strip() for o in os.getenv("AUTOBOT_CORS_ORIGINS", "").split(",") if o.strip()]
@@ -428,7 +431,7 @@ def get_kaggle_jobs():
     log line.
     """
     from dataclasses import asdict
-    ledger = KaggleJobLedger(DEFAULT_LEDGER_PATH)
+    ledger = KaggleJobLedger()
     return {"jobs": [asdict(j) for j in ledger.all()]}
 
 
@@ -981,11 +984,29 @@ def set_anti_sleep(req: AntiSleepRequest):
 # ── Added Fallback & WebSocket routes for frontend compatibility ─────────────
 @app.get("/api/health")
 def get_health_route():
+    """Real health. This endpoint used to return a hardcoded "everything OK"
+    (including a CDP browser that no longer exists) — dangerous for something
+    meant to run unattended, because it could never report a problem."""
+    import shutil as _sh
+    from ..butler.store import ButlerStore
+    from .butler_api import status_payload
+    try:
+        from ..llm import get_manager_llm
+        chain = get_manager_llm()
+        llm = {"ok": chain is not None, "backends": chain.describe() if chain else "none", "error": ""}
+    except Exception as e:
+        llm = {"ok": False, "backends": "none", "error": str(e)}
+    workers = {w: bool(_sh.which(w)) for w in ("claude", "agy", "code", "kaggle", "latexmk")}
+    try:
+        butler = status_payload(ButlerStore())
+    except Exception as e:
+        butler = {"daemon_running": False, "error": str(e)}
     return {
-        "overall_ok": True,
-        "llm": {"ok": True, "provider": os.getenv("AUTOBOT_LLM_PROVIDER", "openrouter"), "model": os.getenv("AUTOBOT_LLM_MODEL", "openai/gpt-4o-mini"), "error": ""},
-        "cdp": {"ok": True, "tabs": 1, "url": "", "error": ""},
-        "config": {"has_api_key": True, "vision_enabled": True}
+        "overall_ok": bool(butler.get("daemon_running")) and (workers["claude"] or workers["agy"]),
+        "llm": llm,
+        "workers": workers,
+        "butler": butler,
+        "extension_connected": bool(getattr(_ext_bridge, "is_connected", lambda: False)()),
     }
 
 @app.get("/api/learning/stats")

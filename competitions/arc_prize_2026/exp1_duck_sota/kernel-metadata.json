@@ -1,0 +1,20 @@
+{
+  "id": "daltongabrielomondi/autobot-arc3-exp1-duck-qwen27b-sota",
+  "title": "Autobot ARC3 Exp1 Duck Qwen27B SOTA",
+  "code_file": "main.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "competition_sources": [
+    "arc-prize-2026-arc-agi-3"
+  ],
+  "dataset_sources": [
+    "jakobbrggen/taaf-kaggle-source-anim-20260807-anim",
+    "driessmit1/arc3-vllm-h100-wheelhouse-v3"
+  ],
+  "model_sources": [
+    "foysalemonshanto/qwen3-8-27b-fp8-repacked-v1/pytorch/hf-fp8/1"
+  ]
+}

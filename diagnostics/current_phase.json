@@ -1,0 +1,22 @@
+{
+  "elapsed_seconds": 1399.4684009552002,
+  "error": "npz_convnext_tiny_1ltfrywm_epoch10_fold0.pt",
+  "error_type": "FileNotFoundError",
+  "gpus": [
+    {
+      "allocated_bytes": 19136512,
+      "id": 0,
+      "reserved_bytes": 62914560
+    },
+    {
+      "allocated_bytes": 9568256,
+      "id": 1,
+      "reserved_bytes": 23068672
+    }
+  ],
+  "max_rss_kib": 7493256,
+  "memory.current": "16075182080",
+  "memory.max": "32212254720",
+  "stage": "global96_coat",
+  "status": "FAILED"
+}

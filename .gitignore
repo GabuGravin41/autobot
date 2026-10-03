@@ -86,3 +86,16 @@ competitions/**/*.pt
 competitions/**/*.whl
 competitions/**/official_repo/
 
+# Root binary artifacts and zips
+*.zip
+*.npz
+*.csv
+_coat_*
+_d4_*
+_g96_*
+d4_input/
+g96_input/
+Claude outputs/
+temp_nb_check/
+
+

@@ -110,6 +110,143 @@ Three separable capabilities, not one monolith:
   into the active `system_prompt.md`, correctly reframed for DOM-index
   clicking as primary rather than vision+coordinates.
 
+### Round 9 (Sep 2026) — the butler: from a clicking agent to a manager of workers
+
+**Why the pivot.** A review of the actual run logs showed the last time CoreLoop ran on its own
+(Sep 7, DeepSeek V4 Flash, an Overleaf task) it looped for 12 steps and did nothing, while all nine
+competitions after that were driven by Antigravity using Autobot's Kaggle tools as a library. The
+useful part of Autobot was its tools and guardrails; the missing part was a manager. Dalton's
+own workflow (think, prompt a capable tool, switch, judge, prompt again) is the spec.
+
+**Built (autobot/butler/, autobot/llm/, autobot/integrations/{cli_exec,gmail}.py):**
+- A daemon that owns time (`autobot butler run`): SQLite state in ~/.autobot, single instance,
+  crash-safe resume, bounded concurrency, clean shutdown that kills its worker processes.
+- A per-task state machine (playbook.py): start -> propose checks -> work -> verify -> finalize,
+  with Kaggle rounds that wait on kernels for free, escalation, rate-limit cooldowns, and an
+  inbox for questions/approvals. No model can declare a task done; checks.py decides.
+- Lanes: coding, document (LaTeX), learning (modules), research (web search), kaggle, email.
+  The Kaggle post-mortem lessons are standing instructions in lanes.py.
+- Workers: Claude Code and Antigravity headless, with structured JSON reports and hard denials
+  (push, submit, recursive delete). Works on subscriptions; no API key needed.
+- Gmail via the official API: sync -> digest -> drafts; sending only on approval. The triage
+  worker has no shell and no web. Live test: it flagged a prompt-injection email as phishing.
+- Inbox via CLI and a token-protected phone page (/butler).
+- Optional manager model with a fallback chain (claude_cli, agy_cli, Groq, Cerebras, OpenRouter,
+  Ollama, Gemini) and schema-constrained output.
+
+**Bugs found and fixed on the way (each reproduced first):**
+- `_normalize_status` read every real Kaggle status as "error" (kagglesdk's str() contains
+  "failureMessage"). This one bug explains the "liveness false positives" in five competition
+  logs and the ledger staleness in two.
+- Capacity check-then-push race across processes -> cross-process file lock; ledger writes now
+  lock-reload-save with unique temp names.
+- A malformed action ended CoreLoop runs as "Task complete" (success=True).
+- Failed runs were saved as "proven" skills and injected into later runs.
+- CoreLoop showed the model only its last step (cause of the Sep 7 loop) -> history window,
+  repeat blocking.
+- Windows: npm `.cmd` shims not found by subprocess; prompts truncated at newlines by cmd.exe;
+  agy's own 5-minute print timeout; kaggle log download crashing on cp1252; kaggle sys.exit()
+  killing long-running processes; state written relative to the current folder.
+- /api/health was hardcoded to "OK".
+
+**Verified live (not just unit tests):** a real Claude Code worker fixed a bug end to end; the
+real daemon ran a research task (live web search, 38 links) and a LaTeX learning module
+concurrently; the email lane handled a real model with an injection email. 390 tests pass.
+
+**Still to do:** a Windows run of `autobot butler smoke` on Dalton's machine; Gmail connected
+for real; a week of unattended running with the failure log reviewed before adding the next
+lane (desktop-app automation last).
+
+### Round 8 (Sep 2026) — multi-project orchestration, and closing the gap it exposed
+
+Triggered directly by Dalton's request: "also ability to run multiple
+projects like openclaw ... make any updates you think are necessary to the
+codebase." Two things came out of actually acting on that, not just the
+one that was asked for.
+
+**What was asked for — built and wired end to end:**
+- `autobot/agent/orchestrator_dispatch.py` (new) — the write-capable half
+  of the multi-project orchestrator. `dispatch_on()` sends one real
+  instruction to one tracked project's AI backend (Claude Code or
+  Antigravity, resuming its prior session); `dispatch_on_all()` runs many
+  projects **concurrently**, bounded by an `asyncio.Semaphore`
+  (`AUTOBOT_ORCHESTRATOR_MAX_CONCURRENT`, default 3) — OpenClaw's actual
+  pattern (per Dalton's own `THINKING_AND_DECISIONS.md` notes) is stateless
+  turns over a persistent on-disk workspace plus a global concurrency
+  throttle, not unbounded parallel dispatch. One project's crash/timeout
+  never affects another's — proven with real timing-based tests
+  (`test_projects_actually_run_concurrently_not_sequentially`,
+  `test_semaphore_bounds_actual_concurrency`), not just mocked call counts.
+- Kept as a **separate module** from Round 6's `orchestrator_checkin.py`
+  rather than merged into it — that module's docstring explicitly deferred
+  write-capable dispatch pending "an explicit, considered decision," the
+  same way Kaggle's unattended-autonomy question got one earlier this
+  project. Dalton's request IS that decision; the separation means the
+  already-safe read-only check-in path was never put at risk making it.
+- **`autobot/cli.py`** — `--register-project` / `--project-dir` /
+  `--project-backend` / `--project-intent`, `--list-projects`,
+  `--check-in [NAME]`, `--dispatch NAME INSTRUCTION`, `--dispatch-all FILE`.
+  Write access stays opt-in and per-project (a `--dispatch-all` JSON file
+  can carry `permission_modes`/`skip_permissions` overrides keyed by
+  project name); the default for every project not explicitly overridden
+  is still "plan" / read-only, inherited from the bridge functions rather
+  than reinvented here.
+- Kaggle's own account-wide hardware caps enforced as a real semaphore
+  (`autobot/computer/kaggle_watchdog.py`: `KAGGLE_GPU_SLOT_LIMIT = 2`,
+  `KAGGLE_CPU_SLOT_LIMIT = 4`, `check_capacity()`), wired into
+  `push_kernel()` — necessary specifically *because* multiple
+  Kaggle-competition projects can now be dispatched concurrently through
+  the orchestrator, and Kaggle's kernel slots are a real, hard,
+  account-wide limit that concurrent dispatch could otherwise blow through
+  without anything ever calling the real API to find out.
+
+**What "make any updates you think are necessary" surfaced, unprompted:**
+- Grepped for callers of Round 6's `project_registry.py` and
+  `orchestrator_checkin.py` before building on top of them, on the "verify
+  before building" discipline this project has used all along — found
+  **zero** production callers anywhere in `cli.py` or `web/app.py`. Both
+  modules were fully built and fully tested in Round 6, and had been
+  sitting in the exact "Built, but still not wired to a real run" state
+  this roadmap exists to catch, for an entire round, silently. This CLI
+  wiring is that connection finally getting made — for both the Round 6
+  code and the new Round 8 dispatch module at once.
+- `autobot/knowledge/project_registry.py`'s `_save()` was a plain
+  `path.write_text()` — flagged in Round 6 as safe only because that
+  round's only caller was a genuinely sequential for-loop. Round 8's
+  `dispatch_on_all()` is exactly the concurrent caller that assumption was
+  waiting for (multiple `asyncio` tasks calling `record_check_in()` /
+  `update_session()` at once). Fixed to the same atomic
+  temp-file-then-rename pattern already used by
+  `kaggle_watchdog.py`'s `KaggleJobLedger.save()`.
+- `autobot/integrations/claude_code_bridge.py` was missing the
+  nonexistent-`cwd` guard that `antigravity_bridge.py` already had (flagged
+  in Round 6 as "real but out of scope for that round's diff"). A stale or
+  moved `working_dir` on a `TrackedProject` is a real, now-live risk the
+  moment `orchestrator_dispatch.py` can dispatch to it, so the fix was
+  ported over rather than left for a third round to rediscover.
+
+**Verified, not assumed:** full test suite run after every change (244
+passing, up from 197 at the end of Round 7 — 47 new tests, all exercising
+real behavior: actual concurrency timing, actual capacity-limit
+enforcement, actual CLI argument parsing via `--help`, actual registry
+persistence across separate `ProjectRegistry` instances); `python -m
+autobot.cli --help` actually run to confirm the new flags parse, not just
+that the file imports; `import autobot.web.app` actually run, not just
+syntax-checked.
+
+**Deliberately still deferred:**
+- No dashboard endpoints for the orchestrator yet (`/api/orchestrator/...`
+  mirroring Round 7's `/api/kaggle/jobs`). The CLI surface needed to exist
+  and be tested first — a dashboard endpoint for concurrent multi-project
+  dispatch is a reasonable Round 9 addition, not one to rush in alongside
+  the CLI wiring itself.
+- No automatic/unattended dispatch loop (nothing calls `dispatch_on_all()`
+  on a timer). Every dispatch in this round is triggered by an explicit
+  command — the same posture Kaggle's watchdog took before its own
+  explicit unattended-autonomy conversation happened. If Dalton wants
+  scheduled/autonomous multi-project dispatch later, that's its own
+  explicit decision, same pattern as before.
+
 ## Sequencing
 
 Ordered by what unlocks the most, and by what's cheapest to verify is
@@ -515,11 +652,12 @@ revisited on purpose, not skipped past because the read-only half shipped
 and looked done.
 
 **Verification for this round specifically:** every new module above has
-real behavioral tests (92 new tests this round: 13 unattended-approval +
-21 antigravity-bridge + 6 antigravity-tool + 5 antigravity-DANGER-pattern
-+ 23 project-registry + 24 orchestrator-checkin — run against the actual
+real behavioral tests (97 new tests this round: 13 unattended-approval +
+23 antigravity-bridge + 6 antigravity-tool + 5 antigravity-DANGER-pattern
++ 26 project-registry + 24 orchestrator-checkin — run against the actual
 code, not mocks of the modules under test, per the "Verification
-standard" below). The Antigravity catalog wiring specifically
+standard" below; 5 of those 97 came from the adversarial pass below, which
+found real bugs the original tests didn't). The Antigravity catalog wiring specifically
 was also confirmed by direct instantiation and a real dispatcher call, the
 same standard Round 5's CDP-removal fix was held to, precisely because
 this round started from an explicit user complaint that earlier work
@@ -536,6 +674,208 @@ UI for the user to register/browse/forget tracked projects (the registry
 above only has a Python API so far — a CLI or dashboard surface for it is
 the natural next step once the read-only check-in loop has real usage to
 learn from).
+
+**Adversarial review pass (separate from the "write it, test it" work
+above — a second, skeptical reader instructed specifically not to trust
+that the author's own tests were sufficient) found two real bugs, both
+fixed, both with regression tests, bringing this round's test count to
+164:**
+- **`project_registry.py`'s `_safe_name()` let two different project
+  names collide onto the same storage file.** Two names differing only in
+  separator characters (`"Foo Bar"` vs `"Foo-Bar"`) slugged to the
+  identical filename, so registering the second silently overwrote the
+  first — including carrying over a session id from the wrong backend
+  (a Claude Code session id ending up passed to `agy --conversation`) and
+  making the first project vanish from `list_all()` entirely. Fixed by
+  appending a short hash of the case-folded name to the slug, so distinct
+  names can never collide while re-registering the same name (any casing)
+  still resolves to the same project, preserving the existing
+  keep-the-session-on-re-register behavior.
+- **`antigravity_bridge.py` misreported a missing/renamed project
+  directory as "agy CLI not found on PATH."** `subprocess.run(cwd=...)`
+  raises the *same* `FileNotFoundError` the code already caught for "the
+  `agy` binary itself vanished from PATH" — so a project whose folder got
+  moved or deleted since registration (a real scenario for the
+  orchestrator, which passes `cwd=project.working_dir` straight from the
+  registry) got told to go reinstall a CLI that was never the problem,
+  masking the actual fix (correct the registry's stored path). Fixed with
+  an explicit directory check before ever reaching `subprocess.run`, with
+  its own clear error message.
+
+Also flagged, deliberately not fixed as part of this pass: `project_registry.py`'s
+`_save()` has no file locking (bare `write_text()`, no temp-file+rename) —
+consistent with `skill_distiller.py`'s existing convention this module
+was built to mirror, and not triggered by today's only caller
+(`check_in_on_all()`'s genuinely sequential for-loop), but worth a real
+decision before this registry gets a concurrent caller. And
+`claude_code_bridge.py` has the identical cwd-misdiagnosis bug just fixed
+in `antigravity_bridge.py` — out of scope for this round's diff, but the
+two files are meant to be kept in sync line-by-line, so it should be
+ported over in a future pass.
+
+### Round 7 — async job watchdog, Kaggle SDK compat hardening, and real-competition-derived lessons
+
+Unlike every prior round, this one had a genuine empirical corpus behind
+it before any code was written: Dalton ran three real competitions
+through Antigravity against his actual Kaggle account specifically to
+find out where an LLM-driven agent breaks against real infrastructure —
+`biohub_cell_tracking` (a strict Code Competition, 3D U-Net cell
+tracking), `ieee_traffic_flow` (a physics-constrained state-reconstruction
+benchmark), and `s6e9_ev_prediction` (a synthetic tabular Playground
+competition, pushed to Top 5% / Rank #131 of 2,683). Each has a
+`THINKING_AND_DECISIONS.md` in `competitions/` with the real experiment
+log, and the cross-competition synthesis is
+`AUTOBOT_AUTONOMOUS_EXECUTION_CHALLENGES.md` in the project root. These
+aren't hypothetical — the leaderboard CSVs in `competitions/*/leaderboard/`
+are real downloads with real competitor names and real timestamps, the
+`submission.csv` files are real (7.8MB+), and the submission IDs and
+kernel slugs in the THINKING_AND_DECISIONS.md files are bound to
+Dalton's real Kaggle username. This round's job was translating that
+corpus into actual code changes, not just reading it.
+
+**The central finding, and the one this round is mostly about:** at
+23:34 during the S6E9 run, a TabPFN kernel was pushed, a status check
+returned RUNNING, and the agent told the user it was running and moved on
+to the next task. 19 seconds later the kernel crashed
+(`TabPFNLicenseError`). Nothing caught it — the agent doesn't run as a
+daemon; once its turn ends it's fully dormant until the user speaks again
+— and the failure sat undetected until the user manually asked "check if
+it's really still running." The user's own root-cause diagnosis (recorded
+in `s6e9_ev_prediction/THINKING_AND_DECISIONS.md` section 2.C) is exactly
+right and is worth stating plainly: an LLM agent is a turn-based reactive
+process (input → reason → tool calls → message → **halt**), not a
+continuous loop, Kaggle doesn't push webhooks on failure, and roughly 80%
+of cloud job failures happen in the first 60 seconds — precisely the
+window an agent is most likely to have already stopped watching. No
+amount of "try to remember to check back" prompting fixes a structural
+gap; it needed actual scaffolding.
+
+**What got built, in `autobot/computer/kaggle_watchdog.py` (new module,
+pure state + one bounded blocking check, no thread/clock of its own):**
+- `KaggleJobLedger` — a JSON-backed, on-disk record of every kernel job
+  Autobot has dispatched (status, dispatch time, liveness-verified flag,
+  error log, capped history). The point of putting this on disk rather
+  than in conversation memory or process memory is exactly to survive the
+  thing that broke in the TabPFN incident: a dead conversation, or a
+  process that already exited.
+- `verify_liveness()` — the "60-Second Liveness Verification Rule" from
+  the lessons doc, as code: checks kernel status at t+30s and t+60s
+  (configurable) before ever reporting a push as successfully launched.
+  Wired into `kaggle_tool.py`'s `push_kernel()` as the default behavior
+  (`verify_liveness=True`) — it now blocks for up to 60s and returns
+  either "Liveness verified..." or "LIVENESS CHECK FAILED...", so an agent
+  calling `push_kernel` literally cannot repeat the TabPFN mistake: the
+  return value already contains the checked-at-t+60s status, not just the
+  push acknowledgment. Skipped automatically when kernel-metadata.json has
+  no `id` field to track (keeps the original, pre-Round-7 tests passing
+  unchanged) or when explicitly disabled for a fire-and-forget dispatch.
+- `poll_pending()` — a cheap, non-blocking sweep across every job the
+  ledger knows about, for something *else* to call on its own schedule.
+  That something else is `autobot/web/app.py`'s new
+  `_kaggle_watchdog_loop()` background asyncio task, started from
+  `lifespan()` and polling every 30s (`AUTOBOT_KAGGLE_WATCHDOG_INTERVAL`)
+  — the FastAPI server is the one part of Autobot that's actually
+  long-lived (a CLI `autobot "<task>"` run is one process that exits when
+  the task finishes; it structurally cannot be the thing watching a
+  multi-minute job). Status changes get pushed through the server's
+  existing `_log()`/`_broadcast()` mechanism, so they show up in the
+  dashboard's live log for free. A new `GET /api/kaggle/jobs` endpoint
+  dumps the ledger on demand. For when the server isn't running at all, a
+  new `autobot --jobs` CLI command does the same poll-and-print
+  synchronously, once, and exits.
+
+This is a deliberately modest version of the "decoupled supervisor
+daemon" the lessons doc calls for — not a separate always-running OS
+service, just the persistent process Autobot already has (the dashboard
+server) doing something useful with its lifetime. A true standalone
+daemon (survives even when the dashboard isn't running) is a bigger,
+separate piece of scope and is listed below as explicitly deferred, not
+silently dropped.
+
+**Kaggle SDK drift, found and fixed (the proximate bug that started this
+round, before the architecture work above):** the installed `kaggle==2.2.4`
+(kagglesdk-backed) package had drifted from what `kaggle_tool.py` was
+written against, confirmed live against Dalton's real, authenticated
+account:
+- `list_competitions()` — `competitions_list()` now returns an
+  `ApiListCompetitionsResponse` wrapper, not a plain list. Fixed with a
+  defensive `getattr(response, "competitions", response)` that works
+  against both the old and new shapes. Also newly documented: `ref` is now
+  a full URL, not a bare slug.
+- `get_leaderboard()` — its old method, `competition_view_leaderboard()`,
+  no longer exists on the installed `KaggleApi` at all (`AttributeError`).
+  Rather than wire in Python's fuzzy suggestion
+  (`competition_leaderboard_cli`) without verifying its return shape, this
+  was rewritten to shell out to `kaggle competitions leaderboard
+  download` — which is *independently proven*, not guessed: the real CSVs
+  in `competitions/*/leaderboard/` on Dalton's machine are that exact
+  command's output, with the exact header this method now parses
+  (`Rank,TeamId,TeamName,LastSubmissionDate,Score,SubmissionCount,
+  TeamMemberUserNames`). Reclassified SAFE-tier (read-only).
+- **New:** `submit_code_competition(competition, kernel, version,
+  file_path, message)` — strict Code Competitions (like Biohub Cell
+  Tracking) reject a bare CSV upload via `submit()` outright (`400:
+  Submission not allowed: This competition only accepts Submissions from
+  Notebooks`) and require the kernel-version-bound form. The exact CLI
+  command this shells out to
+  (`kaggle competitions submit -c ... -k ... -v ... -f ... -m ...`) is
+  the one proven working in
+  `competitions/biohub_cell_tracking/THINKING_AND_DECISIONS.md` section
+  4.4, against Dalton's real account. IRREVERSIBLE-tier, same as
+  `submit()` — added to `approval.py`'s pattern list, not just
+  `kaggle_tool.py`.
+- **New:** `list_top_kernels(competition)` — the "Phase 0 SOTA Discovery"
+  step from the lessons doc (`kaggle kernels list --competition ...
+  --sort-by scoreDescending`, read-only, SAFE-tier). The IEEE Traffic Flow
+  post-mortem in the lessons doc is the concrete argument for this
+  existing at all: an agent built a baseline from a stale Sep-8 community
+  notebook, unaware the organizers had published an official reference
+  repo on Sep-10 that had already fixed the exact bug capping its score.
+  `system_prompt.md` now tells the agent to call this before writing a
+  baseline from scratch for a new competition, not after the first
+  disappointing submission.
+- The Python-API-based methods (`pull_kernel`/`push_kernel`/
+  `kernel_status`/`kernel_output`/`list_competitions`/`download_data`/
+  `submit`) were left on the Python API — no evidence any of them are
+  broken, and the project's now-twice-confirmed lesson is to fix what's
+  actually shown broken, not preemptively rewrite everything shelling out
+  "just in case."
+
+**Other real lessons captured but deliberately NOT turned into a hard
+runtime gate this round** (recorded here so they're a decision made on
+purpose, not lost): the lessons doc's "Mandatory Phase 0 SOTA Gate"
+proposes a hard `MissingSOTAGateError` that blocks training code from
+running at all until `list_top_kernels`-equivalent discovery has
+happened. This round added the tool and the system-prompt instruction to
+use it, but not the hard enforcement — Autobot has no reliable way from
+inside `kaggle_tool.py` to know "has the agent actually looked at the
+results" versus "did it just call the method and ignore the output," so a
+hard gate here would either be trivially satisfiable (call it, discard
+it) or need a much larger piece of state-tracking than this round's scope.
+Worth revisiting if the softer version (prompt instruction) proves
+insufficient in practice.
+
+Similarly not built: the "OpenClaw dormant specialist lanes" multi-
+subagent architecture the lessons doc sketches (isolated per-competition
+conversation threads, a compute-resource semaphore for GPU/CPU slot
+allocation across concurrent Kaggle kernels, event-driven wake instead of
+polling). The watchdog above solves the specific, demonstrated failure
+(silent job death going undetected); the full multi-agent orchestration
+picture is a materially bigger architectural undertaking that deserves
+its own round with its own explicit scoping conversation, not a rider on
+this one.
+
+**Verification for this round:** 33 new/changed tests (12 kaggle_watchdog
+ledger/liveness/poll tests, 15 kaggle_tool tests covering the SDK fixes
+and the two new CLI-backed methods, 4 approval-pattern tests for the new
+SAFE/IRREVERSIBLE classifications, 2 CLI `--jobs` tests) — full suite run
+or a rewritten regex might slip. `autobot/web/app.py` was actually
+imported (not just syntax-checked) to confirm the new background task and
+`/api/kaggle/jobs` route wire up without error, matching the verification
+standard below. The two real SDK-compat bugs (list_competitions'
+wrapper-object return, get_leaderboard's removed method) were confirmed
+against Dalton's real, live, authenticated Kaggle account before being
+fixed — not guessed at from documentation.
 
 ## Verification standard
 
@@ -571,3 +911,69 @@ under the user's identity — stays hard-gated in every mode. This matters
 more, not less, as more capability gets added (native app control, full
 computer access): a wrong action across a bigger surface is a bigger
 mistake, not a smaller one.
+
+## Finding (2026-09-24): `verify_liveness`'s t+30s check has a false-positive-error mode under real multi-agent contention, and it silently corrupts capacity accounting afterward
+
+Discovered live, not hypothesized, while running Gemma 4 Developer Agent
+and IEEE AI Emulation competition work concurrently with another agent
+already using this account (`autobot-gemma4-exp1-baseline-zeroshot` and
+`autobot-emulation-exp3-dual-family-ensemble`, both pushed today) — this
+is exactly the "several Kaggle-competition projects at once" scenario
+`push_kernel`'s capacity enforcement was built for, so it's a realistic
+environment to have caught this in, not a contrived edge case.
+
+**What happened, twice, independently:** `push_kernel()` reported
+`LIVENESS CHECK FAILED at t+[30]s: status=error` immediately after a
+successful push. In both cases, a manual `kaggle kernels status <ref>`
+moments later showed `RUNNING` — the kernel was actually fine. Kaggle's
+own status API appears to report a transient `ERROR`-like state during
+the first ~30s worker-assignment window (plausibly more likely to surface
+under real scheduling contention, i.e. exactly when several kernels are
+being dispatched around the same time across agents/projects), and
+`verify_liveness` (`autobot/computer/kaggle_watchdog.py`) treats the
+*first* `error` reading as final truth — it returns immediately
+(`survived_init: False`) rather than using its second scheduled check
+(`grace_checks=(30, 60)` — the 60s check never runs once 30s reads
+`error`) to confirm.
+
+**Why this is worse than a wrong log line:** `_TERMINAL_STATUSES` includes
+`"error"`, and `KaggleJobLedger.pending()` (which
+`active_hardware_count()` — the actual GPU/CPU capacity check
+`push_kernel` gates on — is built from) excludes anything terminal. So a
+false "error" doesn't just mislead a human reading the message once; it
+permanently drops that job from `poll_pending()`'s future re-checks *and*
+from capacity accounting, even though the job is really still occupying a
+real Kaggle GPU/CPU slot. Two consecutive false positives during this
+session briefly made the ledger think 0-1 GPU slots were in use when the
+true number was 2/2 — the exact oversubscription scenario capacity
+enforcement exists to prevent, self-inflicted by the liveness check
+meant to protect it. (Worked around by hand this session via
+`ledger.update(kernel, "running")` after manually confirming real status
+— not a fix, just an unblock.)
+
+**Suggested fix, not yet implemented:** don't let a single `error` reading
+short-circuit `verify_liveness` before all `grace_checks` are exhausted —
+either require two consecutive `error` reads (one full grace-check
+interval apart) before treating it as real, or explicitly re-check once
+more immediately before returning `survived_init: False`. Separately,
+`_TERMINAL_STATUSES`/`pending()` conflating "confirmed dead" with "last
+reading happened to be error" is the deeper issue — capacity accounting
+arguably should trust a `kernels_status()` poll taken *at capacity-check
+time*, not a cached liveness verdict from whenever the job was first
+dispatched, for exactly this reason.
+
+**Independent corroboration, same session (a parallel agent working
+`umud_muscle_architecture`):** hit the identical t+30s false-error flicker
+on both of its own pushes, and separately caught the ledger stale in the
+*other* direction too — a job recorded `running`/`gpu` in the ledger that
+was actually `COMPLETE` live. That confirms the deeper point above
+concretely: `check_capacity()` (`kaggle_watchdog.py`) never makes a live
+API call, it only ever trusts whatever `poll_pending()` last wrote — and
+nothing in the current `push_kernel` path calls `poll_pending()` before
+checking capacity. Two agents pushing concurrently this session happened
+to have their staleness errors cancel out (real count matched what a
+stale ledger implied, by luck), which is exactly the "worked by
+coincidence" failure mode worth fixing before relying on this for real
+multi-agent concurrency: `check_capacity()` should probably force a fresh
+`kernels_status()` on every non-terminal job it's about to count, not
+trust whatever the ledger says was true whenever it was last written.

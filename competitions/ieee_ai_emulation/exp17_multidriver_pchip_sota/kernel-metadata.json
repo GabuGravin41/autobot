@@ -1,0 +1,17 @@
+{
+  "id": "daltongabrielomondi/autobot-emulation-exp17-multidriver-pchip-sota",
+  "title": "Autobot Emulation Exp17 MultiDriver PCHIP SOTA",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "ieee-bigdata-cup-2026-ai-emulation-challenge"
+  ],
+  "dataset_sources": [
+    "zhihaow/carbonglobe"
+  ]
+}

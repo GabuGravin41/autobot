@@ -258,4 +258,20 @@ def _create_llm_client() -> Any | None:
     if oa_key:
         return OpenAI(api_key=oa_key)
 
+    # No API key at all: fall back to any OpenAI-compatible endpoint or free
+    # tier configured for the butler's manager, and finally to the Claude /
+    # Antigravity subscriptions via their CLIs (see autobot/llm/). Slower per
+    # step than a direct API, but it means the desktop agent works without a
+    # paid key.
+    base_url = _key("AUTOBOT_LLM_BASE_URL")
+    if base_url:
+        return OpenAI(base_url=base_url, api_key=_key("AUTOBOT_LLM_API_KEY") or "not-needed")
+    try:
+        from autobot.llm import ChatCompletionsShim, get_manager_llm
+        chain = get_manager_llm()
+        if chain is not None:
+            logger.info(f"No API key found; CoreLoop will use {chain.describe()}")
+            return ChatCompletionsShim(chain)
+    except Exception as e:
+        logger.warning(f"LLM fallback unavailable: {e}")
     return None

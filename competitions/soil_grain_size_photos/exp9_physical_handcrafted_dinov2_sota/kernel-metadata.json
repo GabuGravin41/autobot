@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-soil-exp9-physical-handcrafted-dinov2-sota",
+  "title": "Autobot Soil Exp9 Physical Handcrafted DINOv2 SOTA",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "soil-grain-size-from-photos"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

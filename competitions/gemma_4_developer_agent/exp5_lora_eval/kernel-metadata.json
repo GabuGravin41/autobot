@@ -1,0 +1,19 @@
+{
+  "id": "daltongabrielomondi/autobot-gemma4-exp5-lora-eval",
+  "title": "Autobot Gemma4 Exp5 Lora Eval",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "gemma-4-developer-agent"
+  ],
+  "kernel_sources": [
+    "daltongabrielomondi/autobot-gemma4-exp4-lora-sft"
+  ],
+  "model_sources": [
+    "google/gemma-4/transformers/gemma-4-e4b-it/1"
+  ]
+}

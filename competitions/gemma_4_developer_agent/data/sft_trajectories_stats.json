@@ -1,0 +1,26 @@
+{
+  "n_input_tasks": 129,
+  "n_examples_written": 121,
+  "skip_reasons": {
+    "no_usable_hunks": 1,
+    "empty_or_oversized_patch": 7
+  },
+  "assistant_turns_per_example": {
+    "min": 3,
+    "median": 5,
+    "mean": 6.91,
+    "max": 39
+  },
+  "hunks_per_example": {
+    "min": 1,
+    "median": 2,
+    "mean": 2.99,
+    "max": 19
+  },
+  "by_repo": {
+    "fastapi/fastapi": 60,
+    "psf/requests": 13,
+    "Textualize/rich": 47,
+    "encode/httpx": 1
+  }
+}

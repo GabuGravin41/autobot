@@ -62,3 +62,7 @@ numpy>=1.24.0
 
 # ── Packaging (dev/build only) ────────────────────────────────────
 # pyinstaller>=6.0.0        # Uncomment when building desktop AppImage
+
+# Butler: Gmail lane (optional until you connect Gmail — see GMAIL_SETUP.md)
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.2.0

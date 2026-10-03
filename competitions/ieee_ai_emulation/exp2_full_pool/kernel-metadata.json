@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-emulation-exp2-full-pool-lgbm-xgb",
+  "title": "Autobot Emulation Exp2 Full Pool LGBM XGB",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "true",
+  "competition_sources": [
+    "ieee-bigdata-cup-2026-ai-emulation-challenge"
+  ],
+  "dataset_sources": [
+    "zhihaow/carbonglobe"
+  ]
+}

@@ -18,7 +18,10 @@ class EnvironmentMemory:
     """
 
     def __init__(self, memory_file: Path | None = None) -> None:
-        self.memory_file = memory_file or (Path.cwd() / "autobot" / "knowledge" / "environment_knowledge.json")
+        if memory_file is None:
+            from autobot.paths import knowledge_dir
+            memory_file = knowledge_dir() / "environment_knowledge.json"
+        self.memory_file = memory_file
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         self.state: dict[str, Any] = self._load()
 

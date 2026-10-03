@@ -500,8 +500,10 @@ def check_env_file() -> Check:
 
 def check_writable_dirs() -> list[Check]:
     """Directories the agent writes to during a run."""
+    from autobot.paths import autobot_home, knowledge_dir
     targets = {
-        "learned skills": Path.cwd() / "autobot" / "knowledge" / "skills",
+        "autobot home (state)": autobot_home(),
+        "learned skills": knowledge_dir("skills"),
         "run history": Path.cwd() / "runs",
     }
     checks = []
@@ -522,7 +524,8 @@ def check_writable_dirs() -> list[Check]:
 
 def check_learned_skills() -> Check:
     """How much the agent has learned - directly predicts token cost per run."""
-    skills_dir = Path.cwd() / "autobot" / "knowledge" / "skills"
+    from autobot.paths import knowledge_dir
+    skills_dir = knowledge_dir("skills")
     if not skills_dir.exists():
         return Check("learned skills", WARN, "none yet - first runs cost full price")
     files = list(skills_dir.glob("*.json"))

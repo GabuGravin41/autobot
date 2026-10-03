@@ -1,231 +1,170 @@
 """
 Offline tests for autobot/integrations/antigravity_bridge.py.
 
-Every subprocess call is mocked — no real `agy` CLI is invoked and no real
-API calls are made. Mirrors tests/test_claude_code_bridge.py's structure
-and coverage deliberately closely (see antigravity_bridge.py's own
-docstring for why): argv construction (especially skip_permissions and
-session-resume flags), never raising, correct handling of each CLI failure
-mode, and the one thing this bridge checks that claude_code_bridge.py
-doesn't need to — agy's JSON envelope carries its own `status` field
-independent of the process exit code.
+run_cli is mocked; no real `agy` is invoked. Output shape follows the
+documented headless JSON envelope (antigravity.google/docs/cli/headless/):
+response, conversation_id, status, structured_output.
 """
 from __future__ import annotations
 
 import json
-import subprocess
-from unittest.mock import MagicMock, patch
+from pathlib import Path
+from unittest.mock import patch
 
 from autobot.integrations import antigravity_bridge
+from autobot.integrations.cli_exec import CliResult
+
+WHICH = "shutil.which"
+RUN = "autobot.integrations.antigravity_bridge.run_cli"
+
+OK = json.dumps({"response": "done", "conversation_id": "conv-1", "status": "SUCCESS"})
 
 
-def _proc(returncode=0, stdout="", stderr=""):
-    m = MagicMock()
-    m.returncode = returncode
-    m.stdout = stdout
-    m.stderr = stderr
-    return m
+def _res(code=0, out="", err="", **kw):
+    return CliResult(code, out, err, **kw)
+
+
+def _argv(run, call=-1):
+    return run.call_args_list[call][0][0]
 
 
 class TestAvailability:
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    def test_available(self, _mock):
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    def test_available(self, _):
         assert antigravity_bridge.is_available() is True
 
-    @patch("shutil.which", return_value=None)
-    def test_not_available(self, _mock):
+    @patch(WHICH, return_value=None)
+    def test_not_available(self, _):
         assert antigravity_bridge.is_available() is False
 
 
 class TestRunHeadless:
     def test_empty_prompt_rejected(self):
-        result = antigravity_bridge.run_headless("")
-        assert result["ok"] is False
-        assert "prompt" in result["error"]
+        assert antigravity_bridge.run_headless(" ")["ok"] is False
 
-    def test_whitespace_only_prompt_rejected(self):
-        result = antigravity_bridge.run_headless("   ")
-        assert result["ok"] is False
+    @patch(WHICH, return_value=None)
+    def test_cli_not_installed(self, _):
+        r = antigravity_bridge.run_headless("x")
+        assert r["ok"] is False and r["error_class"] == "not_installed"
 
-    @patch("shutil.which", return_value=None)
-    def test_cli_not_installed(self, _which):
-        result = antigravity_bridge.run_headless("do something")
-        assert result["ok"] is False
-        assert "not found" in result["error"]
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_success_parses_json(self, run, _):
+        run.return_value = _res(0, OK)
+        r = antigravity_bridge.run_headless("x")
+        assert r["ok"] is True and r["data"]["conversation_id"] == "conv-1"
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_success_parses_json(self, mock_run, _which):
-        payload = {"status": "SUCCESS", "response": "Done", "conversation_id": "c1"}
-        mock_run.return_value = _proc(0, stdout=json.dumps(payload))
-        result = antigravity_bridge.run_headless("do something")
-        assert result["ok"] is True
-        assert result["data"]["response"] == "Done"
-        assert result["data"]["conversation_id"] == "c1"
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_print_timeout_passed_so_agy_does_not_kill_itself_at_5m(self, run, _):
+        run.return_value = _res(0, OK)
+        antigravity_bridge.run_headless("x", timeout=1800)
+        args = _argv(run)
+        assert args[args.index("--print-timeout") + 1] == "30m"
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_default_does_not_skip_permissions(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("look at this code")
-        args = mock_run.call_args[0][0]
-        assert args[0] == "agy"
-        assert "-p" in args
-        assert "--dangerously-skip-permissions" not in args
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_old_version_without_print_timeout_is_retried(self, run, _):
+        run.side_effect = [_res(2, "", "unknown flag: --print-timeout"), _res(0, OK)]
+        r = antigravity_bridge.run_headless("x")
+        assert r["ok"] is True
+        assert "--print-timeout" not in _argv(run, 1)
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_skip_permissions_true_forwarded(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("edit something", skip_permissions=True)
-        args = mock_run.call_args[0][0]
-        assert "--dangerously-skip-permissions" in args
-
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_output_format_json_always_set(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_default_does_not_skip_permissions(self, run, _):
+        run.return_value = _res(0, OK)
         antigravity_bridge.run_headless("x")
-        args = mock_run.call_args[0][0]
-        idx = args.index("--output-format")
-        assert args[idx + 1] == "json"
+        assert "--dangerously-skip-permissions" not in _argv(run)
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_model_effort_agent_forwarded(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("x", model="gemini-3.8-flash-high", effort="high", agent="coder")
-        args = mock_run.call_args[0][0]
-        assert args[args.index("--model") + 1] == "gemini-3.8-flash-high"
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_skip_permissions_true_forwarded(self, run, _):
+        run.return_value = _res(0, OK)
+        antigravity_bridge.run_headless("x", skip_permissions=True)
+        assert "--dangerously-skip-permissions" in _argv(run)
+
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_model_effort_agent_forwarded(self, run, _):
+        run.return_value = _res(0, OK)
+        antigravity_bridge.run_headless("x", model="m", effort="high", agent="a")
+        args = _argv(run)
+        assert args[args.index("--model") + 1] == "m"
         assert args[args.index("--effort") + 1] == "high"
-        assert args[args.index("--agent") + 1] == "coder"
+        assert args[args.index("--agent") + 1] == "a"
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_no_optional_flags_when_omitted(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("x")
-        args = mock_run.call_args[0][0]
-        assert "--model" not in args
-        assert "--effort" not in args
-        assert "--agent" not in args
-
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_conversation_id_flag(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("x", conversation_id="conv-1")
-        args = mock_run.call_args[0][0]
-        assert args[args.index("--conversation") + 1] == "conv-1"
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_conversation_id_takes_priority_over_continue(self, run, _):
+        run.return_value = _res(0, OK)
+        antigravity_bridge.run_headless("x", conversation_id="c9", continue_session=True)
+        args = _argv(run)
+        assert args[args.index("--conversation") + 1] == "c9"
         assert "--continue" not in args
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_continue_flag(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("x", continue_session=True)
-        args = mock_run.call_args[0][0]
-        assert "--continue" in args
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_status_not_success_is_failure(self, run, _):
+        run.return_value = _res(0, json.dumps({"status": "ERROR", "error": "quota exceeded"}))
+        r = antigravity_bridge.run_headless("x")
+        assert r["ok"] is False and "quota exceeded" in r["error"]
+        assert r["error_class"] == "rate_limited"
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_conversation_id_takes_priority_over_continue(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("x", continue_session=True, conversation_id="conv-2")
-        args = mock_run.call_args[0][0]
-        assert "--conversation" in args
-        assert "--continue" not in args
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_nonzero_exit_surfaces_stderr(self, run, _):
+        run.return_value = _res(1, "", "kaput")
+        r = antigravity_bridge.run_headless("x")
+        assert r["ok"] is False and "kaput" in r["error"]
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_nonzero_exit_surfaces_stderr(self, mock_run, _which):
-        mock_run.return_value = _proc(1, stdout="", stderr="authentication required")
-        result = antigravity_bridge.run_headless("x")
-        assert result["ok"] is False
-        assert "authentication" in result["error"]
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_timeout(self, run, _):
+        run.return_value = _res(None, "", "", timed_out=True)
+        r = antigravity_bridge.run_headless("x", timeout=5)
+        assert r["ok"] is False and r["error_class"] == "timeout"
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="agy", timeout=5))
-    def test_timeout(self, _mock_run, _which):
-        result = antigravity_bridge.run_headless("x", timeout=5)
-        assert result["ok"] is False
-        assert "timed out" in result["error"]
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_json_schema_written_to_file_and_cleaned_up(self, run, _):
+        seen = {}
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_malformed_json_output_does_not_fail_the_call(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout="not json at all")
-        result = antigravity_bridge.run_headless("x")
-        assert result["ok"] is True
-        assert result["data"]["result"] == "not json at all"
-        assert "warning" in result["error"]
+        def fake(argv, **kw):
+            path = argv[argv.index("--json-schema") + 1]
+            seen["path"] = path
+            seen["content"] = json.loads(Path(path).read_text())
+            return _res(0, json.dumps({"status": "SUCCESS", "structured_output": {"a": 1}}))
+        run.side_effect = fake
+        r = antigravity_bridge.run_headless("x", json_schema={"type": "object"})
+        assert seen["content"] == {"type": "object"}
+        assert not Path(seen["path"]).exists()
+        assert r["data"]["structured_output"] == {"a": 1}
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_cwd_forwarded_to_subprocess(self, mock_run, _which, tmp_path):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS"}))
-        antigravity_bridge.run_headless("x", cwd=str(tmp_path))
-        assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
+    @patch("autobot.integrations.antigravity_bridge.is_batch_shim", return_value=True)
+    @patch("autobot.integrations.antigravity_bridge.resolve_exe", return_value=r"C:\npm\agy.cmd")
+    @patch(WHICH, return_value=r"C:\npm\agy.cmd")
+    @patch(RUN)
+    def test_multiline_prompt_to_batch_shim_goes_via_file(self, run, _w, _r, _b, tmp_path):
+        (tmp_path / ".git" / "info").mkdir(parents=True)
+        seen = {}
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_nonexistent_cwd_reports_cwd_error_not_cli_missing(self, mock_run, _which, tmp_path):
-        # Regression test: subprocess.run(cwd=...) raises FileNotFoundError
-        # for a missing directory — the SAME exception type the CLI-not-
-        # found path below catches — so without an explicit up-front check,
-        # a stale/deleted project working_dir (very plausible: see
-        # project_registry.py's working_dir field) surfaced as "agy CLI not
-        # found on PATH", actively misleading a caller who has agy
-        # installed just fine. subprocess.run must never even be reached.
-        missing = str(tmp_path / "does-not-exist")
-        result = antigravity_bridge.run_headless("x", cwd=missing)
-        assert result["ok"] is False
-        assert "cwd" in result["error"].lower()
-        assert "does not exist" in result["error"].lower()
-        assert "CLI not found" not in result["error"]
-        mock_run.assert_not_called()
+        def fake(argv, **kw):
+            short = argv[argv.index("-p") + 1]
+            assert "\n" not in short
+            name = short.split(".autobot/")[1].split(" ")[0]
+            seen["text"] = (tmp_path / ".autobot" / name).read_text(encoding="utf-8")
+            return _res(0, OK)
+        run.side_effect = fake
+        prompt = "Step 1: do this\nStep 2: 100% of tests must pass"
+        antigravity_bridge.run_headless(prompt, cwd=str(tmp_path))
+        assert seen["text"] == prompt
+        assert ".autobot/" in (tmp_path / ".git" / "info" / "exclude").read_text()
+        assert list((tmp_path / ".autobot").glob("task_*.md")) == []   # cleaned up
 
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_cwd_that_is_a_file_reports_cwd_error(self, mock_run, _which, tmp_path):
-        f = tmp_path / "not_a_dir.txt"
-        f.write_text("x")
-        result = antigravity_bridge.run_headless("x", cwd=str(f))
-        assert result["ok"] is False
-        assert "cwd" in result["error"].lower()
-        mock_run.assert_not_called()
-
-    # ── status field — the one behavior claude_code_bridge.py doesn't need,
-    # since Claude Code's JSON envelope has no equivalent per-turn status
-    # separate from the process exit code. agy's docs are explicit that a
-    # clean exit (0) can still carry status CANCELED/INTERRUPTED/WAITING/etc,
-    # which is a real distinct outcome a caller checking only returncode
-    # would silently miss. ──────────────────────────────────────────────────
-
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_clean_exit_with_non_success_status_is_reported_as_failure(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "INTERRUPTED", "response": ""}))
-        result = antigravity_bridge.run_headless("x")
-        assert result["ok"] is False
-        assert "INTERRUPTED" in result["error"]
-        # The parsed envelope is still surfaced, not thrown away, so a
-        # caller can inspect exactly what happened rather than just "it failed".
-        assert result["data"]["status"] == "INTERRUPTED"
-
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_status_success_is_ok(self, mock_run, _which):
-        mock_run.return_value = _proc(0, stdout=json.dumps({"status": "SUCCESS", "response": "done"}))
-        result = antigravity_bridge.run_headless("x")
-        assert result["ok"] is True
-
-    @patch("shutil.which", return_value="/usr/local/bin/agy")
-    @patch("subprocess.run")
-    def test_missing_status_field_does_not_fail(self, mock_run, _which):
-        # Malformed-but-valid-JSON output with no status key at all — don't
-        # crash or misreport ok=False just because the field is absent;
-        # treat "no status" as "nothing to disagree with the exit code about".
-        mock_run.return_value = _proc(0, stdout=json.dumps({"response": "done, no status field"}))
-        result = antigravity_bridge.run_headless("x")
-        assert result["ok"] is True
+    @patch(WHICH, return_value="/usr/local/bin/agy")
+    @patch(RUN)
+    def test_nonexistent_cwd_reports_cwd_error(self, run, _, tmp_path):
+        r = antigravity_bridge.run_headless("x", cwd=str(tmp_path / "nope"))
+        assert r["ok"] is False and "does not exist" in r["error"]
+        run.assert_not_called()

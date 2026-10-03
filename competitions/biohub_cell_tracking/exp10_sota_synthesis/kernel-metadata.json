@@ -1,0 +1,20 @@
+{
+  "id": "daltongabrielomondi/autobot-biohub-exp10-sota-synthesis",
+  "title": "Autobot Biohub Exp10 SOTA Synthesis (Det 0.955 + Div 0.70)",
+  "code_file": "harmonic_sota_synthesis.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "dataset_sources": [
+    "daltongabrielomondi/biohub-cell-tracking-ground-truth-pack",
+    "daltongabrielomondi/biohub-ctc-score-wheel",
+    "daltongabrielomondi/biohub-v1284-subvoxel-ensemble",
+    "daltongabrielomondi/biohub-multiview-spatial-fusion-pack"
+  ],
+  "kernel_sources": []
+}

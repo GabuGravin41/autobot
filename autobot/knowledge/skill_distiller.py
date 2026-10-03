@@ -54,7 +54,10 @@ class SkillDistiller:
     """
 
     def __init__(self, skills_dir: Path | None = None) -> None:
-        self.skills_dir = skills_dir or (Path.cwd() / "autobot" / "knowledge" / "skills")
+        if skills_dir is None:
+            from autobot.paths import knowledge_dir
+            skills_dir = knowledge_dir("skills")
+        self.skills_dir = skills_dir
         self.skills_dir.mkdir(parents=True, exist_ok=True)
 
     def save_skill(self, skill: LearnedSkill) -> Path:
@@ -95,6 +98,16 @@ class SkillDistiller:
         If a skill for this goal already exists, its success_count is bumped
         and the proven steps are replaced only when the new run was shorter.
         """
+        # Only a run that ENDED in an explicit successful `done` may produce or
+        # reinforce a "proven approach". This argument used to be ignored, so a
+        # 12-step run that looped until its budget ran out (runs/agent_20260907_181303)
+        # was saved as a proven skill and then injected into every later run
+        # with a similar goal. Failed runs teach nothing reusable here; their
+        # lessons belong in the run log, not in a replayed recipe.
+        if str(result).strip().lower() not in ("success", "ok", "succeeded", "passed"):
+            logger.debug("Not distilling: run did not end in an explicit success.")
+            return None
+
         proven_steps: list[dict[str, Any]] = []
         lessons: list[str] = []
 

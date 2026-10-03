@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/autobot-soil-exp4-dinov2-physical-patch",
+  "title": "Autobot Soil Exp4 Dinov2 Physical Patch",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "soil-grain-size-from-photos"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

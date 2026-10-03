@@ -1,0 +1,19 @@
+{
+  "id": "daltongabrielomondi/autobot-s6e9-nuke10",
+  "title": "Autobot S6E9 Nuke10",
+  "code_file": "nuclear_10x.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [
+    "itzzomkar/ev-adoption-behavior-and-range-anxiety"
+  ],
+  "competition_sources": [
+    "playground-series-s6e9"
+  ],
+  "kernel_sources": [],
+  "model_sources": []
+}

@@ -1,0 +1,18 @@
+{
+  "id": "daltongabrielomondi/autobot-umud-exp6-anatomynet-sota",
+  "title": "Autobot UMUD Exp6 AnatomyNet SOTA",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [
+    "akshaysharma2136/umud-5fold-unet4-sota-models"
+  ],
+  "competition_sources": [
+    "umud-challenge-muscle-architecture-in-ultrasound-data"
+  ],
+  "kernel_sources": []
+}

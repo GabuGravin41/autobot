@@ -1,0 +1,20 @@
+{
+  "id": "daltongabrielomondi/autobot-biohub-exp5-division-precision-sota",
+  "title": "Autobot Biohub Exp5 Division Precision SOTA",
+  "code_file": "harmonic_division_sota.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "dataset_sources": [
+    "pilkwang/biohub-tracking-support-pack-50ep-v1",
+    "pilkwang/biohub-deepcenter-unet3d-center-prior-v1",
+    "pilkwang/biohub-temporal-unet3d-seed314159-v1",
+    "anvithpothula/biohub-v1284-head-s075"
+  ],
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ]
+}

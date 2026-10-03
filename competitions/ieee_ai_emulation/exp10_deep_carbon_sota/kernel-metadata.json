@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-emulation-exp10-deep-carbon-sota",
+  "title": "Autobot Emulation Exp10 Deep Carbon SOTA",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "competition_sources": [
+    "ieee-bigdata-cup-2026-ai-emulation-challenge"
+  ],
+  "dataset_sources": [
+    "zhihaow/carbonglobe"
+  ]
+}

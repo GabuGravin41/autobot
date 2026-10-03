@@ -1,0 +1,27 @@
+{
+  "id": "avikdas567/soil-grain-size-prediction-calibrated-cv-ensemble",
+  "id_no": 125915580,
+  "title": "Soil Grain Size Prediction: Calibrated CV Ensemble",
+  "code_file": "soil-grain-size-prediction-calibrated-cv-ensemble.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [
+    "regression",
+    "computer vision",
+    "ensembling",
+    "pytorch",
+    "image"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [
+    "soil-grain-size-from-photos"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
+}

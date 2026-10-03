@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -63,6 +64,13 @@ logger = logging.getLogger(__name__)
 _TERMINAL_STATUSES = {"complete", "error", "cancelled"}
 
 DEFAULT_LEDGER_PATH = Path(os.path.expanduser("~/.autobot/kaggle_jobs.json"))
+
+
+def default_ledger_path() -> Path:
+    """The ledger lives in Autobot's home (AUTOBOT_HOME, default ~/.autobot),
+    resolved at call time so tests and alternate homes never touch the real one."""
+    home = os.getenv("AUTOBOT_HOME", "").strip()
+    return Path(home).expanduser() / "kaggle_jobs.json" if home else DEFAULT_LEDGER_PATH
 
 # Kaggle Cloud's own hard per-account hardware caps, as documented (and hit
 # in practice) in s6e9_ev_prediction/THINKING_AND_DECISIONS.md section 5.C
@@ -108,8 +116,8 @@ class KaggleJobLedger:
     so there's no need for a real database here.
     """
 
-    def __init__(self, ledger_path: str | Path = DEFAULT_LEDGER_PATH):
-        self.path = Path(ledger_path)
+    def __init__(self, ledger_path: str | Path | None = None):
+        self.path = Path(ledger_path) if ledger_path else default_ledger_path()
         self._jobs: dict[str, JobRecord] = {}
         self.load()
 
@@ -128,10 +136,20 @@ class KaggleJobLedger:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
+        # Unique temp name: a fixed "jobs.json.tmp" made two concurrent
+        # writers rename each other's temp file away (FileNotFoundError).
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         payload = {k: asdict(v) for k, v in self._jobs.items()}
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(self.path)  # atomic on both POSIX and Windows
+
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_suffix(".lock")
+
+    def _locked(self):
+        from autobot.util.filelock import FileLock
+        return FileLock(self.lock_path, timeout=60)
 
     def register(
         self,
@@ -140,20 +158,20 @@ class KaggleJobLedger:
         path: str | None = None,
         hardware: str | None = None,
     ) -> JobRecord:
-        job = JobRecord(kernel=kernel, competition=competition, path=path, hardware=hardware)
-        self._jobs[kernel] = job
-        self.save()
-        return job
+        # Every mutation is lock -> reload -> change -> save, so two processes
+        # (web server watchdog, butler daemon, an agent calling push_kernel)
+        # never overwrite each other's entries with a stale copy.
+        with self._locked():
+            self.load()
+            job = JobRecord(kernel=kernel, competition=competition, path=path, hardware=hardware)
+            self._jobs[kernel] = job
+            self.save()
+            return job
 
     def active_hardware_count(self, hardware: str) -> int:
         """How many non-terminal jobs are currently occupying a slot of this
-        hardware type (`\"gpu\"` or `\"cpu\"`) — the live number to check
-        against KAGGLE_GPU_SLOT_LIMIT/KAGGLE_CPU_SLOT_LIMIT before dispatching
-        another. Jobs with no recorded hardware (registered before Round 8,
-        or by a caller that didn't pass it) don't count either way — they
-        were never tracked for capacity, so counting them would either
-        under- or over-count depending on what they actually were; the
-        honest answer is that this ledger doesn't know."""
+        hardware type ("gpu" or "cpu"). Jobs with no recorded hardware don't
+        count either way — this ledger was never told what they were."""
         return sum(1 for j in self.pending() if j.hardware == hardware)
 
     def get(self, kernel: str) -> JobRecord | None:
@@ -165,31 +183,127 @@ class KaggleJobLedger:
     def pending(self) -> list[JobRecord]:
         return [j for j in self._jobs.values() if j.status not in _TERMINAL_STATUSES]
 
-    def update(self, kernel: str, status: str, error_log: str | None = None) -> JobRecord:
-        job = self._jobs.get(kernel) or self.register(kernel)
-        job.record(status)
-        if error_log is not None:
-            job.error_log = error_log
-        self.save()
-        return job
+    def update(
+        self,
+        kernel: str,
+        status: str,
+        error_log: str | None = None,
+        note: str | None = None,
+        **fields: Any,
+    ) -> JobRecord:
+        with self._locked():
+            self.load()
+            job = self._jobs.get(kernel)
+            if job is None:
+                job = JobRecord(kernel=kernel)
+                self._jobs[kernel] = job
+            if note:
+                job.history.append({"at": time.time(), "status": note})
+            job.record(status)
+            if error_log is not None:
+                job.error_log = error_log
+            for k, v in fields.items():
+                if hasattr(job, k):
+                    setattr(job, k, v)
+            self.save()
+            return job
+
+
+def make_kaggle_api():
+    """Import and authenticate KaggleApi, never letting it kill the caller.
+
+    kaggle 2.x calls sys.exit(1) from import/authenticate when no
+    credentials are found. SystemExit is not an Exception, so every
+    `except Exception` around it (the web server's watchdog loop,
+    `autobot --jobs`, and any long-running daemon) let it through and the
+    whole process exited. Convert it into a RuntimeError here, once.
+    """
+    import contextlib
+    import io
+    try:
+        # kaggle prints a long "Authentication required" help text to stdout
+        # before exiting; keep it out of daemon/CLI logs.
+        with contextlib.redirect_stdout(io.StringIO()):
+            from kaggle.api.kaggle_api_extended import KaggleApi
+            api = KaggleApi()
+            api.authenticate()
+        return api
+    except SystemExit as e:
+        raise RuntimeError(f"Kaggle credentials not configured (kaggle exited with code {e.code})") from None
+    except Exception as e:
+        raise RuntimeError(f"Kaggle API not configured: {e}") from e
+
+
+_STATUS_NAME_MAP = {
+    "QUEUED": "queued",
+    "NEW_SCRIPT": "queued",
+    "RUNNING": "running",
+    "COMPLETE": "complete",
+    "ERROR": "error",
+    "CANCEL_REQUESTED": "cancelled",
+    "CANCEL_ACKNOWLEDGED": "cancelled",
+}
+
+
+def _status_field(raw: Any) -> tuple[str | None, str | None]:
+    """Pull (status_name, failure_message) out of whatever kernels_status returned.
+
+    kaggle 2.x (kagglesdk) returns ApiGetKernelSessionStatusResponse, whose
+    str() is '{"status": "RUNNING", "failureMessage": null}'. The previous
+    normalizer lower-cased that whole string and checked `"fail" in s`
+    first — and "failuremessage" contains "fail" — so EVERY real status,
+    RUNNING and COMPLETE included, came back as "error". That single bug is
+    behind the "LIVENESS CHECK FAILED ... status=error" (with no error log)
+    reported independently in five competitions, and behind jobs silently
+    dropping out of capacity accounting (poll_pending marked them "error",
+    a terminal state). Read the status FIELD, never substrings of a dump.
+    """
+    status = failure = None
+    if raw is None:
+        return None, None
+    if isinstance(raw, dict):
+        status = raw.get("status")
+        failure = raw.get("failureMessage") or raw.get("failure_message")
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("{"):
+            try:
+                d = json.loads(text)
+                return _status_field(d)
+            except json.JSONDecodeError:
+                pass
+        status = text
+    else:
+        status = getattr(raw, "status", None)
+        failure = getattr(raw, "failure_message", None) or getattr(raw, "failureMessage", None)
+        if status is None:
+            return _status_field(str(raw))
+    if status is not None and not isinstance(status, str):
+        status = getattr(status, "name", None) or str(status)
+    return (str(status) if status is not None else None), (str(failure) if failure else None)
 
 
 def _normalize_status(raw: Any) -> str:
-    """KaggleApi.kernels_status() return shape has drifted before (see
-    kaggle_tool.py's list_competitions() docstring) — normalize defensively
-    rather than assuming a fixed type."""
-    s = str(raw).lower()
-    if "error" in s or "fail" in s:
-        return "error"
-    if "complete" in s or "ok" in s or "success" in s:
-        return "complete"
-    if "running" in s:
-        return "running"
-    if "queue" in s:
-        return "queued"
-    if "cancel" in s:
-        return "cancelled"
+    """Map a kernels_status() result (object, dict, JSON string, or bare
+    string like 'running' / 'KernelWorkerStatus.RUNNING') to one of:
+    queued | running | complete | error | cancelled | unknown."""
+    status, _ = _status_field(raw)
+    if not status:
+        return "unknown"
+    token = status.strip().split(".")[-1].upper()
+    if token in _STATUS_NAME_MAP:
+        return _STATUS_NAME_MAP[token]
+    s = status.lower()
+    for key, value in (("cancel", "cancelled"), ("queue", "queued"), ("running", "running"),
+                       ("complete", "complete"), ("success", "complete"), ("error", "error")):
+        if key in s:
+            return value
     return "unknown"
+
+
+def failure_message(raw: Any) -> str | None:
+    """The API's own failure message for an errored kernel, if it sent one."""
+    return _status_field(raw)[1]
 
 
 def verify_liveness(
@@ -199,6 +313,7 @@ def verify_liveness(
     grace_checks: tuple[int, ...] = (30, 60),
     sleep_fn: Callable[[float], None] = time.sleep,
     fetch_error_log: Callable[[Any, str], str | None] | None = None,
+    confirm_error_after: float = 15.0,
 ) -> dict[str, Any]:
     """
     The 60-Second Liveness Verification Rule, as code.
@@ -219,7 +334,9 @@ def verify_liveness(
     since deciding what to do about a dead-on-arrival kernel is a strategy
     call, not this module's job.
     """
-    job = ledger.get(kernel) or ledger.register(kernel)
+    if ledger.get(kernel) is None:
+        ledger.register(kernel)
+    transient_note: str | None = None
     checked_at: list[int] = []
     prev_delay = 0
     status = "unknown"
@@ -231,14 +348,25 @@ def verify_liveness(
         status = _normalize_status(raw_status)
         checked_at.append(delay)
 
+        if status == "error" and confirm_error_after:
+            # Belt and braces: one more read before declaring a kernel dead.
+            sleep_fn(confirm_error_after)
+            confirm_raw = api.kernels_status(kernel)
+            confirmed = _normalize_status(confirm_raw)
+            if confirmed != "error":
+                transient_note = "transient_error_not_confirmed"
+                status, raw_status = confirmed, confirm_raw
+            else:
+                raw_status = confirm_raw
+
         if status == "error":
-            error_log = None
+            error_log = failure_message(raw_status)
             if fetch_error_log is not None:
                 try:
-                    error_log = fetch_error_log(api, kernel)
+                    error_log = fetch_error_log(api, kernel) or error_log
                 except Exception as e:
-                    error_log = f"<could not fetch error log: {e}>"
-            ledger.update(kernel, "error", error_log=error_log)
+                    error_log = error_log or f"<could not fetch error log: {e}>"
+            ledger.update(kernel, "error", error_log=error_log, note=transient_note)
             return {
                 "survived_init": False,
                 "status": "error",
@@ -247,8 +375,7 @@ def verify_liveness(
             }
 
         if status in ("running", "complete"):
-            job.liveness_verified = True
-            ledger.update(kernel, status)
+            ledger.update(kernel, status, note=transient_note, liveness_verified=True)
             return {"survived_init": True, "status": status, "checked_at": checked_at}
 
     # Ran through every grace check without a clear RUNNING/COMPLETE/ERROR —
@@ -281,6 +408,40 @@ def check_capacity(ledger: KaggleJobLedger, hardware: str | None) -> tuple[bool,
     return True, f"{active}/{limit} {hardware.upper()} slots in use"
 
 
+def refresh_for_capacity(api: Any, ledger: KaggleJobLedger, max_age_s: float = 120.0) -> int:
+    """
+    Re-read live status for ledger entries that could be wrong about slot
+    usage, right before a capacity decision. Checks:
+      - non-terminal entries not checked in the last `max_age_s` seconds;
+      - "error" entries from the last 6 hours that have no error log — the
+        signature of the old normalizer bug, where a RUNNING kernel was
+        recorded as "error" and stopped counting against the slot limit.
+    Returns how many entries changed. Never raises.
+    """
+    now = time.time()
+    changed = 0
+    for job in list(ledger.all()):
+        stale = job.status not in _TERMINAL_STATUSES and (
+            job.last_checked_at is None or now - job.last_checked_at > max_age_s
+        )
+        suspect = (
+            job.status == "error" and not job.error_log
+            and now - (job.last_checked_at or job.dispatched_at) < 6 * 3600
+        )
+        if not (stale or suspect):
+            continue
+        try:
+            raw = api.kernels_status(job.kernel)
+        except Exception as e:
+            logger.warning(f"refresh_for_capacity: status check failed for {job.kernel}: {e}")
+            continue
+        new_status = _normalize_status(raw)
+        if new_status != "unknown" and new_status != job.status:
+            ledger.update(job.kernel, new_status, error_log=failure_message(raw))
+            changed += 1
+    return changed
+
+
 def poll_pending(api: Any, ledger: KaggleJobLedger) -> list[JobRecord]:
     """
     Cheap, non-blocking sweep: check current status of every non-terminal
@@ -299,7 +460,7 @@ def poll_pending(api: Any, ledger: KaggleJobLedger) -> list[JobRecord]:
             logger.warning(f"poll_pending: status check failed for {job.kernel}: {e}")
             continue
         new_status = _normalize_status(raw_status)
-        if new_status != job.status:
-            ledger.update(job.kernel, new_status)
+        if new_status != job.status and new_status != "unknown":
+            ledger.update(job.kernel, new_status, error_log=failure_message(raw_status))
             changed.append(job)
     return changed

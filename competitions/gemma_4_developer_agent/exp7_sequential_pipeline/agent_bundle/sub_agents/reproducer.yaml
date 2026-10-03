@@ -1,0 +1,10 @@
+name: reproducer
+model: gemma-4-31b-it-qat-w4a16-ct
+description: Bug verification specialist that creates a minimal reproduction command that fails on unpatched code.
+include_contents: none
+instruction: !include ../prompts/reproducer.md
+generate_content_config: !include ../configs/sampling.yaml
+tools:
+  - run_command
+  - read_file
+output_key: repro_card

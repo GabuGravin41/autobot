@@ -1,0 +1,18 @@
+{
+  "id": "daltongabrielomondi/autobot-biohub-exp2-geometric-leaf-prune",
+  "title": "Autobot Biohub Exp2 Geometric Leaf Prune",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "dataset_sources": [
+    "pilkwang/biohub-deepcenter-unet3d-center-prior-v1",
+    "pilkwang/biohub-temporal-unet3d-seed314159-v1",
+    "pilkwang/biohub-tracking-support-pack-50ep-v1"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "id": "daltongabrielomondi/autobot-biohub-cv-baseline-validator-v2",
+  "title": "Autobot Biohub CV Baseline Validator V2 Cache Accelerated",
+  "code_file": "cv_baseline_validator_v2.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [
+    "pilkwang/biohub-tracking-support-pack-50ep-v1",
+    "pilkwang/biohub-deepcenter-unet3d-center-prior-v1",
+    "pilkwang/biohub-temporal-unet3d-seed314159-v1",
+    "anvithpothula/biohub-v1284-head-s075",
+    "daltongabrielomondi/biohub-cv-edge-cache-v1"
+  ],
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "kernel_sources": [],
+  "model_sources": []
+}

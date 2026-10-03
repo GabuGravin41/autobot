@@ -1,0 +1,19 @@
+{
+  "id": "daltongabrielomondi/autobot-biohub-exp6-harmonic-multihop-sota",
+  "title": "Autobot Biohub Exp6 Harmonic MultiHop SOTA",
+  "code_file": "harmonic_multihop_sota.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "dataset_sources": [
+    "pilkwang/biohub-tracking-support-pack-50ep-v1",
+    "pilkwang/biohub-deepcenter-unet3d-center-prior-v1",
+    "pilkwang/biohub-temporal-unet3d-seed314159-v1",
+    "anvithpothula/biohub-v1284-head-s075"
+  ]
+}

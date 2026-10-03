@@ -1,0 +1,49 @@
+{
+  "file": "submission_public_score_normalized_shrink025.csv",
+  "anchor_ref": 56070794,
+  "anchor_display_score": 0.94635,
+  "model": "score_normalized",
+  "strength": -0.25,
+  "cap": 0.002,
+  "rows": 286571,
+  "sha256": "96e84b527e3f97807f53eaf12d6971554f7cd1f0d44bff10d39bda1ac7cbad57",
+  "mean_absolute_change": 9.341761063883171e-05,
+  "max_absolute_change": 0.00043651034016390603,
+  "changed_records": 133675,
+  "spearman_to_anchor": 0.9999998701689675,
+  "kendall_tau_to_anchor": 0.9996979559076578,
+  "frontier_files": 45,
+  "public_frontier_files": 6,
+  "confirmation": {
+    "spec": {
+      "fold": 2,
+      "calibration_fraction": 0.6,
+      "seed": 20260907,
+      "mode": "score_normalized",
+      "strength": -0.25,
+      "decision": "Consider one exploratory submission only if validation delta is positive; otherwise preserve slots. Do not increase magnitude based on this test.",
+      "reason": "Two locality features; five of six earlier splits positive for small shrinkage. Simpler than combined mode and avoids rank-quantile redundancy."
+    },
+    "before_auc": 0.9468534810623694,
+    "after_auc": 0.946853851968949,
+    "delta": 3.7090657956095896e-07,
+    "paired_auc_standard_error": 7.854178968130382e-07,
+    "approximate_95pct_interval": [
+      -1.1685124981925957e-06,
+      1.910325657314514e-06
+    ],
+    "validation_rows": 53494,
+    "positive_rows": 9343,
+    "fit_files": 45,
+    "changed_fraction": 0.2874901858152316,
+    "directional_confirmation": true,
+    "note": "Fixed-round base models were trained without validation labels or early stopping on fold 2. All choices fixed before evaluating this fold here, but these outer folds/features have appeared in earlier development; this is not an untouched final holdout. Normal interval uses paired U-statistic placement influence estimates; no independence claim across earlier overlapping tests."
+  },
+  "submission_status": "complete",
+  "note": "One exploratory shrinkage probe. No claim of statistically established improvement. Forward 0.75/2.25 escalation rejected by labeled tests. Actual score must be measured on Kaggle.",
+  "submission_ref": 56071642,
+  "public_score": 0.94635,
+  "public_score_sort_position": 1,
+  "previous_best_ref": 56070794,
+  "submissions_remaining": 1
+}

@@ -17,6 +17,13 @@ autobot/agent/approval.py alongside the Kaggle/Claude Code integrations:
      fall through to computer_call's CAUTION default, which is harmless in
      balanced/trusted mode but would still pause in strict mode — this
      pattern makes iteration frictionless unconditionally.
+  4. IRREVERSIBLE: submit_code_competition() (Round 7, Sep 2026) — the
+     Code-Competition equivalent of submit(), reached through a different
+     kaggle_tool.py method but the same real, quota-consuming leaderboard
+     attempt.
+  5. SAFE: get_leaderboard() / list_top_kernels() (Round 7, Sep 2026) —
+     both read-only (a public leaderboard snapshot, a public kernel
+     listing), reclassified from CAUTION to SAFE once that was confirmed.
 
 These test the exact regexes CoreLoop._classify_risk() uses for the
 `computer_call` action (via approval.py's _IRREVERSIBLE_RE / _DANGER_RE /
@@ -47,6 +54,16 @@ class TestKaggleSubmitIsIrreversible:
     def test_kaggle_status_and_output_do_not_match(self):
         assert _IRREVERSIBLE_RE.search('computer.kaggle.kernel_status("user/k")') is None
         assert _IRREVERSIBLE_RE.search('computer.kaggle.kernel_output("user/k", "./out")') is None
+
+
+class TestKaggleSubmitCodeCompetitionIsIrreversible:
+    def test_submit_code_competition_matches(self):
+        call = 'computer.kaggle.submit_code_competition("biohub-cell-tracking-during-development", "user/kernel", 3, "submission.csv", "msg")'
+        assert _IRREVERSIBLE_RE.search(call) is not None
+
+    def test_does_not_match_safe_pattern(self):
+        call = 'computer.kaggle.submit_code_competition("comp", "user/kernel", 1, "sub.csv", "msg")'
+        assert _SAFE_COMPUTER_CALL_RE.search(call) is None
 
 
 class TestClaudeCodeWriteModeIsDanger:
@@ -125,9 +142,25 @@ class TestKaggleKernelOpsAreSafe:
         assert _SAFE_COMPUTER_CALL_RE.search(call) is None
 
     def test_unrelated_kaggle_methods_do_not_match(self):
-        # list_competitions/get_leaderboard/download_data were not part of
-        # what the user asked to loosen — they stay at computer_call's
-        # CAUTION default, not SAFE.
+        # list_competitions/download_data are not read-only in the same
+        # sense (competitions_list has side-effect-free semantics too, but
+        # deliberately wasn't reclassified — no evidence it needed to be)
+        # — stay at computer_call's CAUTION default, not SAFE.
         assert _SAFE_COMPUTER_CALL_RE.search('computer.kaggle.list_competitions()') is None
-        assert _SAFE_COMPUTER_CALL_RE.search('computer.kaggle.get_leaderboard("comp")') is None
         assert _SAFE_COMPUTER_CALL_RE.search('computer.kaggle.download_data("comp", "./data")') is None
+
+
+class TestKaggleReadOnlyDiscoveryIsSafe:
+    """get_leaderboard() and list_top_kernels() (Round 7, Sep 2026) are both
+    read-only — a public leaderboard snapshot and a public kernel listing —
+    and were reclassified from CAUTION to SAFE once that was confirmed."""
+
+    def test_get_leaderboard_is_safe(self):
+        assert _SAFE_COMPUTER_CALL_RE.search('computer.kaggle.get_leaderboard("comp")') is not None
+
+    def test_list_top_kernels_is_safe(self):
+        assert _SAFE_COMPUTER_CALL_RE.search('computer.kaggle.list_top_kernels("comp")') is not None
+
+    def test_neither_is_irreversible(self):
+        assert _IRREVERSIBLE_RE.search('computer.kaggle.get_leaderboard("comp")') is None
+        assert _IRREVERSIBLE_RE.search('computer.kaggle.list_top_kernels("comp")') is None

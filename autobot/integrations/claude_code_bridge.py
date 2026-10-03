@@ -33,20 +33,65 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 from typing import Any
+
+from autobot.integrations.cli_exec import classify_error, run_cli, strip_flag, unknown_flag
 
 _DEFAULT_TIMEOUT = 600.0   # headless coding turns can run long
 
-# permission_mode values that let Claude Code write files / run tools
-# without prompting. Kept here (not duplicated as a string literal) so
-# core_loop.py's risk classifier and this module can never drift apart.
-WRITE_CAPABLE_MODES = {"acceptEdits", "bypassPermissions"}
+WRITE_CAPABLE_MODES = {"acceptEdits", "bypassPermissions", "auto", "dontAsk"}
+
+# Older Claude Code builds don't know this flag; if one rejects it we retry without.
+_PERMISSION_PROMPTS_FLAG = ["--permission-prompts", "none"]
+_VALUE_FLAGS = {"--permission-prompts", "--allowedTools", "--disallowedTools", "--tools", "--json-schema",
+                "--model", "--append-system-prompt", "--add-dir", "--resume", "--output-format", "--permission-mode"}
+# Never silently dropped: without these the call would run with MORE power than asked.
+_SAFETY_FLAGS = {"--permission-mode", "--disallowedTools", "--output-format"}
 
 
 def is_available() -> bool:
-    """True if the `claude` CLI is installed and on PATH."""
+    """True if the `claude` CLI is installed and on PATH (claude.exe or npm's claude.cmd)."""
     return shutil.which("claude") is not None
+
+
+def _build_args(
+    permission_mode: str,
+    allowed_tools: list[str] | None,
+    continue_session: bool,
+    resume_session_id: str | None,
+    disallowed_tools: list[str] | None,
+    tools: list[str] | None,
+    json_schema: dict | str | None,
+    model: str | None,
+    append_system_prompt: str | None,
+    no_session_persistence: bool,
+    add_dirs: list[str] | None,
+    with_permission_prompts_flag: bool,
+) -> list[str]:
+    args = ["claude", "-p", "--output-format", "json", "--permission-mode", permission_mode]
+    if with_permission_prompts_flag:
+        args += _PERMISSION_PROMPTS_FLAG
+    if allowed_tools:
+        args += ["--allowedTools", ",".join(allowed_tools)]
+    if disallowed_tools:
+        args += ["--disallowedTools", ",".join(disallowed_tools)]
+    if tools is not None:
+        args += ["--tools", ",".join(tools) if tools else ""]
+    if json_schema is not None:
+        args += ["--json-schema", json_schema if isinstance(json_schema, str) else json.dumps(json_schema)]
+    if model:
+        args += ["--model", model]
+    if append_system_prompt:
+        args += ["--append-system-prompt", append_system_prompt]
+    if no_session_persistence:
+        args += ["--no-session-persistence"]
+    for d in add_dirs or []:
+        args += ["--add-dir", d]
+    if resume_session_id:
+        args += ["--resume", resume_session_id]
+    elif continue_session:
+        args += ["--continue"]
+    return args
 
 
 def run_headless(
@@ -57,94 +102,89 @@ def run_headless(
     continue_session: bool = False,
     resume_session_id: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
+    *,
+    disallowed_tools: list[str] | None = None,
+    tools: list[str] | None = None,
+    json_schema: dict | str | None = None,
+    model: str | None = None,
+    append_system_prompt: str | None = None,
+    no_session_persistence: bool = False,
+    add_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Run one headless Claude Code turn and return its result.
+    Run one headless Claude Code turn and return
+    {"ok", "data", "error", "error_class"}. Never raises.
 
-    permission_mode:
-      "plan"             — read-only; Claude Code will not write files or
-                            run tools without asking, and headless mode
-                            can't answer a prompt, so it just won't do it.
-                            The safe default.
-      "acceptEdits"       — writes files without prompting.
-      "bypassPermissions" — writes files AND runs shell/tool calls without
-                             prompting. Most capable, least safe.
-      "default"           — Claude Code's normal interactive gating, which
-                             will hang forever in headless mode. Avoid.
+    permission_mode: "plan" (read-only, default) | "acceptEdits" |
+    "bypassPermissions" | whatever else the installed version accepts.
+    disallowed_tools: hard denials that hold even in write-capable modes,
+    e.g. ["Bash(git push*)", "Bash(kaggle competitions submit*)"].
+    tools=[] disables all tools (pure text/JSON answer — used when Claude is
+    the butler's decision-maker rather than a coding worker).
+    json_schema: structured output; the parsed object comes back in
+    data["structured_output"] (verified against Claude Code 2.1).
 
-    resume_session_id / continue_session let a caller pick up a prior
-    headless run's conversation (e.g. "read the Kaggle code" as turn one,
-    "now write the improved version" as turn two) instead of re-explaining
-    context from scratch every call.
+    The prompt is sent on STDIN, not as an argument: on Windows an
+    npm-installed `claude.cmd` runs through cmd.exe, which cuts arguments
+    at the first newline and has a ~8K command-line limit.
     """
     if not prompt or not prompt.strip():
-        return {"ok": False, "data": None, "error": "run_headless: prompt is required"}
+        return {"ok": False, "data": None, "error": "run_headless: prompt is required", "error_class": "other"}
     if not is_available():
         return {
-            "ok": False,
-            "data": None,
+            "ok": False, "data": None, "error_class": "not_installed",
             "error": "claude CLI not found on PATH. Install: npm install -g @anthropic-ai/claude-code",
         }
     if cwd and not os.path.isdir(cwd):
-        # Ported from antigravity_bridge.py (Round 6 adversarial-review fix,
-        # flagged there as "identical bug, out of scope for that round's
-        # diff" — ported here Round 8 since orchestrator_dispatch.py now
-        # calls both bridges from tracked projects' working_dir, making a
-        # stale/deleted directory a real, not just theoretical, path).
-        # subprocess.run(cwd=...) raises FileNotFoundError for a missing
-        # directory, which is the SAME exception type the `except
-        # FileNotFoundError` clause below catches for a completely
-        # different reason (the `claude` binary itself vanishing from PATH
-        # between the is_available() check and exec) — without this
-        # earlier check, a bad cwd would be caught by that clause and
-        # misreported as "claude CLI not found on PATH", actively
-        # misleading a caller who has claude installed just fine.
-        return {
-            "ok": False,
-            "data": None,
-            "error": f"cwd does not exist or is not a directory: {cwd}",
-        }
+        return {"ok": False, "data": None, "error_class": "other",
+                "error": f"cwd does not exist or is not a directory: {cwd}"}
 
-    args = [
-        "claude", "-p", prompt,
-        "--output-format", "json",
-        "--permission-mode", permission_mode,
-        "--permission-prompts", "none",
-    ]
-    if allowed_tools:
-        args += ["--allowedTools", ",".join(allowed_tools)]
-    if resume_session_id:
-        args += ["--resume", resume_session_id]
-    elif continue_session:
-        args += ["--continue"]
+    common = dict(
+        permission_mode=permission_mode, allowed_tools=allowed_tools, continue_session=continue_session,
+        resume_session_id=resume_session_id, disallowed_tools=disallowed_tools, tools=tools,
+        json_schema=json_schema, model=model, append_system_prompt=append_system_prompt,
+        no_session_persistence=no_session_persistence, add_dirs=add_dirs,
+    )
+    argv = _build_args(with_permission_prompts_flag=True, **common)
+    res = run_cli(argv, input_text=prompt, cwd=cwd, timeout=timeout)
+    # An older Claude Code that doesn't know a newer flag (--permission-prompts,
+    # --json-schema, --tools, --no-session-persistence...) rejects the whole call.
+    # Drop the flag it names and retry, rather than failing every task.
+    for _ in range(4):
+        if res.ok or res.timed_out or res.not_found:
+            break
+        flag = unknown_flag(res.stderr + " " + res.stdout)
+        if not flag or flag not in argv or flag in _SAFETY_FLAGS:
+            break
+        argv = strip_flag(argv, flag, _VALUE_FLAGS)
+        res = run_cli(argv, input_text=prompt, cwd=cwd, timeout=timeout)
 
-    try:
-        proc = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "data": None, "error": f"claude -p timed out after {timeout}s"}
-    except FileNotFoundError:
-        return {"ok": False, "data": None, "error": "claude CLI not found on PATH."}
-    except Exception as e:
-        return {"ok": False, "data": None, "error": f"{type(e).__name__}: {e}"}
+    if res.not_found:
+        return {"ok": False, "data": None, "error": res.stderr, "error_class": "not_installed"}
+    if res.timed_out:
+        return {"ok": False, "data": res.stdout or None, "error": f"claude -p timed out after {timeout}s",
+                "error_class": "timeout"}
 
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
+    out = (res.stdout or "").strip()
+    err = (res.stderr or "").strip()
+    parsed: Any = None
+    if out:
+        try:
+            parsed = json.loads(out)
+        except json.JSONDecodeError:
+            parsed = None
 
-    if proc.returncode != 0:
-        return {"ok": False, "data": out or None, "error": err or f"claude exited with code {proc.returncode}"}
+    if res.returncode != 0:
+        message = err or (parsed.get("result") if isinstance(parsed, dict) else None) or out \
+            or f"claude exited with code {res.returncode}"
+        return {"ok": False, "data": parsed if parsed is not None else (out or None),
+                "error": str(message), "error_class": classify_error(f"{err} {out}")}
 
-    try:
-        parsed = json.loads(out)
-    except json.JSONDecodeError:
-        # --output-format json should always be valid JSON on a clean exit,
-        # but don't crash the caller if a future CLI version ever changes
-        # that — surface the raw text instead of failing the whole call.
-        return {"ok": True, "data": {"result": out}, "error": "warning: could not parse JSON output"}
-
-    return {"ok": True, "data": parsed, "error": ""}
+    if parsed is None:
+        return {"ok": True, "data": {"result": out}, "error": "warning: could not parse JSON output",
+                "error_class": ""}
+    if isinstance(parsed, dict) and parsed.get("is_error"):
+        message = str(parsed.get("result") or parsed.get("subtype") or "claude reported an error")
+        return {"ok": False, "data": parsed, "error": message,
+                "error_class": classify_error(f"{message} {parsed.get('api_error_status') or ''}")}
+    return {"ok": True, "data": parsed, "error": "", "error_class": ""}

@@ -1,0 +1,19 @@
+{
+  "id": "daltongabrielomondi/autobot-biohub-exp7-harmonic-geometry-filter",
+  "title": "Autobot Biohub Exp7 Harmonic Geometry Filter SOTA",
+  "code_file": "harmonic_geometry_filter.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "false",
+  "competition_sources": [
+    "biohub-cell-tracking-during-development"
+  ],
+  "dataset_sources": [
+    "pilkwang/biohub-tracking-support-pack-50ep-v1",
+    "pilkwang/biohub-deepcenter-unet3d-center-prior-v1",
+    "pilkwang/biohub-temporal-unet3d-seed314159-v1",
+    "anvithpothula/biohub-v1284-head-s075"
+  ]
+}

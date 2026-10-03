@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-traffic-exp12-kinematic-asm-sota",
+  "title": "Autobot Traffic Exp12 Kinematic ASM SOTA",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "2026-ieee-big-data-traffic-flow-bench"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": []
+}

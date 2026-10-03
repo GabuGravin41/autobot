@@ -1,0 +1,9 @@
+name: finalizer
+model: gemma-4-31b-it-qat-w4a16-ct
+description: Quality assurance officer that cleans scratch files, enforces test anti-tampering, and calls submit_patch.
+include_contents: none
+instruction: !include ../prompts/finalizer.md
+generate_content_config: !include ../configs/sampling.yaml
+tools:
+  - run_command
+  - submit_patch

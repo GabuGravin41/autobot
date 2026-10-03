@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-traffic-exp14-unified-sota",
+  "title": "Autobot Traffic Exp14 Unified SOTA",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_internet": "false",
+  "competition_sources": [
+    "2026-ieee-big-data-traffic-flow-bench"
+  ],
+  "dataset_sources": [
+    "soukeaizenz/tfb-task2-lgbm"
+  ]
+}

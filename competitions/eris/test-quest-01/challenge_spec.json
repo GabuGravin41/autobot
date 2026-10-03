@@ -1,0 +1,8 @@
+{
+  "challenge_id": "test-quest-01",
+  "created_at": "2026-10-03T07:26:21Z",
+  "workspace_dir": "C:\\Users\\User 1\\OneDrive\\Desktop\\projects\\django projects\\personal projects\\autobot\\competitions\\eris\\test-quest-01",
+  "status": "scaffolded",
+  "required_deliverable": "solution.ipynb",
+  "target_metric": "benchmark_score"
+}

@@ -1,0 +1,17 @@
+{
+  "id": "daltongabrielomondi/autobot-traffic-exp10-hydrodynamic-delayed-onset",
+  "title": "autobot-traffic-exp10-hydrodynamic-delayed-onset",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [],
+  "competition_sources": [
+    "2026-ieee-big-data-traffic-flow-bench"
+  ],
+  "kernel_sources": [],
+  "model_sources": []
+}

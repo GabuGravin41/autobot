@@ -61,6 +61,10 @@ from autobot.computer.antigravity_tool import Antigravity
 from autobot.computer.research_tool import Research
 from autobot.computer.vault import Vault
 from autobot.computer.anti_sleep import anti_sleep
+from autobot.computer.cleaner_tool import Cleaner
+from autobot.computer.quant_tool import Quant
+from autobot.computer.vscode_tool import VSCode
+from autobot.computer.eris_tool import Eris
 
 logger = logging.getLogger(__name__)
 
@@ -112,34 +116,18 @@ class Computer:
         self.research = Research()
         self.vault = Vault()
         self.anti_sleep = anti_sleep
+        self.cleaner = Cleaner()
+        self.quant = Quant()
+        self.vscode = VSCode()
+        self.eris = Eris()
         if HAS_NATIVE_UI and Window is not None:
             self.window = Window(self.mouse, self.keyboard)
 
     def _get_all_tools(self) -> list[tuple[str, Any]]:
-        """Get all tool submodules paired with the ATTRIBUTE NAME they're
-        actually reachable under (computer.<name>), not their class name.
-
-        This distinction matters: get_tool_catalog() used to derive the
-        dispatchable name from `tool.__class__.__name__.lower()`. For most
-        tools that coincidentally matches (Mouse -> "mouse"), but
-        `self.anti_sleep = anti_sleep` is an AntiSleepManager instance, so the
-        catalog advertised `computer.antisleepmanager.start(...)` — a name
-        dispatch.py's `getattr(computer, ...)` can never resolve. The whole
-        feature (the background mouse-mover that keeps the machine from
-        sleeping mid-run) was consequently unreachable from any LLM-emitted
-        call. Returning the real attribute name here, and using it directly
-        in get_tool_catalog(), makes catalog names and dispatch resolution
-        structurally unable to diverge again for any future tool.
-
-        Just as importantly: this list is the ONLY thing that decides what
-        the LLM is told it can call. A name that isn't in here (like
-        "browser", removed Sep 2026 along with computer/browser.py's CDP
-        code) simply never appears in the catalog — no separate cleanup
-        step needed elsewhere.
-        """
         names = ["mouse", "keyboard", "display", "clipboard",
                  "files", "terminal", "vault", "kaggle", "claude_code",
-                 "antigravity", "research", "anti_sleep"]
+                 "antigravity", "research", "anti_sleep",
+                 "cleaner", "quant", "vscode", "eris"]
         if hasattr(self, "window"):
             names.append("window")
         return [(name, getattr(self, name)) for name in names]

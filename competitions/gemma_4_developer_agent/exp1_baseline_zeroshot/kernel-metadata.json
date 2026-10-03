@@ -1,0 +1,16 @@
+{
+  "id": "daltongabrielomondi/autobot-gemma4-exp1-baseline-zeroshot",
+  "title": "Autobot Gemma4 Exp1 Baseline Zeroshot",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "competition_sources": [
+    "gemma-4-developer-agent"
+  ],
+  "model_sources": [
+    "google/gemma-4/transformers/gemma-4-e4b-it/1"
+  ]
+}

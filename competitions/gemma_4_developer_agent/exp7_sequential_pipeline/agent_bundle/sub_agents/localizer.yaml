@@ -1,0 +1,12 @@
+name: localizer
+model: gemma-4-31b-it-qat-w4a16-ct
+description: Code exploration specialist that identifies the exact files, root cause, and test target.
+instruction: !include ../prompts/localizer.md
+generate_content_config: !include ../configs/sampling.yaml
+tools:
+  - run_command
+  - read_file
+  - search_similar_code
+  - get_code_neighbors
+  - get_code_subgraph
+output_key: bug_card

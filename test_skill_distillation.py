@@ -48,7 +48,7 @@ try:
     ]
 
     # ---- distill writes a skill ----
-    skill = d.distill_from_run(goal=GOAL, history=history, result="compiled OK")
+    skill = d.distill_from_run(goal=GOAL, history=history, result="success")
     check("distill returns a skill", skill is not None)
     check("skill file written", len(list(tmp.glob("*.json"))) == 1,
           f"files={list(tmp.glob('*.json'))}")

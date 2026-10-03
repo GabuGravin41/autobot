@@ -1,0 +1,24 @@
+{
+  "id": "daltongabrielomondi/autobot-rsna-knee-exp1-tri-backbone-sota",
+  "title": "Autobot RSNA Knee Exp1 Tri Backbone SOTA",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [
+    "pilkwang/rsna-knee-weights",
+    "antoinegg1/rsna-knee-e9-radimagenet-heads-v15",
+    "tonylica/rsna-knee-bend-dinov3-0917-repro-assets",
+    "mattiaangeli/knee-mri-fold-weights",
+    "dreaddevelopment/raptor-knee-widedense",
+    "mattiaangeli/rsna-knee-coat-resgated-ep10-top3"
+  ],
+  "competition_sources": [
+    "rsna-knee-abnormality-detection"
+  ],
+  "kernel_sources": [],
+  "model_sources": []
+}

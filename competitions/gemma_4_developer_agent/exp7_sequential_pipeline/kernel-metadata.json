@@ -1,0 +1,14 @@
+{
+  "id": "daltongabrielomondi/autobot-gemma4-exp7-sequential-pipeline",
+  "title": "Autobot Gemma4 Exp7 Sequential Pipeline",
+  "code_file": "main.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "competition_sources": [
+    "gemma-4-developer-agent"
+  ]
+}
