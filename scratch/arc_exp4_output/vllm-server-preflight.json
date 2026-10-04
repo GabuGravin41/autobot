@@ -1,0 +1,45 @@
+{
+  "final_mtp_telemetry_source": "vllm-metrics-final.prom from teardown",
+  "mode": "fast",
+  "models_endpoint": {
+    "data": [
+      {
+        "created": 1791093702,
+        "id": "Qwen/Qwen3.8-Flash-Next-NVFP4",
+        "max_model_len": 32768,
+        "object": "model",
+        "owned_by": "vllm",
+        "parent": null,
+        "permission": [
+          {
+            "allow_create_engine": false,
+            "allow_fine_tuning": false,
+            "allow_logprobs": true,
+            "allow_sampling": true,
+            "allow_search_indices": false,
+            "allow_view": true,
+            "created": 1791093702,
+            "group": null,
+            "id": "modelperm-b6e007ca82276f39",
+            "is_blocking": false,
+            "object": "model_permission",
+            "organization": "*"
+          }
+        ],
+        "root": "/kaggle/input/models/keithtyser/qwen3-8-flash-next-nvfp4/pytorch/radixark-modelopt-fp4/1"
+      }
+    ],
+    "object": "list"
+  },
+  "reason": "the authorized one-game smoke is the integrated serving test",
+  "served_model": "Qwen/Qwen3.8-Flash-Next-NVFP4",
+  "skipped": true,
+  "skipped_requests": [
+    "synthetic text",
+    "synthetic tool call",
+    "synthetic vision",
+    "C1 throughput",
+    "C4 throughput",
+    "pre-game MTP telemetry"
+  ]
+}
