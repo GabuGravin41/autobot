@@ -1,0 +1,24 @@
+{
+  "id": "daltongabrielomondi/autobot-rsna-knee-medgemma-visual-audit",
+  "title": "Autobot RSNA Knee MedGemma Visual Audit Dashboard",
+  "code_file": "notebook.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [
+    "gpu",
+    "radiology",
+    "computer-vision"
+  ],
+  "dataset_sources": [
+    "mattiaangeli/opencv-python-headless-4120088-x86"
+  ],
+  "competition_sources": [
+    "rsna-knee-abnormality-detection"
+  ],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}
