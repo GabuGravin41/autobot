@@ -58,3 +58,22 @@
   4. **Watchdog Failure Recovery**:
      - Background vLLM watchdog polling `/v1/models` every 15s to automatically revive the server upon memory leaks or hardware stalls.
 - **Benchmark Target**: $\ge 3.65\%$ (Surpassing Top 10% Cutoff) towards Keith Tyser's benchmark of **`8.62%` (Rank #12)**.
+- **Official Score Result**: **`4.04%`** (Rank #711 worldwide).
+
+---
+
+## 5. Experiment 4: Pure Keith Tyser SOTA + Dynamic Per-Game Budget Fill
+- **Kernel Slug**: `daltongabrielomondi/autobot-arc3-exp4-keith-budgetfill-sota`
+- **Submission ID**: **`56815799`**
+- **Date Submitted**: `2026-10-04 06:06:23 UTC`
+- **Status**: `SubmissionStatus.PENDING`
+- **Model**: `keithtyser/qwen3-8-flash-next-nvfp4/PyTorch/radixark-modelopt-fp4/1`
+- **Machine**: `NvidiaRtxPro6000` (Blackwell 96GB GPU).
+- **Core Engineering Restorations & Enhancements**:
+  1. **Full 32K Context Restored**: Removed the harmful 16K context limit (`LOCAL_ANALYZER_CONTEXT_WINDOW=16384`) from Exp 3, restoring the entire reasoning history and tool execution traces.
+  2. **Zero AgentFix Regressions**: Eliminated Scott Le Grand's 2,707 lines of experimental monkey-patches which caused documented action refusals and a 29% activity drop. Restored Keith's pure verified 8-sequence solver.
+  3. **Dynamic Per-Game Budget Fill**:
+     - Formulated: `allocated_per_game = max(7920.0, (32400 - elapsed - 1500) / waves)`
+     - Dynamically expands per-game solving budgets from 2.2 hours up to 7+ hours across available games within the 9-hour runtime ceiling.
+  4. **Target Benchmark**: **`8.62% - 11.00%`** (Top 15 on ARC-AGI-3 Leaderboard).
+
