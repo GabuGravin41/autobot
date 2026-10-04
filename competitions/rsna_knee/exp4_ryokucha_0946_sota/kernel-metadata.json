@@ -1,10 +1,11 @@
 {
   "id": "daltongabrielomondi/autobot-rsna-knee-exp4-ryokucha-0946-sota",
+  "id_no": 136250530,
   "title": "Autobot RSNA Knee Exp4 Ryokucha 0946 SOTA",
-  "code_file": "rsna-knee-d4-blend-0946-ours10.ipynb",
+  "code_file": "notebook.ipynb",
   "language": "python",
   "kernel_type": "notebook",
-  "is_private": "true",
+  "is_private": true,
   "enable_gpu": true,
   "enable_tpu": false,
   "enable_internet": false,
@@ -36,5 +37,7 @@
   ],
   "model_sources": [
     "metaresearch/dinov2/PyTorch/small/1"
-  ]
+  ],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
 }
