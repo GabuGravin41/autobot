@@ -1,0 +1,202 @@
+{
+  "enveda_casmi": {
+    "slug": "enveda-CASMI26-molecule-id-mass-spectra",
+    "total_submissions": 2,
+    "submissions": [
+      {
+        "ref": 56811892,
+        "date": "2026-10-04 02:22:20.917000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.417",
+        "error_description": "",
+        "description": "Autobot CASMI V44 PairTail Locked Top1 SOTA"
+      },
+      {
+        "ref": 56703702,
+        "date": "2026-09-30 09:40:45.857000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.380",
+        "error_description": "",
+        "description": ""
+      }
+    ]
+  },
+  "rsna_knee": {
+    "slug": "rsna-knee-abnormality-detection",
+    "total_submissions": 9,
+    "submissions": [
+      {
+        "ref": 56827089,
+        "date": "2026-10-04 14:59:14.193000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.515",
+        "error_description": "",
+        "description": "Autobot RSNA Knee Exp 9: ViT Density and Medical VLM Clinical Arbiter Hybrid SOTA"
+      },
+      {
+        "ref": 56827036,
+        "date": "2026-10-04 14:56:43.117000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.505",
+        "error_description": "",
+        "description": "Autobot RSNA Knee Exp 8: Medical Vision-Language Multimodal Platform SOTA"
+      },
+      {
+        "ref": 56826912,
+        "date": "2026-10-04 14:51:49.117000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.943",
+        "error_description": "",
+        "description": "Autobot RSNA Knee Exp 7: Pure ViT Density and Symmetric Rank-Mean Ensembling SOTA"
+      },
+      {
+        "ref": 56810220,
+        "date": "2026-10-04 00:36:23.143000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.943",
+        "error_description": "",
+        "description": "Autobot Exp 6: 0.946 Consensus SOTA (RadImageNet Fracture Retention + Unoverfit CoAtNet Weights)"
+      },
+      {
+        "ref": 56804077,
+        "date": "2026-10-03 18:09:49.643000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.943",
+        "error_description": "",
+        "description": "test"
+      },
+      {
+        "ref": 56803482,
+        "date": "2026-10-03 17:38:16.907000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.501",
+        "error_description": "",
+        "description": "Autobot Exp 5: Knee-ACT SOTA (Gated-MIL + Anatomical Cross-Plane Router + Biomechanical Triad Head)"
+      },
+      {
+        "ref": 56613822,
+        "date": "2026-09-27 16:24:16.513000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.943",
+        "error_description": "",
+        "description": "Autobot Exp 3: Quad-CoAtNet Complementary Ensemble + Calibrated SOTA Routing (Target: >= 0.943 Top 10%)"
+      },
+      {
+        "ref": 56608717,
+        "date": "2026-09-27 12:36:50.397000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.941",
+        "error_description": "",
+        "description": "Autobot Exp 2: Tri-Backbone SOTA Ensemble + Probe22 Finding-Specific Routing (Target: >= 0.943 Top 10%)"
+      },
+      {
+        "ref": 56603461,
+        "date": "2026-09-27 08:26:26.697000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.939",
+        "error_description": "",
+        "description": "Autobot Exp 1: Tri-Backbone SOTA Ensemble (DINOv3 + RadImageNet + CoAtNet Raptor)"
+      }
+    ]
+  },
+  "arc_prize_2026": {
+    "slug": "arc-prize-2026-arc-agi-3",
+    "total_submissions": 8,
+    "submissions": [
+      {
+        "ref": 56815799,
+        "date": "2026-10-04 06:06:23.587000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "2.55",
+        "error_description": "",
+        "description": "Autobot ARC3 Exp 4: Pure Keith Tyser SOTA + Dynamic Budget Fill (32K ctx, 8 seq, MTP 3)"
+      },
+      {
+        "ref": 56610419,
+        "date": "2026-09-27 13:53:09.447000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "4.04",
+        "error_description": "",
+        "description": "Autobot Exp 3: FlashNext NVFP4 MTP + AgentFix SOTA Reasoner"
+      },
+      {
+        "ref": 56556182,
+        "date": "2026-09-25 17:12:31.917000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "1.54",
+        "error_description": "",
+        "description": "Autobot Exp 2: LB-9 Duck Qwen-27B FP8 RTX6000 SOTA"
+      },
+      {
+        "ref": 56490896,
+        "date": "2026-09-23 10:44:27.910000",
+        "status": "SubmissionStatus.ERROR",
+        "public_score": "",
+        "error_description": "A system error. Please try resubmitting to resolve the error and contact Kaggle Support if it persists.",
+        "description": "Autobot Exp 1: LB-9 Duck Qwen-27B FP8 SOTA Baseline"
+      },
+      {
+        "ref": 54460849,
+        "date": "2026-07-08 11:58:05.680000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.89",
+        "error_description": "",
+        "description": ""
+      },
+      {
+        "ref": 54242081,
+        "date": "2026-07-01 19:31:14.720000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.42",
+        "error_description": "",
+        "description": ""
+      },
+      {
+        "ref": 54205478,
+        "date": "2026-06-30 15:24:24.120000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.29",
+        "error_description": "",
+        "description": ""
+      },
+      {
+        "ref": 54174966,
+        "date": "2026-06-29 15:53:23.990000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.22",
+        "error_description": "",
+        "description": ""
+      }
+    ]
+  },
+  "gemma_4_developer_agent": {
+    "slug": "gemma-4-developer-agent",
+    "total_submissions": 3,
+    "submissions": [
+      {
+        "ref": 56591751,
+        "date": "2026-09-27 00:00:40.453000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.08",
+        "error_description": "",
+        "description": "Autobot Exp 8: Calibrated Operational Budget (3.5m/20tools/25turns/2k-thinking)"
+      },
+      {
+        "ref": 56563687,
+        "date": "2026-09-26 00:03:44.357000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "",
+        "error_description": "Your submission notebook exceeded the allowed runtime. Review the competition's Code Requirements page for the time limits. Note that the hidden dataset can be larger/smaller/different than the public dataset.",
+        "description": "Autobot Exp 7: 4-Stage Sequential Isolated Pipeline (Localizer -> Reproducer -> Patcher -> Finalizer)"
+      },
+      {
+        "ref": 56561900,
+        "date": "2026-09-25 23:18:12.313000",
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "",
+        "error_description": "Your submission notebook exceeded the allowed runtime. Review the competition's Code Requirements page for the time limits. Note that the hidden dataset can be larger/smaller/different than the public dataset.",
+        "description": "Autobot Exp 6: Dual-Agent SOTA (code_analyzer + swe_coder) with Thinking"
+      }
+    ]
+  }
+}
