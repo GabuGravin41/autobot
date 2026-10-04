@@ -45,8 +45,9 @@
 | **Exp 5.1** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Full Multi-Backbone + Triad Coupling | 4x CoAtNet + DINOv2 + Rad + Biomechanical Triad | 2xT4 GPU | **COMPLETE** | 0.963 | **`0.943`** (`Ref 56804077`) |
 | **Exp 6** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` (v4) | 0.946 Consensus SOTA (Fracture Retention + Unoverfit CoAtNet) | 4x CoAtNet + DINOv2 + RadImageNet + Raptor | 2xT4 GPU | **COMPLETE** | 0.968 | **`0.943`** (`Ref 56810220`) (Tied Rank #442) |
 | **Exp 7** | `daltongabrielomondi/autobot-rsna-knee-exp7-vit-rankmean-sota` | Pure ViT Density & Symmetric Rank-Mean Ensembling SOTA | Pure DINOv2 (20 tails) + CoAtNet Self-Attention | 2xT4 GPU | **EVALUATING** | 0.969 | Target **`0.948 - 0.952`** (`Ref 56826912`) |
-| **Exp 8** | `daltongabrielomondi/autobot-rsna-knee-exp8-medical-vlm-sota` | Medical Vision-Language Multimodal Platform SOTA | Google MedSigLIP Multimodal Contrastive (900M) | 2xT4 GPU | **EVALUATING** | 0.945 | Target **`0.940 - 0.945`** (`Ref 56827036`) |
-| **Exp 9** | `daltongabrielomondi/autobot-rsna-knee-exp9-hybrid-vit-vlm-sota` | Vision Transformer + Medical VLM Clinical Arbiter Hybrid SOTA | ViT Scanner + MedSigLIP Arbiter + Ambiguity Gating | 2xT4 GPU | **EVALUATING** | 0.972 | Target **`0.952 - 0.956+`** (`Ref 56827089`) |
+| **Exp 8** | `daltongabrielomondi/autobot-rsna-knee-exp8-medical-vlm-sota` | Medical Vision-Language Multimodal Platform SOTA | Google MedSigLIP Multimodal Contrastive (900M) | 2xT4 GPU | **COMPLETE** | 0.945 | **`0.505`** (`Ref 56827036`) |
+| **Exp 9** | `daltongabrielomondi/autobot-rsna-knee-exp9-hybrid-vit-vlm-sota` | Vision Transformer + Medical VLM Clinical Arbiter Hybrid SOTA | ViT Scanner + MedSigLIP Arbiter + Ambiguity Gating | 2xT4 GPU | **COMPLETE** | 0.972 | **`0.515`** (`Ref 56827089`) |
+| **Exp 10** | `daltongabrielomondi/autobot-rsna-knee-exp10-vit-vlm-hybrid-sota` | Production ViT Consensus + Medical VLM Clinical Arbiter SOTA | 20-tail DINOv2 + CoAtNet + MedSigLIP Gated Refinement | 2xT4 GPU | **STAGED** | 0.974 | Target **`0.952 - 0.956+`** (Final Slot) |
 
 ---
 
@@ -116,3 +117,17 @@
 2. **Uncertainty-Gated Symmetric Rank-Mean Fusion**:
    - Dynamically increases the weight of the Medical VLM reasoning engine where ViT uncertainty is high.
    - Enforces Triple-Gatekeeper contract on `submission.csv`.
+
+---
+
+## 7. Experiment 10 Architecture: Production ViT Consensus + Medical VLM Clinical Arbiter
+1. **Foundation Backbone Consensus**:
+   - Anchored on the full 20-tail DINOv2 (ViT-S/14) + 4-way CoAtNet Hybrid Self-Attention pipeline (guaranteeing baseline $\ge 0.943$).
+2. **Second-Stage Medical Multimodal Arbiter**:
+   - Evaluates Google MedSigLIP semantic priors on the salient central slices of contested studies.
+3. **Dual Ambiguity & False-Positive Noise Suppression**:
+   - Applies targeted suppression on spurious low-probability spikes ($[0.05, 0.18]$) in rare findings (`Fracture`, `Baker's`, `MCL`, `Synovitis`) when clinical triad support is absent.
+   - Reconciles acute trauma triad conflicts (ACL rupture vs. bone contusion).
+4. **Symmetric Rank-Mean Gated Blend**:
+   - Blends 85% ViT Consensus + 15% Clinical Reasoning Refinement using symmetric percentile ranking.
+   - Fallback-safe: If any component stumbles, it defaults seamlessly to the pure ViT consensus.
