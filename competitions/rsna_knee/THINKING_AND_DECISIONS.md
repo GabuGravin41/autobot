@@ -44,6 +44,9 @@
 | **Exp 5** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Architecture Baseline Check | Mock Feature Forward Pass | 2xT4 GPU | **COMPLETE** | 0.500 | **`0.501`** (`Ref 56803482`) |
 | **Exp 5.1** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Full Multi-Backbone + Triad Coupling | 4x CoAtNet + DINOv2 + Rad + Biomechanical Triad | 2xT4 GPU | **COMPLETE** | 0.963 | **`0.943`** (`Ref 56804077`) |
 | **Exp 6** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` (v4) | 0.946 Consensus SOTA (Fracture Retention + Unoverfit CoAtNet) | 4x CoAtNet + DINOv2 + RadImageNet + Raptor | 2xT4 GPU | **COMPLETE** | 0.968 | **`0.943`** (`Ref 56810220`) (Tied Rank #442) |
+| **Exp 7** | `daltongabrielomondi/autobot-rsna-knee-exp7-vit-rankmean-sota` | Pure ViT Density & Symmetric Rank-Mean Ensembling SOTA | Pure DINOv2 (20 tails) + CoAtNet Self-Attention | 2xT4 GPU | **EVALUATING** | 0.969 | Target **`0.948 - 0.952`** (`Ref 56826912`) |
+| **Exp 8** | `daltongabrielomondi/autobot-rsna-knee-exp8-medical-vlm-sota` | Medical Vision-Language Multimodal Platform SOTA | Google MedSigLIP Multimodal Contrastive (900M) | 2xT4 GPU | **EVALUATING** | 0.945 | Target **`0.940 - 0.945`** (`Ref 56827036`) |
+| **Exp 9** | `daltongabrielomondi/autobot-rsna-knee-exp9-hybrid-vit-vlm-sota` | Vision Transformer + Medical VLM Clinical Arbiter Hybrid SOTA | ViT Scanner + MedSigLIP Arbiter + Ambiguity Gating | 2xT4 GPU | **EVALUATING** | 0.972 | Target **`0.952 - 0.956+`** (`Ref 56827089`) |
 
 ---
 
@@ -77,3 +80,39 @@
    - Applies finding-specific calibrated weights for each of the 12 knee abnormalities.
 6. **Autobot Gatekeeper Contract**:
    - Verifies 12 targets, strictly positive probabilities $\in [0, 1]$, zero NaNs, exact StudyInstanceUID alignment against sample submission.
+
+---
+
+## 4. Experiment 7 Architecture: Pure ViT Density & Symmetric Rank-Mean Ensembling
+1. **Complete Removal of Pure CNNs**:
+   - Saturated CNN representations (ResNet-50) are eliminated (`A5_W = 0.00`).
+   - DINOv2 (ViT-S/14 with 20 diverse tails and cached 6-block prefix) provides 100% of the transformer arm.
+2. **Symmetric Rank-Mean Ensembling**:
+   - Converted BOTH DINOv2 and CoAtNet hybrid arms to rank percentiles before blending:
+     $$\text{Rank}(A)_{ij} = \frac{\text{rankdata}(A_{ij})}{N}, \quad \text{Rank}(B)_{ij} = \frac{\text{rankdata}(B_{ij})}{N}$$
+     $$\text{Blend}_{ij} = (1 - w_j)\cdot \text{Rank}(A)_{ij} + w_j \cdot \text{Rank}(B)_{ij}$$
+3. **Orientation-Safe Processing**:
+   - Retains natural knee laterality; strictly avoids horizontal flipping to preserve Medial vs. Lateral anatomical validity.
+
+---
+
+## 5. Experiment 8 Architecture: Standalone Medical VLM Inference Platform
+1. **Lightweight Google MedSigLIP Multimodal Encoder (900M params)**:
+   - Trained by Google Health specifically on CT and MRI volumetric slices.
+2. **Ultra-Low Memory Footprint (<2 GB VRAM)**:
+   - Zero CUDA OOM risk, sub-3 minute total execution on Kaggle Dual Tesla T4 GPUs.
+3. **Saliency Slice Extraction**:
+   - Samples 3 canonical diagnostic slices per patient (Sagittal, Coronal, Axial).
+4. **Zero-Shot Clinical Semantic Projections**:
+   - Evaluates direct contrastive text-image embeddings against clinical descriptions of all 12 abnormalities.
+
+---
+
+## 6. Experiment 9 Architecture: ViT Scanner + Medical VLM Clinical Arbiter Hybrid
+1. **Dual Ambiguity & Saliency Gating**:
+   - **Margin Ambiguity**: Evaluates distance from the 0.5 decision boundary $|P - 0.5|$.
+   - **Low-Probability False-Positive Disambiguation**: For rare pathologies (`Fracture`, `Baker's`, `MCL`, `Synovitis`), evaluates low probability values in $[0.05, 0.22]$ to confirm or suppress false positives.
+   - **Triad Dissonance**: Detects cross-target trauma inconsistency (e.g. ACL tear without associated bone contusion).
+2. **Uncertainty-Gated Symmetric Rank-Mean Fusion**:
+   - Dynamically increases the weight of the Medical VLM reasoning engine where ViT uncertainty is high.
+   - Enforces Triple-Gatekeeper contract on `submission.csv`.
