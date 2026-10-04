@@ -1,0 +1,102 @@
+[
+  {
+    "ref": "pilkwang/rsna-knee-baseline-v1",
+    "votes": 664,
+    "title": "RSNA Knee baseline v1"
+  },
+  {
+    "ref": "ryanholbrook/rsna-knee-abnormalities-efficiency-lb",
+    "votes": 488,
+    "title": "RSNA Knee Abnormalities - Efficiency LB"
+  },
+  {
+    "ref": "mattiaangeli/bend-the-knee-to-the-dinosaurs",
+    "votes": 316,
+    "title": "Bend the Knee to the Dinosaurs"
+  },
+  {
+    "ref": "evgendvorkin/rsna-versia-5",
+    "votes": 292,
+    "title": "RSNA_Versia_5"
+  },
+  {
+    "ref": "prvsiyan/rsna-knee-read-the-report-then-the-knee",
+    "votes": 262,
+    "title": "RSNA Knee: read the report, then the knee"
+  },
+  {
+    "ref": "jiweiliu/rsna-knee-fast-2xt4-inference",
+    "votes": 235,
+    "title": "RSNA Knee Fast 2xT4 Inference"
+  },
+  {
+    "ref": "mattiaangeli/bend-the-knee-to-dinov3-ensembled",
+    "votes": 223,
+    "title": "Bend the Knee to DinoV3 (ensembled)"
+  },
+  {
+    "ref": "mattiaangeli/bend-the-knee-to-speedy-raptors-the-original",
+    "votes": 214,
+    "title": "Bend the Knee to Speedy Raptors-The Original ?????"
+  },
+  {
+    "ref": "prvsiyan/head-and-shoulders-knees-and-toes",
+    "votes": 201,
+    "title": "Head and shoulders, knees and toes"
+  },
+  {
+    "ref": "pjmathematician/rsna-knee-d4-blend",
+    "votes": 190,
+    "title": "rsna-knee-d4-blend"
+  },
+  {
+    "ref": "maverickss26/rsna-knee-0942-restructured",
+    "votes": 180,
+    "title": "rsna-knee-0942-restructured"
+  },
+  {
+    "ref": "dreaddevelopment/knee-mri-twelve-findings-from-a-single-model",
+    "votes": 171,
+    "title": "Knee MRI: twelve findings from a single model"
+  },
+  {
+    "ref": "romantamrazov/rsna-knee-dinosaur-v4",
+    "votes": 168,
+    "title": "RSNA Knee | DINOsaur V4 ? "
+  },
+  {
+    "ref": "romanrozen/rsna-knee-data-structure-eda-baseline",
+    "votes": 141,
+    "title": "RSNA Knee | Data structure, EDA, baseline?"
+  },
+  {
+    "ref": "anhadmahajan06/rsna-knee-take-care-of-your-knee",
+    "votes": 130,
+    "title": "RSNA Knee: Take Care Of Your Knee"
+  },
+  {
+    "ref": "romantamrazov/rsna-knee-dinosaur-v5",
+    "votes": 129,
+    "title": "RSNA Knee | DINOsaur V5? ? "
+  },
+  {
+    "ref": "dreaddevelopment/knee-mri-training-the-twelve-finding-model",
+    "votes": 126,
+    "title": "Knee MRI: training the twelve-finding model"
+  },
+  {
+    "ref": "pjmathematician/rsna-knee-d4-lite",
+    "votes": 125,
+    "title": "rsna-knee-d4-lite"
+  },
+  {
+    "ref": "anvithpothula/rsna-base",
+    "votes": 110,
+    "title": "rsna-base"
+  },
+  {
+    "ref": "tonylica/rsna-knee-dino-radimagenet-rank-ensemble",
+    "votes": 101,
+    "title": "RSNA Knee DINO-RadImageNet Rank Ensemble"
+  }
+]

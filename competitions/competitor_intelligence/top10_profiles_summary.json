@@ -1,0 +1,218 @@
+{
+  "rsna_knee": [
+    {
+      "rank": 1,
+      "team_name": "rhoskeri",
+      "score": "0.963",
+      "team_id": 16687899,
+      "submission_date": "2026-10-04 03:03:44"
+    },
+    {
+      "rank": 2,
+      "team_name": "Pa3?aJluH?",
+      "score": "0.962",
+      "team_id": 16980477,
+      "submission_date": "2026-10-04 00:12:28"
+    },
+    {
+      "rank": 3,
+      "team_name": "joinT fusion",
+      "score": "0.961",
+      "team_id": 16670731,
+      "submission_date": "2026-10-04 17:50:26"
+    },
+    {
+      "rank": 4,
+      "team_name": "Wassim Dobbi",
+      "score": "0.961",
+      "team_id": 16827554,
+      "submission_date": "2026-10-04 16:31:50"
+    },
+    {
+      "rank": 5,
+      "team_name": "?YOKKOISHO?",
+      "score": "0.960",
+      "team_id": 16676548,
+      "submission_date": "2026-10-04 04:35:12"
+    },
+    {
+      "rank": 6,
+      "team_name": "TomKroumov",
+      "score": "0.959",
+      "team_id": 16824465,
+      "submission_date": "2026-10-04 17:39:00"
+    },
+    {
+      "rank": 7,
+      "team_name": "dalab",
+      "score": "0.959",
+      "team_id": 16670788,
+      "submission_date": "2026-10-04 11:55:56"
+    },
+    {
+      "rank": 8,
+      "team_name": "NMarkS",
+      "score": "0.959",
+      "team_id": 16967814,
+      "submission_date": "2026-10-03 14:40:29"
+    },
+    {
+      "rank": 9,
+      "team_name": "knee-deep",
+      "score": "0.959",
+      "team_id": 16670630,
+      "submission_date": "2026-10-04 12:42:43"
+    },
+    {
+      "rank": 10,
+      "team_name": "Scott Willis",
+      "score": "0.959",
+      "team_id": 16680443,
+      "submission_date": "2026-10-04 17:28:46"
+    }
+  ],
+  "arc_prize_2026": [
+    {
+      "rank": 1,
+      "team_name": "Tufa Labs",
+      "score": "55.89",
+      "team_id": 15486995,
+      "submission_date": "2026-10-03 07:17:20"
+    },
+    {
+      "rank": 2,
+      "team_name": "Yi-Chia Chen",
+      "score": "48.59",
+      "team_id": 15499660,
+      "submission_date": "2026-10-03 15:55:00"
+    },
+    {
+      "rank": 3,
+      "team_name": "mtg",
+      "score": "37.54",
+      "team_id": 16153655,
+      "submission_date": "2026-10-04 08:52:24"
+    },
+    {
+      "rank": 4,
+      "team_name": "gng",
+      "score": "36.78",
+      "team_id": 16805955,
+      "submission_date": "2026-10-04 01:40:25"
+    },
+    {
+      "rank": 5,
+      "team_name": "Andrew Reed",
+      "score": "36.14",
+      "team_id": 17017088,
+      "submission_date": "2026-10-04 00:24:15"
+    },
+    {
+      "rank": 6,
+      "team_name": "lalalia",
+      "score": "35.79",
+      "team_id": 16898435,
+      "submission_date": "2026-10-04 11:26:03"
+    },
+    {
+      "rank": 7,
+      "team_name": "Kamal Kadakara",
+      "score": "35.44",
+      "team_id": 16878548,
+      "submission_date": "2026-10-04 01:29:33"
+    },
+    {
+      "rank": 8,
+      "team_name": "Nhan Duc Nguyen",
+      "score": "34.74",
+      "team_id": 16958955,
+      "submission_date": "2026-10-03 16:39:35"
+    },
+    {
+      "rank": 9,
+      "team_name": "Arke",
+      "score": "34.30",
+      "team_id": 16969928,
+      "submission_date": "2026-10-04 05:39:08"
+    },
+    {
+      "rank": 10,
+      "team_name": "markintell",
+      "score": "34.21",
+      "team_id": 16905303,
+      "submission_date": "2026-10-04 06:50:14"
+    }
+  ],
+  "gemma_4_developer_agent": [
+    {
+      "rank": 1,
+      "team_name": "????????? ?????? ??????? ? ???",
+      "score": "0.24",
+      "team_id": 16948405,
+      "submission_date": "2026-10-04 07:55:43"
+    },
+    {
+      "rank": 2,
+      "team_name": "Statistical Science by Lasme",
+      "score": "0.17",
+      "team_id": 16950258,
+      "submission_date": "2026-10-04 10:02:18"
+    },
+    {
+      "rank": 3,
+      "team_name": "Anh Nguyen Duong",
+      "score": "0.17",
+      "team_id": 17017549,
+      "submission_date": "2026-10-03 05:17:55"
+    },
+    {
+      "rank": 4,
+      "team_name": "Reiji Kobayashi",
+      "score": "0.17",
+      "team_id": 17019429,
+      "submission_date": "2026-10-04 05:40:50"
+    },
+    {
+      "rank": 5,
+      "team_name": "Kirill Labzin",
+      "score": "0.17",
+      "team_id": 16992887,
+      "submission_date": "2026-10-04 00:00:01"
+    },
+    {
+      "rank": 6,
+      "team_name": "Bardia Bahadori",
+      "score": "0.17",
+      "team_id": 17014863,
+      "submission_date": "2026-10-03 04:05:31"
+    },
+    {
+      "rank": 7,
+      "team_name": "youchy",
+      "score": "0.17",
+      "team_id": 16975243,
+      "submission_date": "2026-10-04 07:23:00"
+    },
+    {
+      "rank": 8,
+      "team_name": "Makus",
+      "score": "0.15",
+      "team_id": 16953627,
+      "submission_date": "2026-10-04 04:38:52"
+    },
+    {
+      "rank": 9,
+      "team_name": "sergiomalv",
+      "score": "0.15",
+      "team_id": 16957317,
+      "submission_date": "2026-10-04 00:12:25"
+    },
+    {
+      "rank": 10,
+      "team_name": "GopiPitchai",
+      "score": "0.15",
+      "team_id": 16977789,
+      "submission_date": "2026-09-29 00:14:22"
+    }
+  ]
+}
