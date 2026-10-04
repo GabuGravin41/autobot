@@ -43,9 +43,25 @@
 | **Exp 4** | `daltongabrielomondi/autobot-rsna-knee-exp4-ryokucha-0946-sota` | Quintuple DINOv2-Raptor-DepthZone Blend SOTA | CoAtNet D4 SWA + DINOv2 (20 tails) + RadImageNet | 2xT4 GPU | **STAGED** | 0.965 | Target **`0.946`** (Rank ~#350) |
 | **Exp 5** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Architecture Baseline Check | Mock Feature Forward Pass | 2xT4 GPU | **COMPLETE** | 0.500 | **`0.501`** (`Ref 56803482`) |
 | **Exp 5.1** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` | Knee-ACT Full Multi-Backbone + Triad Coupling | 4x CoAtNet + DINOv2 + Rad + Biomechanical Triad | 2xT4 GPU | **COMPLETE** | 0.963 | **`0.943`** (`Ref 56804077`) |
-| **Exp 6** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` (v4) | 0.946 Consensus SOTA (Fracture Retention + Unoverfit CoAtNet) | 4x CoAtNet + DINOv2 + RadImageNet + Raptor | 2xT4 GPU | **EVALUATING** | 0.968 | Target **`0.946`** (`Ref 56810220`) (Rank ~#350) |
+| **Exp 6** | `daltongabrielomondi/autobot-rsna-knee-exp5-knee-act-sota` (v4) | 0.946 Consensus SOTA (Fracture Retention + Unoverfit CoAtNet) | 4x CoAtNet + DINOv2 + RadImageNet + Raptor | 2xT4 GPU | **COMPLETE** | 0.968 | **`0.943`** (`Ref 56810220`) (Tied Rank #442) |
 
 ---
+
+## 2.1 Autopsy of the 0.943 Tie Wall (~940 Teams Clustered)
+1. **The Shared Weights Ceiling**:
+   - `yamadan96` (author of `rsna-knee-d4-public0946`) officially documented:
+     > *"The 0946 in this notebook's URL is inherited from the parent's name and overstates what the public pipeline alone achieves... The parent notebook reaches 0.946 by blending in its author's private ConvNeXt ensemble at 10%. That component is not attached in the public metadata, so without it the remaining public pipeline measures 0.943."*
+   - Modifying post-hoc weights of the shared CoAtNet + DINOv2 + RadImageNet models cannot escape `0.943` because all 940 teams evaluate identical feature representations.
+2. **The Metric Pathological Defect: Probability Mean vs Rank Mean**:
+   - Macro ROC-AUC evaluates *only* relative orderings of positive vs negative cases within each target.
+   - Naive probability averaging allows models with wider numerical logit spread to dominate the sum, suppressing more accurate signals from models with tighter logit distributions.
+   - **The StarKhushi Unlock (`rank-mean-ensembling`)**:
+     $$\text{Rank}(P_{ij}) = \frac{\text{rankdata}(P_{ij})}{N}$$
+     Averaging rank percentiles across models prevents calibration mismatch and provides **+0.003 to +0.015 AUC gain** for free.
+3. **The Roadmap to 0.946 - 0.952+ (Exp 7)**:
+   - Combine the public CoAtNet D4/DepthZone/Global96 + DINOv2 ensemble with our Knee-ACT feature routing via **Rank-Mean Ensembling**.
+   - Incorporate orientation-safe TTA (slice window jitter $\pm 1$, intensity window shift) without horizontal flip (which swaps laterality).
+
 
 ## 3. Experiment 1 Architecture: Tri-Backbone Foundation Ensemble
 1. **Anatomical Slot Alignment**:
