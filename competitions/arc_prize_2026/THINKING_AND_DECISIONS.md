@@ -66,7 +66,8 @@
 - **Kernel Slug**: `daltongabrielomondi/autobot-arc3-exp4-keith-budgetfill-sota`
 - **Submission ID**: **`56815799`**
 - **Date Submitted**: `2026-10-04 06:06:23 UTC`
-- **Status**: `SubmissionStatus.PENDING`
+- **Status**: **`SubmissionStatus.COMPLETE`**
+- **Official Public Score**: **`2.55%`**
 - **Model**: `keithtyser/qwen3-8-flash-next-nvfp4/PyTorch/radixark-modelopt-fp4/1`
 - **Machine**: `NvidiaRtxPro6000` (Blackwell 96GB GPU).
 - **Core Engineering Restorations & Enhancements**:
@@ -75,5 +76,8 @@
   3. **Dynamic Per-Game Budget Fill**:
      - Formulated: `allocated_per_game = max(7920.0, (32400 - elapsed - 1500) / waves)`
      - Dynamically expands per-game solving budgets from 2.2 hours up to 7+ hours across available games within the 9-hour runtime ceiling.
-  4. **Target Benchmark**: **`8.62% - 11.00%`** (Top 15 on ARC-AGI-3 Leaderboard).
+- **Autopsy & Key Finding**:
+  - Without Scott Le Grand's `AGENTFIX_IMAGES=1` (image deduplication), raw base64 images rapidly flooded the 32K context after 25+ actions, causing token thrashing.
+  - Dynamic budget fill allowed early stubborn puzzles to consume up to 4 hours, starving downstream solvable games.
+  - **Best Confirmed Architecture Remains Exp 3 (`4.04%`, Rank #711, Top 10% tier)**.
 
