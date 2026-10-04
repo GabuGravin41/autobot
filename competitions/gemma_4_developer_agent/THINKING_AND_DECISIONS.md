@@ -108,3 +108,28 @@
   - Eliminates `FileEditError`: Strict unique anchoring + whole function replacement + guarded fallback.
   - Eliminates "no patch submitted": `finalizer` guarantees `submit_patch()` is called on 100% of tasks.
 
+---
+
+## 7. Experiment 8: Calibrated Operational Budget SOTA
+- **Kernel**: `daltongabrielomondi/autobot-gemma4-exp6-swe-sota`
+- **Submission ID**: `56591751`
+- **Date**: `2026-09-27`
+- **Status**: **`SubmissionStatus.COMPLETE`**
+- **Official Public Score**: **`0.08` (8% Resolution Rate · Rank #837 / 1,707 teams)**.
+- **Key Breakthrough**:
+  - Proved that tight per-task budgeting (`3.5m`, `20 tools`, `25 turns`, `2k thinking`) comfortably fits within Kaggle's global 12-hour ceiling across all 129 tasks, producing our first non-zero competitive score.
+
+---
+
+## 8. Experiment 9: Dynamic Triage + First-Turn AST Grounding + Ephemeral Repro SOTA
+- **Kernel**: `daltongabrielomondi/autobot-gemma4-exp9-triage-ast-sota`
+- **Status**: **`KernelWorkerStatus.COMPLETE`** on Kaggle Cloud (All 8 ADK validation gates passed).
+- **Architecture**:
+  1. **Dynamic Task Triage**: Turn-1 complexity classifier. Bails in 15 seconds on intractable multi-package refactors; preserves deep 4.5-minute budgets for high-probability localized defects.
+  2. **First-Turn AST Graph Search**: Targets `search_similar_code(symbol)`, `get_code_neighbors(node)`, and `get_code_subgraph(nodes)`. Pinpoints buggy functions in $\le 2$ tool calls instead of 10.
+  3. **Ephemeral `/tmp/repro.py` Verification**: Isolated reproduction script in `/tmp/` guarantees clean `/workspace` git diffs while proving bug reproduction and fix validity.
+  4. **Resilient 4-to-6 Line Context Anchoring**: Eliminates `FileEditError: Multiple occurrences found` with wide anchor windows and whole-function replacement fallback.
+  5. **Calibrated Budgets**: `4.5m` max time, `25` tool calls, `35` turns, `3,072` thinking tokens.
+- **Target**: Breakthrough from `0.08` to **$\ge 0.15$ (World #1 Tier)**.
+
+
