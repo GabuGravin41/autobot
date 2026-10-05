@@ -36,8 +36,8 @@
       {
         "ref": 56836354,
         "date": "2026-10-05 00:01:49.090000",
-        "status": "SubmissionStatus.PENDING",
-        "public_score": null,
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.942",
         "error_description": "",
         "description": "Autobot RSNA Knee Exp 10: ViT Consensus + Medical VLM Clinical Arbiter SOTA"
       },

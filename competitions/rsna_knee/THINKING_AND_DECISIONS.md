@@ -131,3 +131,20 @@
 4. **Symmetric Rank-Mean Gated Blend**:
    - Blends 85% ViT Consensus + 15% Clinical Reasoning Refinement using symmetric percentile ranking.
    - Fallback-safe: If any component stumbles, it defaults seamlessly to the pure ViT consensus.
+5. **Empirical Leaderboard Result**:
+   - **Score**: **`0.942`** public Macro ROC-AUC (Ref `56836354`, completed 2026-10-05 08:24 UTC).
+   - **Verified Leaderboard Standing**: **Rank #434** / 5,193 teams worldwide.
+   - Proved that Medical VLM arbiters can be integrated into high-ranking ViT pipelines without collapsing the baseline metric (0.505 in pure VLM -> 0.942 in production hybrid).
+
+---
+
+## 8. Experiment 11 Planned Architecture: Decoupled Plane-Specialized Heads
+Synthesizing findings from `rsna-knee-view-specialization-probe` (completed on Kaggle GPU) and pseudo-label extraction across 4,407 radiology reports:
+1. **Plane Decoupling**:
+   - **Sagittal Head**: Specializes exclusively in `ACL`, `Bone Contusion`, `Fracture`.
+   - **Coronal Head**: Specializes in `MCL`, `Medial Meniscus`, `Lateral Meniscus`, `Medial OA`, `Lateral OA`.
+   - **Axial Head**: Specializes in `PF OA`, `Effusion`, `Synovitis`, `Baker's Cyst`.
+2. **Semi-Supervised Pretraining**:
+   - Pretrained on weak supervision pseudo-labels (`daltongabrielomondi/rsna-knee-weak-supervision-pseudo-labels`) before fine-tuning on the 58 gold-standard cases.
+3. **Target**: Advance from `0.943` to $\ge 0.955$ (Top-50 Global Tier).
+
