@@ -122,8 +122,8 @@
       {
         "ref": 56836290,
         "date": "2026-10-05 00:01:21.253000",
-        "status": "SubmissionStatus.PENDING",
-        "public_score": null,
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "2.62",
         "error_description": "",
         "description": "Autobot ARC3 Exp 5: Balanced AgentFix SOTA (16K ctx, 16 seq, FlashNext MTP 3)"
       },
