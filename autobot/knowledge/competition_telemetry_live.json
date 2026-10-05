@@ -187,8 +187,16 @@
   },
   "gemma_4_developer_agent": {
     "slug": "gemma-4-developer-agent",
-    "total_submissions": 3,
+    "total_submissions": 4,
     "submissions": [
+      {
+        "ref": 56838874,
+        "date": "2026-10-05 01:21:18.227000",
+        "status": "SubmissionStatus.PENDING",
+        "public_score": null,
+        "error_description": "",
+        "description": "Autobot Exp 9: Dynamic Triage + First-Turn AST Grounding + Ephemeral Repro SOTA"
+      },
       {
         "ref": 56591751,
         "date": "2026-09-27 00:00:40.453000",
