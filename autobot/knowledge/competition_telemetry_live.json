@@ -1,8 +1,16 @@
 {
   "enveda_casmi": {
     "slug": "enveda-CASMI26-molecule-id-mass-spectra",
-    "total_submissions": 2,
+    "total_submissions": 3,
     "submissions": [
+      {
+        "ref": 56840341,
+        "date": "2026-10-05 02:42:59.050000",
+        "status": "SubmissionStatus.PENDING",
+        "public_score": null,
+        "error_description": "",
+        "description": "Autobot CASMI V45 Natural Product Knowledge SOTA"
+      },
       {
         "ref": 56811892,
         "date": "2026-10-04 02:22:20.917000",
