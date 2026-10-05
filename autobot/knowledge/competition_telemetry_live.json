@@ -6,8 +6,8 @@
       {
         "ref": 56840341,
         "date": "2026-10-05 02:42:59.050000",
-        "status": "SubmissionStatus.PENDING",
-        "public_score": null,
+        "status": "SubmissionStatus.COMPLETE",
+        "public_score": "0.417",
         "error_description": "",
         "description": "Autobot CASMI V45 Natural Product Knowledge SOTA"
       },
