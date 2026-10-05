@@ -23,8 +23,16 @@
   },
   "rsna_knee": {
     "slug": "rsna-knee-abnormality-detection",
-    "total_submissions": 9,
+    "total_submissions": 10,
     "submissions": [
+      {
+        "ref": 56836354,
+        "date": "2026-10-05 00:01:49.090000",
+        "status": "SubmissionStatus.PENDING",
+        "public_score": null,
+        "error_description": "",
+        "description": "Autobot RSNA Knee Exp 10: ViT Consensus + Medical VLM Clinical Arbiter SOTA"
+      },
       {
         "ref": 56827089,
         "date": "2026-10-04 14:59:14.193000",
@@ -101,8 +109,16 @@
   },
   "arc_prize_2026": {
     "slug": "arc-prize-2026-arc-agi-3",
-    "total_submissions": 8,
+    "total_submissions": 9,
     "submissions": [
+      {
+        "ref": 56836290,
+        "date": "2026-10-05 00:01:21.253000",
+        "status": "SubmissionStatus.PENDING",
+        "public_score": null,
+        "error_description": "",
+        "description": "Autobot ARC3 Exp 5: Balanced AgentFix SOTA (16K ctx, 16 seq, FlashNext MTP 3)"
+      },
       {
         "ref": 56815799,
         "date": "2026-10-04 06:06:23.587000",
