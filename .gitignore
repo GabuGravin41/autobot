@@ -45,6 +45,8 @@ Thumbs.db
 # Logs and run output
 *.log
 runs/
+*output/
+*output*/
 
 # Playwright/browser automation artifacts
 playwright-report/

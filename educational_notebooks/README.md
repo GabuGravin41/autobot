@@ -1,28 +1,35 @@
-# Cutting-Edge AI Mathematical Breakthroughs: 10 Educational Notebooks
+# Visual Machine Learning: 20 Foundational Educational Kaggle Notebooks
+### Author: Dalton Gabriel Omondi | Platform: Kaggle (Public Notebook Series)
 
-A curated curriculum of 10 publication-grade interactive Jupyter Notebooks dissecting the latest mathematical, algorithmic, and architectural breakthroughs in modern Deep Learning and Large Language Models.
-
----
-
-## Curriculum Overview
-
-| # | Notebook | Core Mathematical Concepts | Key Equations / Theorems |
-|---|---|---|---|
-| **01** | [`01_deepseek_mla_and_auxiliary_loss_free_moe.ipynb`](./01_deepseek_mla_and_auxiliary_loss_free_moe.ipynb) | Multi-Head Latent Attention (MLA), KV Compression, Decoupled RoPE, Auxiliary-Loss-Free MoE Load Balancing | $\mathbf{c}_t^{KV} = W^{DKV} \mathbf{h}_t$, $e_{i,t} = \text{TopK}(\mathbf{s}_t + \mathbf{b}_t)$ |
-| **02** | [`02_test_time_compute_and_grpo_reasoning.ipynb`](./02_test_time_compute_and_grpo_reasoning.ipynb) | Test-Time Compute Scaling, Group Relative Policy Optimization (GRPO), Critic-Free RL, Reasoning Tokens | $\hat{A}_i = \frac{r_i - \mu_G}{\sigma_G + \epsilon}$, $\mathcal{J}_{\text{GRPO}}(\theta)$ |
-| **03** | [`03_mamba2_state_space_duality.ipynb`](./03_mamba2_state_space_duality.ipynb) | State Space Duality (SSD), Continuous SSMs to 1-D Masked Attention, Semi-Separable Matrices, Block-Decomposition | $M_{j,i} = C_j \left(\prod_{k=i+1}^j A_k\right) B_i$, $Y = (M \circ (Q K^T)) V$ |
-| **04** | [`04_flashattention3_and_fp8_math.ipynb`](./04_flashattention3_and_fp8_math.ipynb) | Hardware-Aware Tiling, FP8 (E4M3 vs E5M2) Dynamic Scaling, Asynchronous Tensor Core Pipelines, Warp Specialization | $L_i = \max(L_{i-1}, M_i) + \log(e^{L_{i-1} - \dots} + \dots)$ |
-| **05** | [`05_flow_matching_and_rectified_flows.ipynb`](./05_flow_matching_and_rectified_flows.ipynb) | Continuous Normalizing Flows, Rectified Flow ODEs, Optimal Transport Vector Fields, Straight-Trajectory Simulation | $\psi_t(x_0, x_1) = (1-t)x_0 + t x_1$, $v_t = x_1 - x_0$ |
-| **06** | [`06_representation_engineering_steering_vectors.ipynb`](./06_representation_engineering_steering_vectors.ipynb) | Contrastive Activation Addition (CAA), Steering Vectors, Concept Direction Extraction, Linear Subspace Control | $\mathbf{v}_{\text{steer}} = \frac{1}{|P|}\sum h_p - \frac{1}{|N|}\sum h_n$ |
-| **07** | [`07_direct_preference_optimization_dpo_math.ipynb`](./07_direct_preference_optimization_dpo_math.ipynb) | Closed-Form Bradley-Terry Optimization, Implicit Reward Re-parameterization, Reference Policy Regularization | $\mathcal{L}_{\text{DPO}} = -\log \sigma \left( \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)} \right)$ |
-| **08** | [`08_rope_scaling_and_yarn_long_context.ipynb`](./08_rope_scaling_and_yarn_long_context.ipynb) | Rotary Position Embedding (RoPE), NTK-Aware Interpolation, YaRN (Yet another RoPE extensioN), Attention Temperature Ramp | $\theta_i' = \theta_i \cdot s^{-d/(d-2)}$, $\lambda(r) = \text{ramp}(r)$ |
-| **09** | [`09_dinov2_self_supervised_vision_foundations.ipynb`](./09_dinov2_self_supervised_vision_foundations.ipynb) | Self-Distillation with No Labels (DINO), Swapped Cross-Entropy, Vision Transformer Register Tokens, Patch Invariance | $\mathcal{L}_{\text{DINO}} = - \sum p_t \log p_s$, $p(z) = \text{softmax}(z / \tau)$ |
-| **10** | [`10_sparse_autoencoders_mechanistic_interpretability.ipynb`](./10_sparse_autoencoders_mechanistic_interpretability.ipynb) | Linear Representation Hypothesis, Superposition Resolution, Monosemantic Dictionary Learning, L1 / TopK Sparsity | $\mathcal{L} = \|x - \hat{x}\|_2^2 + \lambda \|f\|_1$, $\hat{x} = W_{\text{dec}} f + b_{\text{dec}}$ |
+This 20-part foundational curriculum is live on Kaggle. Each notebook teaches a core technique from competitive ML (inspired by RSNA Knee MRI, Enveda Mass Spectrometry, ARC Prize AGI, and tabular/vision engineering) with visual plotting.
 
 ---
 
-## Structure & Methodology
-Every notebook is engineered according to three strict standards:
-1. **Mathematical Rigor**: Derivations from first principles with full LaTeX mathematical proofs.
-2. **From-Scratch PyTorch Implementations**: Zero black-box dependencies; every core layer, forward pass, and loss function is implemented directly in pure PyTorch and NumPy.
-3. **Reproducible Numerical Experiments**: Standalone verification blocks demonstrating tensor shape transformations, numerical stability, and optimization behavior.
+## Complete Live Kaggle Notebook Directory
+
+| Part | Notebook Title | Core Concept | Live Kaggle Link |
+| :---: | :--- | :--- | :--- |
+| **01** | Visual ML: 3-Plane MRI Volume Visualizer | 3D Volumetric Imaging (Sagittal, Coronal, Axial) | [kaggle.com/.../visual-ml-3-plane-mri-volume-visualizer](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-3-plane-mri-volume-visualizer) |
+| **02** | Visual ML: Mass Spectrometry Peak Processing | Spectroscopy: Peak Centroiding & Sqrt Scaling | [kaggle.com/.../visual-ml-mass-spectrometry-peak-processing](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-mass-spectrometry-peak-processing) |
+| **03** | Visual ML: ARC Grid Symmetry Visualizer | ARC Few-Shot AGI: Dihedral $D_4$ Symmetry & Colors | [kaggle.com/.../visual-ml-arc-grid-symmetry-visualizer](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-arc-grid-symmetry-visualizer) |
+| **04** | Visual ML: DICOM Windowing and HU Scaling | Dynamic Range: Soft Tissue vs. Bone Windows | [kaggle.com/.../visual-ml-dicom-windowing-and-hu-scaling](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-dicom-windowing-and-hu-scaling) |
+| **05** | Visual ML: Medical Image Augmentations | Radiologic Augmentations (Affine, Noise, Blur) | [kaggle.com/.../visual-ml-medical-image-augmentations](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-medical-image-augmentations) |
+| **06** | Visual ML: Multilabel Imbalance & Focal Loss | Loss Dynamics: Down-weighting Easy Negatives | [kaggle.com/.../visual-ml-multilabel-imbalance-and-focal-loss](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-multilabel-imbalance-and-focal-loss) |
+| **07** | Visual ML: Grad-CAM and Attention Maps | Model Interpretability: Visual Heatmap Overlays | [kaggle.com/.../visual-ml-grad-cam-and-attention-maps](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-grad-cam-and-attention-maps) |
+| **08** | Visual ML: Molecular Fingerprints and Tanimoto | Cheminformatics: ECFP/Morgan Bit Overlap | [kaggle.com/.../visual-ml-molecular-fingerprints-and-tanimoto](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-molecular-fingerprints-and-tanimoto) |
+| **09** | Visual ML: 2.5D Slice Stacking for 3D MRI | Adapting 2D Pretrained Backbones to 3D Scans | [kaggle.com/.../visual-ml-2-5d-slice-stacking-for-3d-mri](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-2-5d-slice-stacking-for-3d-mri) |
+| **10** | Visual ML: ROC-AUC and Confusion Matrix | Threshold Sweeps & Metric Invariance | [kaggle.com/.../visual-ml-roc-auc-and-confusion-matrix](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-roc-auc-and-confusion-matrix) |
+| **11** | Visual ML: Out-of-Fold Cross Validation | Leakage Prevention: Patient-Level GroupKFold | [kaggle.com/.../visual-ml-out-of-fold-cross-validation-mastery](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-out-of-fold-cross-validation-mastery) |
+| **12** | Visual ML: Feature Importance and SHAP Values | Feature Attribution: Cooperative Game Theory | [kaggle.com/.../visual-ml-feature-importance-and-shap-values](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-feature-importance-and-shap-values) |
+| **13** | Visual ML: Vision Transformer Patch Tokens | ViT Foundations: Non-Overlapping Patch Grid | [kaggle.com/.../visual-ml-vision-transformer-patch-tokens](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-vision-transformer-patch-tokens) |
+| **14** | Visual ML: Clinical NegEx Scope Parser | Clinical NLP: Negation Window Rule Engines | [kaggle.com/.../visual-ml-clinical-negex-scope-parser](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-clinical-negex-scope-parser) |
+| **15** | Visual ML: Test-Time Augmentation (TTA) | Inference Ensembles: Variance Reduction | [kaggle.com/.../visual-ml-test-time-augmentation-visualizer](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-test-time-augmentation-visualizer) |
+| **16** | Visual ML: Hierarchical Spectral Clustering | Unsupervised Chemical Taxonomy & Dendrograms | [kaggle.com/.../visual-ml-hierarchical-spectral-clustering](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-hierarchical-spectral-clustering) |
+| **17** | Visual ML: Contrastive Learning SimCLR | Self-Supervised Learning: Positive/Negative Pairs | [kaggle.com/.../visual-ml-contrastive-learning-simclr-visualizer](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-contrastive-learning-simclr-visualizer) |
+| **18** | Visual ML: Metric Learning and 2D t-SNE | Latent Space Visualization & Cluster Projections | [kaggle.com/.../visual-ml-metric-learning-and-2d-t-sne](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-metric-learning-and-2d-t-sne) |
+| **19** | Visual ML: Learning Rate Schedulers | Optimization: StepLR vs Cosine vs OneCycleLR | [kaggle.com/.../visual-ml-learning-rate-schedulers-in-practice](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-learning-rate-schedulers-in-practice) |
+| **20** | Visual ML: Model Ensembling & Rank Averaging | Blending: Probability Mean vs Percentile Ranks | [kaggle.com/.../visual-ml-model-ensembling-and-rank-averaging](https://www.kaggle.com/code/daltongabrielomondi/visual-ml-model-ensembling-and-rank-averaging) |
+
+---
+
+*All 20 notebooks are public, fully open-source, and runnable directly on Kaggle with 1 click.*

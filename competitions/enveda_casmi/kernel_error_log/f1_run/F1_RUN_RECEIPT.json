@@ -1,0 +1,77 @@
+{
+  "arm": "F1_v6_glacier_only",
+  "runner": "file-backed cells, owned process group",
+  "change": "V6 cell 3: CFG.FWD_WEIGHTS {'iceberg': 0.0, 'glacier': 1.0}",
+  "status": "HOLD",
+  "config": {
+    "input_root": "/kaggle/input",
+    "work_root": "/kaggle/working",
+    "commit_cap_s": 7130,
+    "rerun_cap_s": 30600,
+    "reserve_s": 150,
+    "require_gpu": true,
+    "require_canary": true,
+    "payload_override": null,
+    "placeholder_sig": "654e030e4173780e945252b4a5adf70b",
+    "v6_visible_csv_prefix": "0d1cad26",
+    "term_grace_s": 30,
+    "kill_grace_s": 15
+  },
+  "official_score": null,
+  "mode": {
+    "is_rerun": false,
+    "env_flag": false,
+    "test_signature": "654e030e4173780e945252b4a5adf70b",
+    "comp_dir": "/kaggle/input/competitions/enveda-CASMI26-molecule-id-mass-spectra",
+    "spectra": 1213
+  },
+  "cap_s": 7130,
+  "gpu": {
+    "ok": true,
+    "gpus": [
+      "GPU 0: Tesla T4 (UUID: GPU-408a2acf-b196-c9ee-4e09-7ec6e85324cf)",
+      "GPU 1: Tesla T4 (UUID: GPU-bc492ec7-13f6-0c6f-f471-d5f27625a5b5)"
+    ],
+    "returncode": 0
+  },
+  "payload": {
+    "sha256": "5cc3bf3e8e42e4400633a8d40ca1f73da9fb3dc3607ab2d509e2b9242e7e7053",
+    "cells": [
+      "v6-cell-02",
+      "v6-cell-03-F1",
+      "v6-cell-04",
+      "v6-cell-05",
+      "v6-cell-07",
+      "v6-cell-08",
+      "v6-cell-11",
+      "v6-cell-13",
+      "v6-cell-15",
+      "v6-cell-16",
+      "v6-cell-18",
+      "v6-cell-19",
+      "v6-cell-20",
+      "v6-cell-27",
+      "v6-cell-29",
+      "v6-cell-30",
+      "f1-commit-canary",
+      "v6-cell-31",
+      "v6-cell-32",
+      "v6-cell-34",
+      "v6-cell-41",
+      "v6-cell-42"
+    ],
+    "v6_source_sha256": "92c4e53a1f15f93b7106f421c0732470f43a14ba6ad1cdbb06a2ae9c87b53b48"
+  },
+  "process": {
+    "pid": 61,
+    "pgid": 61,
+    "own_group": true,
+    "returncode": 1,
+    "timed_out": false,
+    "signals": [],
+    "remaining_members": [],
+    "cleanup_proven": true
+  },
+  "error": "F1Hold('F1 HOLD: payload returncode 1')",
+  "elapsed_s": 7.5
+}

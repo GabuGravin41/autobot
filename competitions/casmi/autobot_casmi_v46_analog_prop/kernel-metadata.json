@@ -1,0 +1,27 @@
+{
+  "id": "daltongabrielomondi/autobot-casmi-v46-analog-propagation-sota",
+  "title": "Autobot CASMI V46 Analog Propagation SOTA",
+  "code_file": "autobot-casmi-v46-analog-prop.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [
+    "prvsiyan/casmi26-fp-models-v2",
+    "prvsiyan/casmi26-forward-reference-stack",
+    "prvsiyan/casmi26-ranker-features",
+    "prvsiyan/coconut-casmi26-candidates",
+    "prvsiyan/pubchem-popularity-counts",
+    "prvsiyan/pubchem-npformula-massindex",
+    "prvsiyan/rdkit-wheel-offline"
+  ],
+  "competition_sources": [
+    "enveda-CASMI26-molecule-id-mass-spectra"
+  ],
+  "kernel_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
+}

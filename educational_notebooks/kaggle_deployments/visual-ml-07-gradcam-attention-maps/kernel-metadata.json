@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-07-gradcam-attention-maps",
+  "title": "Visual ML: Grad-CAM and Attention Maps",
+  "code_file": "07_attention_map_visualizer.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

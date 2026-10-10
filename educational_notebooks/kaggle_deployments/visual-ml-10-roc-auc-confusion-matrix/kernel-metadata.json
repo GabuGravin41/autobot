@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-10-roc-auc-confusion-matrix",
+  "title": "Visual ML: ROC-AUC and Confusion Matrix",
+  "code_file": "10_confusion_matrix_and_roc_auc_deep_dive.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

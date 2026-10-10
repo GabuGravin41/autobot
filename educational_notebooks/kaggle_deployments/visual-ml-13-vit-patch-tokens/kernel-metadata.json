@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-13-vit-patch-tokens",
+  "title": "Visual ML: Vision Transformer Patch Tokens",
+  "code_file": "13_image_patching_and_vision_transformer_basics.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

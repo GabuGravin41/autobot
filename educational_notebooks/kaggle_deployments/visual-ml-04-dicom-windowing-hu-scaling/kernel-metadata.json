@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-04-dicom-windowing-hu-scaling",
+  "title": "Visual ML: DICOM Windowing and HU Scaling",
+  "code_file": "04_dicom_windowing_and_hu_scaling.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

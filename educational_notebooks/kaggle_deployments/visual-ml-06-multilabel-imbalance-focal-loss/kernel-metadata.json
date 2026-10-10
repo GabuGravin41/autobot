@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-06-multilabel-imbalance-focal-loss",
+  "title": "Visual ML: Multilabel Imbalance and Focal Loss",
+  "code_file": "06_multilabel_class_imbalance_strategies.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-15-test-time-augmentation-tta",
+  "title": "Visual ML: Test-Time Augmentation Visualizer",
+  "code_file": "15_test_time_augmentation_tta_visualizer.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

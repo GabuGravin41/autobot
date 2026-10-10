@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-09-mri-2p5d-slice-stacking",
+  "title": "Visual ML: 2.5D Slice Stacking for 3D MRI",
+  "code_file": "09_mri_2p5d_slice_stacking.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

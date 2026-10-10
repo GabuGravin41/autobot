@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-14-clinical-negex-parser",
+  "title": "Visual ML: Clinical NegEx Scope Parser",
+  "code_file": "14_text_report_clinical_negex_parser.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

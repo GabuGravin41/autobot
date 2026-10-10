@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-18-metric-learning-tsne",
+  "title": "Visual ML: Metric Learning and 2D t-SNE",
+  "code_file": "18_metric_learning_and_embeddings_tsne.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

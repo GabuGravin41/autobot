@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-02-mass-spec-peak-processing",
+  "title": "Visual ML: Mass Spectrometry Peak Processing",
+  "code_file": "02_mass_spec_peak_processing.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

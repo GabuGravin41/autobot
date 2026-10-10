@@ -1,0 +1,15 @@
+{
+  "id": "daltongabrielomondi/visual-ml-11-oof-cross-validation-mastery",
+  "title": "Visual ML: Out-of-Fold Cross Validation Mastery",
+  "code_file": "11_out_of_fold_cross_validation_mastery.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "false",
+  "enable_gpu": "false",
+  "enable_tpu": "false",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
